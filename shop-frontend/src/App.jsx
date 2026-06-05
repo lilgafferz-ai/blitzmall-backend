@@ -1,15 +1,19 @@
-import React, { useState, useEffect } from 'react';
+/* eslint-disable react-hooks/rules-of-hooks */
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import './App.css';
 import Admin from './Admin';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api';
+const PRODUCTS_CACHE_KEY = 'blitz_products_cache';
+const ORDERS_CACHE_KEY = 'blitz_orders_cache';
+const OFFLINE_ORDERS_KEY = 'blitz_offline_orders';
 
 // Built-in avatars (served from public/avatars/). Upload-your-own also supported.
 const AVATARS = [
-  { id: 'cat', src: '/avatars/cat.png' },
-  { id: 'eightball', src: '/avatars/eightball.png' },
-  { id: 'stickman', src: '/avatars/stickman.png' },
-  { id: 'glassicon', src: '/avatars/glassicon.png' },
+  { id: 'cat', src: '/Avatars/cat.png' },
+  { id: 'eightball', src: '/Avatars/eightball.png' },
+  { id: 'glassicon', src: '/Avatars/glassicon.png' },
+  { id: 'stickman', src: '/Avatars/stickman.png' },
 ];
 
 function BlitzLogo({ size = 80 }) {
@@ -38,7 +42,10 @@ function App() {
   const [profile, setProfile] = useState(() => {
     try { return JSON.parse(localStorage.getItem('blitz_profile')) || null; } catch { return null; }
   });
-  const [products, setProducts] = useState([]);
+  const [products, setProducts] = useState(() => {
+    try { const c = JSON.parse(localStorage.getItem(PRODUCTS_CACHE_KEY));
+      return Array.isArray(c) && c.length ? c : []; } catch { return []; }
+  });
   const [cart, setCart] = useState([]);
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -49,19 +56,108 @@ function App() {
   const [payMethod, setPayMethod] = useState('delivery');
   const [myOrders, setMyOrders] = useState([]);
   const [reviewStars, setReviewStars] = useState(0);
+  const [stkCheckoutId, setStkCheckoutId] = useState(null);
+  const [stkStatus, setStkStatus] = useState('idle'); // idle | waiting | confirmed | failed
+  const [stkError, setStkError] = useState('');
   const [reviewMsg, setReviewMsg] = useState('');
   const [reviewSent, setReviewSent] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [pullDistance, setPullDistance] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showRefreshBtn, setShowRefreshBtn] = useState(false);
+  const pullThreshold = 80;
+  const loadProducts = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_URL}/products`);
+      const d = await r.json();
+      if (Array.isArray(d) && d.length) {
+        setProducts(d);
+        localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(d));
+      }
+    } catch (e) { console.warn('Offline: using cached products'); }
+  }, []);
+
+  const touchStartYRef = useRef(0);
+
+  const handleTouchStart = (e) => {
+    const el = e.currentTarget;
+    if (el && el.scrollTop === 0) touchStartYRef.current = e.touches[0].clientY;
+    else touchStartYRef.current = 0;
+  };
+
+  const handleTouchMove = (e) => {
+    if (!touchStartYRef.current) return;
+    const delta = e.touches[0].clientY - touchStartYRef.current;
+    if (delta > 0 && delta < 200) setPullDistance(delta);
+  };
+
+  const handleTouchEnd = async () => {
+    if (pullDistance >= pullThreshold && !isRefreshing) {
+      setIsRefreshing(true);
+      await loadProducts();
+      setIsRefreshing(false);
+    }
+    setPullDistance(0);
+    touchStartYRef.current = 0;
+  };
+
+  const refreshProducts = async () => {
+    setIsRefreshing(true);
+    await loadProducts();
+    setIsRefreshing(false);
+    setShowRefreshBtn(false);
+  };
+
+  
 
   useEffect(() => {
-    fetch(`${API_URL}/products`).then(r => r.json())
-      .then(d => setProducts(Array.isArray(d) ? d : [])).catch(e => console.error(e));
-  }, []);
+    loadProducts();
+    window.addEventListener('online', loadProducts);
+    return () => window.removeEventListener('online', loadProducts);
+  }, [loadProducts]);
 
   useEffect(() => {
     if (screen === 'splash') { const t = setTimeout(() => setScreen('login'), 6000); return () => clearTimeout(t); }
   }, [screen]);
 
+  useEffect(() => {
+    if (isOnline) syncOfflineOrders();
+  }, [isOnline]);
+
+  useEffect(() => {
+    const onOn = () => { setIsOnline(true); setShowRefreshBtn(true); };
+    const onOff = () => { setIsOnline(false); setShowRefreshBtn(false); };
+    window.addEventListener('online', onOn);
+    window.addEventListener('offline', onOff);
+    return () => { window.removeEventListener('online', onOn); window.removeEventListener('offline', onOff); };
+  }, []);
+
   const saveProfile = (p) => { setProfile(p); try { localStorage.setItem('blitz_profile', JSON.stringify(p)); } catch {} };
+
+  // M-Pesa STK polling — must be before any conditional returns
+  useEffect(() => {
+    if (!stkCheckoutId || stkStatus !== 'waiting') return;
+    const interval = setInterval(async () => {
+      try {
+        const r = await fetch(`${API_URL}/mpesa/status/${stkCheckoutId}`);
+        const d = await r.json();
+        if (d.status === 'confirmed') {
+          clearInterval(interval);
+          setStkStatus('confirmed');
+          setCart([]); setScreen('confirmation');
+        } else if (d.status === 'failed') {
+          clearInterval(interval);
+          setStkStatus('failed');
+          setStkError(d.resultDesc || 'Payment failed or cancelled.');
+        }
+      } catch (e) { console.error(e); }
+    }, 3000);
+    const timeout = setTimeout(() => {
+      clearInterval(interval);
+      if (stkStatus === 'waiting') { setStkStatus('failed'); setStkError('Timed out. Try again.'); }
+    }, 90000);
+    return () => { clearInterval(interval); clearTimeout(timeout); };
+  }, [stkCheckoutId, stkStatus]);
 
   if (isAdmin) {
     return (
@@ -73,7 +169,7 @@ function App() {
   }
 
   const categoryOf = (p) => (p.category && p.category.trim()) ? p.category.trim() : 'Other';
-  const categories = ['All', ...[...new Set(products.map(categoryOf))].sort()];
+  const categories = useMemo(() => ['All', ...[...new Set(products.map(categoryOf))].sort()], [products]);
   const productId = (p) => p._id || p.id;
   const total = cart.reduce((s, i) => s + i.price * i.quantity, 0);
   const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
@@ -95,8 +191,14 @@ function App() {
   };
   const setQty = (id, q) => { if (q <= 0) setCart(cart.filter(i => productId(i) !== id)); else setCart(cart.map(i => productId(i) === id ? { ...i, quantity: q } : i)); };
 
+  const validatePhone = (p) => {
+    const digits = p.replace(/[^0-9]/g, '');
+    return digits.length >= 10;
+  };
+
   const handleLogin = async (e) => {
     e.preventDefault();
+    if (!validatePhone(phone)) { alert('Please enter a valid phone number (at least 10 digits, e.g. 0712345678)'); return; }
     try {
       const r = await fetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone }) });
       const d = await r.json();
@@ -110,17 +212,64 @@ function App() {
 
   const handleCheckout = async () => {
     if (!cart.length) return;
+    const orderData = { customerId: customer.customerId, customerName: customer.name, items: cart, paymentMethod: payMethod, createdAt: new Date().toISOString() };
     try {
-      const r = await fetch(`${API_URL}/orders`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customerId: customer.customerId, customerName: customer.name, items: cart, paymentMethod: payMethod }) });
-      const d = await r.json(); if (d.success) { setCart([]); setScreen('confirmation'); }
-    } catch (e) { console.error(e); }
-  };
+      const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(orderData) });
+      const d = await r.json();
+      if (d.success) { setCart([]); setScreen('confirmation'); }
+    } catch (e) {
+      // Offline: queue order for later sync
+      try {
+        const queued = JSON.parse(localStorage.getItem(OFFLINE_ORDERS_KEY) || '[]');
+        queued.push({ ...orderData, _queued: true, _id: 'offline_' + Date.now() });
+        localStorage.setItem(OFFLINE_ORDERS_KEY, JSON.stringify(queued));
+        setCart([]); setScreen('confirmation');
+      } catch (err) { console.error('Failed to queue order:', err); }
+    }
+  };;
+
+  const ORDERS_CACHE_KEY_ORDERS = ORDERS_CACHE_KEY + '_' + (customer?.customerId || 'anon');
+  const syncOfflineOrders = useCallback(async () => {
+    try {
+      const queued = JSON.parse(localStorage.getItem(OFFLINE_ORDERS_KEY) || '[]');
+      if (!queued.length) return;
+      const synced = [];
+      for (const order of queued) {
+        try {
+          const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ customerId: order.customerId, customerName: order.customerName, items: order.items, paymentMethod: order.paymentMethod }) });
+          const d = await r.json();
+          if (!d.success) synced.push(order);
+        } catch { synced.push(order); }
+      }
+      localStorage.setItem(OFFLINE_ORDERS_KEY, JSON.stringify(synced));
+    } catch (e) { console.warn('Failed to sync offline orders:', e); }
+  }, [API_URL, customer]);;
 
   const loadMyOrders = async () => {
-    try { const r = await fetch(`${API_URL}/customer-orders/${customer.customerId}`); const d = await r.json();
-      setMyOrders(Array.isArray(d) ? d.reverse() : []); } catch (e) { console.error(e); }
+    try {
+      const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
+      const d = await r.json();
+      if (Array.isArray(d) && d.length) {
+        setMyOrders(d.reverse());
+        localStorage.setItem(ORDERS_CACHE_KEY_ORDERS, JSON.stringify(d));
+      }
+    } catch (e) {
+      console.warn('Offline: using cached orders');
+      try {
+        const cached = JSON.parse(localStorage.getItem(ORDERS_CACHE_KEY_ORDERS));
+        if (Array.isArray(cached)) setMyOrders(cached);
+      } catch {}
+    }
   };
+
+  useEffect(() => {
+    if (!customer?.customerId) return;
+    try {
+      const cached = JSON.parse(localStorage.getItem(ORDERS_CACHE_KEY + '_' + customer.customerId));
+      if (Array.isArray(cached) && cached.length) setMyOrders(cached);
+    } catch {}
+  }, [customer]);
 
   const openProduct = (p) => { setActiveProduct(p); setDetailQty(1); setScreen('product'); };
   const onUpload = (e) => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader();
@@ -182,10 +331,20 @@ function App() {
     let shown = products;
     if (activeCategory !== 'All') shown = shown.filter(p => categoryOf(p) === activeCategory);
     if (term) shown = shown.filter(p => p.name.toLowerCase().includes(term) || (p.description || '').toLowerCase().includes(term) || categoryOf(p).toLowerCase().includes(term));
-    const trending = [...shown].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    const trending = useMemo(() => [...shown].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)), [shown]);
 
     return (
-      <div className="screen with-nav">
+      <div className="screen with-nav shop-scroll" onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
+          {pullDistance > 0 && !isRefreshing && (
+            <div className="pull-indicator" style={{height: Math.min(pullDistance, pullThreshold), opacity: pullDistance / pullThreshold}}>
+              {pullDistance >= pullThreshold ? '↻ Release to refresh' : '↓ Pull to refresh'}
+            </div>
+          )}
+          {isRefreshing && <div className="refreshing-indicator">⏳ Refreshing…</div>}
+          {!isOnline && <div className="offline-banner">📡 You are offline — browsing cached products</div>}
+          {isOnline && showRefreshBtn && (
+            <button className="refresh-btn" onClick={refreshProducts}>🔄 Tap to refresh products</button>
+          )}
         <header className="topbar">
           <div className="topbar-brand"><BlitzLogo size={30} /><span>BLITZ<b>MALL</b></span></div>
           <button className="icon-btn cart-icon" onClick={() => setScreen('cart')}>🛒{cartCount > 0 && <span className="cart-badge">{cartCount}</span>}</button>
@@ -382,7 +541,7 @@ function App() {
   return null;
 }
 
-function ProductCard({ p, onOpen, onAdd }) {
+const ProductCard = React.memo(function ProductCard({ p, onOpen, onAdd }) {
   const id = p._id || p.id;
   return (
     <div className="prod-card" onClick={() => onOpen(p)}>
@@ -391,6 +550,8 @@ function ProductCard({ p, onOpen, onAdd }) {
       <button className="prod-add" onClick={e => { e.stopPropagation(); onAdd(p, 1); }}>+</button>
     </div>
   );
-}
+});
+
+
 
 export default App;

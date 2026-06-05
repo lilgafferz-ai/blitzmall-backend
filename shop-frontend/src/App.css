@@ -7,7 +7,7 @@
   --glow:0 0 18px rgba(255,122,26,.55),0 0 40px rgba(255,45,45,.25);
 }
 *{margin:0;padding:0;box-sizing:border-box;}
-body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;}
+body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);}
 .app-container{min-height:100vh;}
 
 /* SPLASH */
@@ -190,7 +190,7 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
 .bottomnav button.on span{filter:drop-shadow(0 0 8px rgba(255,122,26,.7));}
 .bottomnav .dot{position:absolute;top:-2px;right:-4px;width:8px;height:8px;background:var(--red);border-radius:50%;box-shadow:0 0 8px var(--red);}
 
-.back-to-shop-btn{position:fixed;bottom:20px;left:20px;background:var(--grad);color:#1a0a00;border:none;padding:12px 20px;border-radius:12px;font-weight:700;cursor:pointer;box-shadow:var(--glow);z-index:100;}
+.back-to-shop-btn{position:fixed;bottom:calc(env(safe-area-inset-bottom) + 80px);left:20px;background:var(--grad);color:#1a0a00;border:none;padding:12px 20px;border-radius:12px;font-weight:700;cursor:pointer;box-shadow:var(--glow);z-index:100;}
 
 /* ---------- RESPONSIVE ---------- */
 /* PHONE: left rail becomes a horizontal scrolling strip */
@@ -226,3 +226,31 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
 .review-text{width:100%;background:var(--bg-2);border:1px solid var(--line);border-radius:12px;padding:14px;color:var(--text);font-family:inherit;font-size:1rem;min-height:110px;resize:vertical;margin-bottom:16px;}
 .review-text:focus{outline:none;border-color:var(--orange);}
 .review-box .btn-neon{width:100%;}
+
+/* M-Pesa STK status (customer) */
+.stk-waiting-cust{background:rgba(255,210,74,.12);border:1px solid rgba(255,210,74,.4);color:var(--gold);border-radius:12px;padding:14px;margin-top:8px;font-size:.9rem;text-align:center;}
+.stk-fail-cust{background:rgba(255,45,45,.12);border:1px solid rgba(255,45,45,.4);color:var(--red);border-radius:12px;padding:14px;margin-top:8px;font-size:.9rem;}
+.stk-fail-cust button{background:none;border:none;color:var(--orange);cursor:pointer;text-decoration:underline;margin-left:8px;}
+
+/* Airtel Money (customer) */
+.airtel-box{background:rgba(255,45,45,.08);border:1px solid rgba(255,45,45,.3);border-radius:12px;padding:16px;margin-top:8px;}
+.airtel-box p{color:var(--text);font-size:.9rem;margin-bottom:8px;}
+.airtel-number{font-size:1.4rem;font-weight:800;color:var(--red);letter-spacing:2px;margin:8px 0;}
+.airtel-box small{color:var(--muted);}
+
+.offline-banner { background: linear-gradient(135deg, #ff6b35, #f7931e); color: #fff; text-align: center; padding: 10px 16px; font-weight: 600; font-size: 0.9rem; letter-spacing: 0.3px; position: sticky; top: 0; z-index: 999; animation: slideDown 0.3s ease; }
+@keyframes slideDown { from { transform: translateY(-100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+/* Pull to refresh */
+.pull-indicator { display: flex; align-items: center; justify-content: center; background: var(--bg-2); color: var(--orange); font-weight: 600; font-size: 0.9rem; overflow: hidden; transition: height 0.15s ease; }
+
+.refreshing-indicator { background: rgba(255, 107, 53, 0.1); color: var(--orange); text-align: center; padding: 12px 16px; font-weight: 600; font-size: 0.9rem; animation: pulse 1.2s ease infinite; }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* Refresh button (appears when back online) */
+.refresh-btn { display: block; width: 100%; background: linear-gradient(135deg, #2ecc71, #27ae60); color: #fff; border: none; padding: 12px 16px; font-weight: 700; font-size: 0.9rem; cursor: pointer; transition: transform 0.15s ease, box-shadow 0.15s ease; border-radius: 0 0 12px 12px; }
+.refresh-btn:active { transform: scale(0.98); }
+.refresh-btn:hover { box-shadow: 0 4px 12px rgba(46, 204, 113, 0.4); }
+
+.shop-scroll { overflow-y: auto; -webkit-overflow-scrolling: touch; scroll-behavior: smooth; }
