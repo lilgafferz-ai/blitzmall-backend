@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const MONGO_URI = process.env.MONGODB_URI || 'mongodb+srv://RedMan:21Savage.@cluster0.bbn0afu.mongodb.net/?appName=Cluster0';
+const MONGO_URI = process.env.MONGODB_URI || 'REPLACE_WITH_YOUR_NEW_PASSWORD';
 const client = new MongoClient(MONGO_URI);
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
