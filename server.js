@@ -8,7 +8,8 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const MONGO_URI = process.env.MONGODB_URI || 'REPLACE_WITH_YOUR_NEW_PASSWORD';
+const MONGO_URI = process.env.MONGODB_URI;
+if (!MONGO_URI || !/^mongodb(\+srv)?:\/\//i.test(MONGO_URI)) { throw new Error('MONGODB_URI is missing or invalid'); }
 const client = new MongoClient(MONGO_URI);
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
