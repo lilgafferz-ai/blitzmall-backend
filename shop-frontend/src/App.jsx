@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import Admin from './Admin';
 import ErrorBoundary from './ErrorBoundary';
+import { SplashScreen } from '@capacitor/splash-screen';
 
 const API_URL = process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api';
 const PRODUCTS_CACHE_KEY = 'blitz_products_cache';
@@ -134,6 +135,7 @@ function App() {
   useEffect(() => {
     loadProducts();
     window.addEventListener('online', loadProducts);
+    try { SplashScreen.hide(); } catch {}
     return () => window.removeEventListener('online', loadProducts);
   }, [loadProducts]);
 
