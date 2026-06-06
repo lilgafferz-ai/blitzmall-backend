@@ -48,9 +48,16 @@ function BlitzLogo({ size = 80 }) {
   );
 }
 
+const getAvatarSrc = (src) => {
+  if (!src) return '';
+  if (src.startsWith('data:')) return src;
+  return src.startsWith('/') ? src.substring(1) : src;
+};
+
 function Avatar({ profile, size = 40 }) {
   const st = { width: size, height: size };
-  const src = profile?.photo || (AVATARS.find(x => x.id === profile?.avatarId) || AVATARS[0]).src;
+  const rawSrc = profile?.photo || (AVATARS.find(x => x.id === profile?.avatarId) || AVATARS[0]).src;
+  const src = getAvatarSrc(rawSrc);
   return <img className="avatar" style={st} src={src} alt="me" />;
 }
 
@@ -1409,7 +1416,7 @@ function App() {
           {AVATARS.map(a => (
             <button key={a.id} className={`avatar-pick ${profile?.avatarId === a.id && !profile?.photo ? 'sel' : ''}`}
               onClick={() => saveProfile({ ...(profile || {}), avatarId: a.id, photo: null })}>
-              <img src={a.src} alt={a.id} />
+              <img src={getAvatarSrc(a.src)} alt={a.id} />
             </button>
           ))}
           <label className="avatar-upload">＋<input type="file" accept="image/*" onChange={onUpload} hidden /></label>
