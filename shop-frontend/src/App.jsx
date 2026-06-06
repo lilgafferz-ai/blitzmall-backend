@@ -1,9 +1,9 @@
 /* eslint-disable react-hooks/rules-of-hooks */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
-import Admin from './Admin';
 import ErrorBoundary from './ErrorBoundary';
 import { SplashScreen } from '@capacitor/splash-screen';
+const Admin = React.lazy(() => import('./Admin'));
 
 const API_URL = process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api';
 const PRODUCTS_CACHE_KEY = 'blitz_products_cache';
@@ -56,11 +56,25 @@ function Avatar({ profile, size = 40 }) {
 
 function App() {
   const [isAdmin, setIsAdmin] = useState(false);
-  const [screen, setScreen] = useState('splash');
+  const [screen, setScreen] = useState(() => {
+    try {
+      const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY));
+      return c && c.customerId ? 'welcome' : 'login';
+    } catch {
+      return 'login';
+    }
+  });
   const [customer, setCustomer] = useState(() => {
     try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
   });
-  const [welcomeMsg, setWelcomeMsg] = useState(null);
+  const [welcomeMsg, setWelcomeMsg] = useState(() => {
+    try {
+      const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY));
+      return c && c.customerId ? { name: c.name, returning: true } : null;
+    } catch {
+      return null;
+    }
+  });
   const [profile, setProfile] = useState(() => {
     try { return JSON.parse(localStorage.getItem('blitz_profile')) || null; } catch { return null; }
   });
@@ -156,7 +170,7 @@ function App() {
 
   useEffect(() => {
     if (screen === 'welcome') {
-      const t = setTimeout(() => setScreen('home'), 2500);
+      const t = setTimeout(() => setScreen('home'), 1500);
       return () => clearTimeout(t);
     }
   }, [screen]);
@@ -236,7 +250,17 @@ function App() {
     return (
       <div className="app-container">
         <ErrorBoundary>
-          <Admin />
+          <React.Suspense fallback={
+            <div className="splash welcome-splash">
+              <div className="splash-glow welcome-glow" />
+              <div className="splash-inner welcome-inner">
+                <p className="welcome-sub">Loading Admin Dashboard...</p>
+                <BlitzLogo size={60} />
+              </div>
+            </div>
+          }>
+            <Admin />
+          </React.Suspense>
         </ErrorBoundary>
         <button className="back-to-shop-btn" onClick={() => setIsAdmin(false)}>← Back to Blitz Mall</button>
       </div>
