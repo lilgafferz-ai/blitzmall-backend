@@ -66,10 +66,15 @@ app.get('/api/products', async (req, res) => {
 app.get('/api/admin/products', authenticate, async (req, res) => {
   try { const filter = branchFilter(req); res.json(await products_.find(filter).toArray()); } catch { res.status(500).json({ error: 'Failed' }); }
 });
-app.post('/api/auth', (req, res) => {
+app.post('/api/auth', async (req, res) => {
   const { name, phone } = req.body;
   if (!name || !phone) return res.status(400).json({ error: 'Name and phone required' });
-  res.json({ success: true, customerId: phone, message: `Welcome ${name}!` });
+  try {
+    const existingOrder = await orders_.findOne({ customerId: phone });
+    res.json({ success: true, customerId: phone, returning: !!existingOrder, message: `Welcome ${name}!` });
+  } catch (err) {
+    res.json({ success: true, customerId: phone, returning: false, message: `Welcome ${name}!` });
+  }
 });
 app.post('/api/orders', async (req, res) => {
   const { customerId, items, customerName, paymentMethod } = req.body;
