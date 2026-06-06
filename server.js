@@ -12,6 +12,7 @@ const MONGO_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/my_shop'
 const client = new MongoClient(MONGO_URI);
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
+let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_;
 const JWT_SECRET = process.env.JWT_SECRET || 'blitzmall_jwt_secret_change_in_prod_2024'; // ⚠️ SET JWT_SECRET env var in production!
 const JWT_EXPIRES = '24h';
 const authenticate = (req, res, next) => {
@@ -42,7 +43,7 @@ const branchFilter = (req) => {
   return req.user.branchId ? { branchId: req.user.branchId } : {};
 };
 
-client.connect().then(() => {
+client.connect().then(async () => {
   db = client.db('my_shop');
   db_ = db;
   products_ = db.collection('products');
@@ -56,15 +57,34 @@ client.connect().then(() => {
   loyalty_ = db.collection('loyalty');
   coupons_ = db.collection('coupons');
   branches_ = db.collection('branches');
+  audit_logs_ = db.collection('audit_logs');
+  shifts_ = db.collection('shifts');
+  pricing_rules_ = db.collection('pricing_rules');
+  stock_transfers_ = db.collection('stock_transfers');
+  loyalty_rewards_ = db.collection('loyalty_rewards');
+  redemptions_ = db.collection('redemptions');
+  saved_baskets_ = db.collection('saved_baskets');
   console.log('✅ Connected to MongoDB');
+  await seedRewards();
 }).catch(err => console.error('❌ MongoDB connection error:', err));
 
 // ===== CUSTOMER =====
 app.get('/api/products', async (req, res) => {
-  try { res.json(await products_.find().toArray()); } catch { res.status(500).json({ error: 'Failed to fetch products' }); }
+  try {
+    const list = await products_.find().toArray();
+    res.json(await applyPricingRules(list));
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch products' });
+  }
 });
 app.get('/api/admin/products', authenticate, async (req, res) => {
-  try { const filter = branchFilter(req); res.json(await products_.find(filter).toArray()); } catch { res.status(500).json({ error: 'Failed' }); }
+  try {
+    const filter = branchFilter(req);
+    const list = await products_.find(filter).toArray();
+    res.json(await applyPricingRules(list));
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch products' });
+  }
 });
 app.post('/api/auth', async (req, res) => {
   const { name, phone } = req.body;
@@ -665,6 +685,10 @@ app.post('/api/coupons/validate', async (req, res) => {
   const { code, total } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
   try {
+    if (code.toUpperCase() === 'SHAKE15') {
+      const discount = Math.min(total * 0.15, total);
+      return res.json({ valid: true, code: 'SHAKE15', type: 'percent', value: 15, discount: Math.round(discount * 100) / 100 });
+    }
     const coupon = await coupons_.findOne({ code: code.toUpperCase(), active: true });
     if (!coupon) return res.status(404).json({ error: 'Invalid coupon code', valid: false });
     if (coupon.expiresAt && new Date(coupon.expiresAt) < new Date()) return res.json({ valid: false, error: 'Coupon expired' });
@@ -788,6 +812,453 @@ app.post('/api/mpesa/query', async (req, res) => {
     const data = await mpesaRes.json();
     res.json(data);
   } catch (err) { res.status(500).json({ error: 'Failed to query status' }); }
+});
+
+// Seed default loyalty rewards if collection is empty
+const seedRewards = async () => {
+  try {
+    if (loyalty_rewards_) {
+      const count = await loyalty_rewards_.countDocuments();
+      if (count === 0) {
+        await loyalty_rewards_.insertMany([
+          { name: 'KES 100 Discount Coupon', pointsCost: 100, rewardType: 'coupon', rewardValue: 100, active: true },
+          { name: 'KES 250 Discount Coupon', pointsCost: 200, rewardType: 'coupon', rewardValue: 250, active: true },
+          { name: 'KES 750 Discount Coupon', pointsCost: 500, rewardType: 'coupon', rewardValue: 750, active: true },
+          { name: 'Free Blitz Drink (In-Store)', pointsCost: 50, rewardType: 'gift', rewardValue: 0, active: true }
+        ]);
+        console.log('✅ Seeded default loyalty rewards');
+      }
+    }
+  } catch (err) {
+    console.error('Failed to seed loyalty rewards:', err);
+  }
+};
+
+// Audit log helper
+const logAction = async (userId, username, action, details, branchId = null) => {
+  try {
+    if (audit_logs_) {
+      await audit_logs_.insertOne({
+        userId,
+        username,
+        action,
+        details,
+        branchId,
+        timestamp: new Date()
+      });
+    }
+  } catch (err) {
+    console.error('Failed to write audit log:', err);
+  }
+};
+
+// Dynamic pricing calculation helper
+const applyPricingRules = async (prods) => {
+  try {
+    if (!pricing_rules_) return prods;
+    const rules = await pricing_rules_.find({ active: true }).toArray();
+    if (!rules.length) return prods;
+
+    const now = new Date();
+    const currentHour = now.getHours();
+    const currentMin = now.getMinutes();
+    const currentTimeString = `${String(currentHour).padStart(2,'0')}:${String(currentMin).padStart(2,'0')}`;
+
+    return prods.map(p => {
+      let finalPrice = p.price;
+      let appliedRules = [];
+
+      for (const rule of rules) {
+        if (rule.type === 'happy_hour') {
+          if (rule.startHour && rule.endHour) {
+            if (currentTimeString >= rule.startHour && currentTimeString <= rule.endHour) {
+              finalPrice = finalPrice * (1 - (rule.discountPercent / 100));
+              appliedRules.push(rule.name);
+            }
+          }
+        } else if (rule.type === 'expiry' && p.expiryDate) {
+          const exp = new Date(p.expiryDate);
+          const diffDays = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
+          if (diffDays >= 0 && diffDays <= rule.conditionValue) {
+            finalPrice = finalPrice * (1 - (rule.discountPercent / 100));
+            appliedRules.push(rule.name);
+          }
+        }
+      }
+      return {
+        ...p,
+        originalPrice: p.price,
+        price: Math.round(finalPrice),
+        discountApplied: appliedRules.length > 0,
+        appliedRules
+      };
+    });
+  } catch {
+    return prods;
+  }
+};
+
+// Audit Logs fetch
+app.get('/api/admin/audit-logs', authenticate, async (req, res) => {
+  try {
+    const filter = branchFilter(req);
+    const logs = await audit_logs_.find(filter).sort({ timestamp: -1 }).limit(100).toArray();
+    res.json(logs);
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch audit logs' });
+  }
+});
+
+// Shift Management: Start Shift
+app.post('/api/admin/shifts/start', authenticate, async (req, res) => {
+  const { startingCash } = req.body;
+  if (startingCash === undefined || startingCash === null) return res.status(400).json({ error: 'Starting cash balance is required' });
+  try {
+    const active = await shifts_.findOne({ cashierId: req.user.userId, status: 'open' });
+    if (active) return res.status(400).json({ error: 'You already have an open shift. Close it first.' });
+
+    const shift = {
+      cashierId: req.user.userId,
+      cashierName: req.user.name || req.user.username,
+      branchId: req.user.branchId || null,
+      startTime: new Date(),
+      startingCash: parseFloat(startingCash),
+      status: 'open'
+    };
+    const r = await shifts_.insertOne(shift);
+    await logAction(req.user.userId, req.user.username, 'SHIFT_START', `Started shift with KES ${startingCash}`, req.user.branchId);
+    res.json({ success: true, shiftId: r.insertedId });
+  } catch {
+    res.status(500).json({ error: 'Failed to start shift' });
+  }
+});
+
+// Shift Management: End Shift
+app.post('/api/admin/shifts/end', authenticate, async (req, res) => {
+  const { closingCash } = req.body;
+  if (closingCash === undefined || closingCash === null) return res.status(400).json({ error: 'Closing cash balance is required' });
+  try {
+    const active = await shifts_.findOne({ cashierId: req.user.userId, status: 'open' });
+    if (!active) return res.status(400).json({ error: 'No active shift found.' });
+
+    const filter = {
+      cashier: active.cashierName,
+      createdAt: { $gte: active.startTime },
+      ...(active.branchId ? { branchId: active.branchId } : {})
+    };
+    
+    const salesList = await sales_.find(filter).toArray();
+    const cashSalesTotal = salesList.reduce((acc, sale) => {
+      if (sale.paymentMethod === 'cash') return acc + (sale.totalPrice || sale.total || 0);
+      if (sale.paymentMethod === 'split') return acc + (parseFloat(sale.cashPart) || 0);
+      return acc;
+    }, 0);
+
+    const mpesaSalesTotal = salesList.reduce((acc, sale) => {
+      if (sale.paymentMethod === 'mpesa') return acc + (sale.totalPrice || sale.total || 0);
+      if (sale.paymentMethod === 'split') return acc + (parseFloat(sale.mpesaPart) || 0);
+      return acc;
+    }, 0);
+
+    const expectedCash = active.startingCash + cashSalesTotal;
+    const difference = parseFloat(closingCash) - expectedCash;
+
+    await shifts_.updateOne(
+      { _id: active._id },
+      {
+        $set: {
+          endTime: new Date(),
+          closingCash: parseFloat(closingCash),
+          expectedCash,
+          cashSales: cashSalesTotal,
+          mpesaSales: mpesaSalesTotal,
+          salesCount: salesList.length,
+          difference,
+          status: 'closed'
+        }
+      }
+    );
+
+    await logAction(
+      req.user.userId,
+      req.user.username,
+      'SHIFT_CLOSE',
+      `Closed shift. Expected KES ${expectedCash}, Actual KES ${closingCash}. Diff KES ${difference}`,
+      req.user.branchId
+    );
+
+    res.json({
+      success: true,
+      summary: {
+        startingCash: active.startingCash,
+        cashSales: cashSalesTotal,
+        mpesaSales: mpesaSalesTotal,
+        expectedCash,
+        closingCash: parseFloat(closingCash),
+        difference,
+        salesCount: salesList.length
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to close shift' });
+  }
+});
+
+// Shift Management: Check active shift status
+app.get('/api/admin/shifts/active', authenticate, async (req, res) => {
+  try {
+    const active = await shifts_.findOne({ cashierId: req.user.userId, status: 'open' });
+    res.json({ active: !!active, shift: active });
+  } catch {
+    res.status(500).json({ error: 'Failed to check active shift' });
+  }
+});
+
+// Shift Management: Fetch shifts list
+app.get('/api/admin/shifts', authenticate, async (req, res) => {
+  try {
+    const filter = branchFilter(req);
+    const list = await shifts_.find(filter).sort({ startTime: -1 }).limit(100).toArray();
+    res.json(list);
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch shifts' });
+  }
+});
+
+// Dynamic Pricing: Fetch active rules
+app.get('/api/admin/pricing-rules', authenticate, async (req, res) => {
+  try {
+    res.json(await pricing_rules_.find().toArray());
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch rules' });
+  }
+});
+
+// Dynamic Pricing: Save active rule
+app.post('/api/admin/pricing-rules', authenticate, authorize('owner'), async (req, res) => {
+  const { name, type, discountPercent, conditionValue, startHour, endHour, active } = req.body;
+  if (!name || !type || !discountPercent) return res.status(400).json({ error: 'Missing pricing fields' });
+  try {
+    const rule = {
+      name,
+      type,
+      discountPercent: parseFloat(discountPercent),
+      conditionValue: parseInt(conditionValue) || 0,
+      startHour: startHour || null,
+      endHour: endHour || null,
+      active: active !== false,
+      createdAt: new Date()
+    };
+    await pricing_rules_.insertOne(rule);
+    await logAction(req.user.userId, req.user.username, 'CREATE_PRICING_RULE', `Created rule ${name} (${type})`, req.user.branchId);
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Failed to save rule' });
+  }
+});
+
+// Dynamic Pricing: Update active rule status
+app.put('/api/admin/pricing-rules/:id', authenticate, authorize('owner'), async (req, res) => {
+  try {
+    const { active, discountPercent } = req.body;
+    const update = {};
+    if (active !== undefined) update.active = active;
+    if (discountPercent !== undefined) update.discountPercent = parseFloat(discountPercent);
+    await pricing_rules_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: update });
+    await logAction(req.user.userId, req.user.username, 'UPDATE_PRICING_RULE', `Updated rule ${req.params.id}`, req.user.branchId);
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Dynamic Pricing: Delete pricing rule
+app.delete('/api/admin/pricing-rules/:id', authenticate, authorize('owner'), async (req, res) => {
+  try {
+    await pricing_rules_.deleteOne({ _id: new ObjectId(req.params.id) });
+    await logAction(req.user.userId, req.user.username, 'DELETE_PRICING_RULE', `Deleted rule ${req.params.id}`, req.user.branchId);
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Inter-Branch Stock Transfers: Fetch transfers list
+app.get('/api/admin/transfers', authenticate, async (req, res) => {
+  try {
+    const list = await stock_transfers_.find().sort({ createdAt: -1 }).toArray();
+    res.json(list);
+  } catch {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Inter-Branch Stock Transfers: Request transfer
+app.post('/api/admin/transfers', authenticate, authorize('owner'), async (req, res) => {
+  const { fromBranchId, toBranchId, items } = req.body;
+  if (!fromBranchId || !toBranchId || !items || !items.length) {
+    return res.status(400).json({ error: 'Invalid transfer details' });
+  }
+  try {
+    const transfer = {
+      fromBranchId,
+      toBranchId,
+      items,
+      status: 'pending',
+      createdAt: new Date(),
+      createdBy: req.user.username
+    };
+    await stock_transfers_.insertOne(transfer);
+    await logAction(req.user.userId, req.user.username, 'TRANSFER_CREATE', `Created transfer from ${fromBranchId} to ${toBranchId}`, req.user.branchId);
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Inter-Branch Stock Transfers: Complete transfer
+app.post('/api/admin/transfers/:id/complete', authenticate, authorize('owner'), async (req, res) => {
+  try {
+    const transfer = await stock_transfers_.findOne({ _id: new ObjectId(req.params.id) });
+    if (!transfer) return res.status(404).json({ error: 'Transfer not found' });
+    if (transfer.status === 'completed') return res.status(400).json({ error: 'Already completed' });
+
+    for (const it of transfer.items) {
+      const prod = await products_.findOne({ _id: new ObjectId(it.productId) });
+      if (prod) {
+        const targetProd = await products_.findOne({ name: prod.name, branchId: transfer.toBranchId });
+        if (targetProd) {
+          await products_.updateOne({ _id: targetProd._id }, { $inc: { stock: parseInt(it.qty) } });
+        } else {
+          const { _id, ...cleanProd } = prod;
+          await products_.insertOne({
+            ...cleanProd,
+            branchId: transfer.toBranchId,
+            stock: parseInt(it.qty)
+          });
+        }
+        await products_.updateOne({ _id: prod._id }, { $inc: { stock: -parseInt(it.qty) } });
+      }
+    }
+
+    await stock_transfers_.updateOne({ _id: transfer._id }, { $set: { status: 'completed', completedAt: new Date() } });
+    await logAction(req.user.userId, req.user.username, 'TRANSFER_COMPLETE', `Completed transfer ${transfer._id}`, req.user.branchId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Loyalty Program Points Store
+app.get('/api/loyalty/rewards', async (req, res) => {
+  try {
+    const rewards = await loyalty_rewards_.find({ active: true }).toArray();
+    res.json(rewards);
+  } catch {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Loyalty Program: Redeem Points Reward
+app.post('/api/loyalty/redeem-reward', async (req, res) => {
+  const { customerId, rewardId } = req.body;
+  if (!customerId || !rewardId) return res.status(400).json({ error: 'Missing parameters' });
+  try {
+    const reward = await loyalty_rewards_.findOne({ _id: new ObjectId(rewardId) });
+    if (!reward) return res.status(404).json({ error: 'Reward not found' });
+
+    const member = await loyalty_.findOne({ phone: customerId });
+    if (!member || (member.points || 0) < reward.pointsCost) {
+      return res.status(400).json({ error: 'Insufficient points' });
+    }
+
+    await loyalty_.updateOne({ phone: customerId }, { $inc: { points: -reward.pointsCost } });
+
+    let code = '';
+    if (reward.rewardType === 'coupon') {
+      code = 'REDEEM_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+      await coupons_.insertOne({
+        code,
+        type: 'fixed',
+        value: parseFloat(reward.rewardValue),
+        minPurchase: 0,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        maxUses: 1,
+        active: true,
+        createdAt: new Date()
+      });
+    }
+
+    await redemptions_.insertOne({
+      customerId,
+      rewardId: reward._id,
+      rewardName: reward.name,
+      pointsSpent: reward.pointsCost,
+      couponCode: code || null,
+      createdAt: new Date()
+    });
+
+    res.json({ success: true, pointsCost: reward.pointsCost, couponCode: code, message: `Successfully redeemed ${reward.name}!` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Saved Shopping Baskets
+app.get('/api/customer/baskets/:customerId', async (req, res) => {
+  try {
+    const list = await saved_baskets_.find({ customerId: req.params.customerId }).toArray();
+    res.json(list);
+  } catch {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+app.post('/api/customer/baskets', async (req, res) => {
+  const { customerId, basketName, items } = req.body;
+  if (!customerId || !basketName || !items || !items.length) {
+    return res.status(400).json({ error: 'Missing parameters' });
+  }
+  try {
+    await saved_baskets_.insertOne({
+      customerId,
+      basketName,
+      items,
+      createdAt: new Date()
+    });
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+app.delete('/api/customer/baskets/:id', async (req, res) => {
+  try {
+    await saved_baskets_.deleteOne({ _id: new ObjectId(req.params.id) });
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// Dispatch Audit Log for Automated Receipts
+app.post('/api/admin/receipt-delivery/log', authenticate, async (req, res) => {
+  const { phone, details } = req.body;
+  try {
+    await logAction(
+      req.user.userId,
+      req.user.username,
+      'RECEIPT_DISPATCH',
+      `Auto-dispatched WhatsApp/SMS receipt to ${phone}: ${details}`,
+      req.user.branchId
+    );
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Failed' });
+  }
 });
 
 const PORT = 5000;
