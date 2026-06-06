@@ -266,3 +266,15 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
 .refresh-btn:hover { box-shadow: 0 4px 12px rgba(46, 204, 113, 0.4); }
 
 .shop-scroll { overflow-y: auto; -webkit-overflow-scrolling: touch; scroll-behavior: smooth; }
+
+/* ===== SHARE SCREEN ===== */
+.share-box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px;display:flex;flex-direction:column;align-items:center;text-align:center;margin:16px;}
+.share-qr-container{background:white;padding:16px;border-radius:12px;margin:20px 0;box-shadow:0 10px 30px rgba(0,0,0,0.35);display:inline-block;border:2px solid var(--line);}
+.share-qr-container img{display:block;width:200px;height:200px;object-fit:contain;}
+.share-link-box{background:var(--bg-2);border:1px dashed var(--line);border-radius:8px;padding:12px;width:100%;font-family:monospace;font-size:0.9rem;word-break:break-all;color:var(--gold);margin-bottom:15px;text-align:center;cursor:pointer;transition:background-color .2s;}
+.share-link-box:hover{background:var(--line);}
+.share-steps{text-align:left;width:100%;font-size:0.9rem;color:var(--muted);margin-top:15px;line-height:1.6;}
+.share-steps h4{color:var(--text);margin-bottom:8px;font-size:0.95rem;font-weight:700;}
+.share-steps ol{padding-left:18px;margin:0;}
+.share-steps li{margin-bottom:6px;}
+

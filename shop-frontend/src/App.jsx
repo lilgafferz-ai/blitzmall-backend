@@ -548,6 +548,7 @@ function App() {
         <h3 className="section-h">Account</h3>
         <button className="row-btn" onClick={() => { loadMyOrders(); setScreen('orders'); }}>📦 My orders<span>›</span></button>
         <button className="row-btn" onClick={() => setScreen('cart')}>🛒 My cart<span>›</span></button>
+        <button className="row-btn" onClick={() => setScreen('share')}>📲 Share / Download App<span>›</span></button>
         <button className="row-btn" onClick={() => { setReviewStars(0); setReviewMsg(''); setReviewSent(false); setScreen('review'); }}>⭐ Rate us / Feedback<span>›</span></button>
         <button className="row-btn danger" onClick={handleLogout}>↩️ Logout<span>›</span></button>
       </div>
@@ -603,6 +604,54 @@ function App() {
       <BottomNav />
     </div>
   );
+
+  // SHARE / DOWNLOAD APP
+  if (screen === 'share') {
+    const apkUrl = 'https://blitzmall-frontend.vercel.app/blitzmall.apk';
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(apkUrl)}`;
+    
+    return (
+      <div className="screen with-nav">
+        <header className="topbar">
+          <button className="icon-btn back" onClick={() => setScreen('profile')}>‹</button>
+          <h2 className="topbar-title">Share App</h2>
+        </header>
+        <div className="scroll">
+          <div className="share-box">
+            <BlitzLogo size={50} />
+            <h3 style={{ marginTop: '12px', marginBottom: '4px', fontFamily: 'Unbounded, sans-serif', fontSize: '1.2rem' }}>Get BlitzMall App</h3>
+            <p className="muted" style={{ fontSize: '0.9rem' }}>Scan this QR code to download the Android APK directly onto your phone.</p>
+            
+            <div className="share-qr-container">
+              <img src={qrUrl} alt="App Download QR Code" />
+            </div>
+
+            <p className="muted" style={{ fontSize: '0.9rem', marginBottom: '8px' }}>Or download directly using this link:</p>
+            <div className="share-link-box" onClick={() => {
+              navigator.clipboard.writeText(apkUrl);
+              alert('Download link copied to clipboard!');
+            }}>
+              {apkUrl}
+            </div>
+            <small style={{ color: 'var(--muted)', fontSize: '0.75rem', display: 'block', marginTop: '-8px', marginBottom: '16px' }}>
+              (Tap link to copy to clipboard)
+            </small>
+
+            <div className="share-steps">
+              <h4>📋 Installation Instructions:</h4>
+              <ol>
+                <li>Scan the QR code or tap the link to download the <strong>blitzmall.apk</strong> file.</li>
+                <li>Open the downloaded file on your Android device.</li>
+                <li>If prompted, allow installation from "Unknown Sources" in your browser/settings.</li>
+                <li>Tap <strong>Install</strong> and follow the prompts to complete setup.</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+        <BottomNav />
+      </div>
+    );
+  }
 
   return null;
 }
