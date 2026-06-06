@@ -306,7 +306,13 @@ function App() {
             <Admin />
           </React.Suspense>
         </ErrorBoundary>
-        <button className="back-to-shop-btn" onClick={() => setIsAdmin(false)}>← Back to Blitz Mall</button>
+        <button className="back-to-shop-btn" onClick={() => {
+          sessionStorage.removeItem('bm_token');
+          sessionStorage.removeItem('bm_user');
+          localStorage.removeItem('bm_token');
+          localStorage.removeItem('bm_user');
+          setIsAdmin(false);
+        }}>← Back to Blitz Mall</button>
       </div>
     );
   }
