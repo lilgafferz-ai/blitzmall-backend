@@ -55,14 +55,31 @@ function Avatar({ profile, size = 40 }) {
 }
 
 const BANNERS = [
-  { id: 1, text: "⚡ Grand Opening: Free Delivery on Mall Area orders! ⚡", code: "" },
-  { id: 2, text: "🎁 Get 10% discount on orders over KES 1000! Code: BLITZ10", code: "BLITZ10" },
-  { id: 3, text: "💳 Pay with Cash on Delivery or M-Pesa at checkout!", code: "" },
+  { id: 1, title: "🚀 MEGA LAUNCH", text: "Free Delivery on Mall Area orders! Limited time.", code: "", gradient: "linear-gradient(135deg, #ff007f, #7f00ff)" },
+  { id: 2, title: "🎁 WEEKEND SPECIAL", text: "Get 10% discount on orders over KES 1000!", code: "BLITZ10", gradient: "linear-gradient(135deg, #00f2fe, #4facfe)" },
+  { id: 3, title: "💳 INSTANT PAY", text: "Scan & Pay with secure M-Pesa STK push!", code: "", gradient: "linear-gradient(135deg, #38ef7d, #11998e)" },
 ];
 
 function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [screen, setScreen] = useState('splash');
+
+  // Futuristic addictive features
+  const [showSpinWheel, setShowSpinWheel] = useState(false);
+  const [wheelSpinning, setWheelSpinning] = useState(false);
+  const [wheelPrize, setWheelPrize] = useState(null);
+  const [lastSpinDate, setLastSpinDate] = useState(() => {
+    try { return localStorage.getItem('last_spin_date') || ''; } catch { return ''; }
+  });
+
+  const [showAiBot, setShowAiBot] = useState(false);
+  const [aiMessages, setAiMessages] = useState([
+    { sender: 'bot', text: 'Jambo! I am your BlitzMall AI Assistant. Ask me to suggest a recipe, find cheap groceries, or explain checkout rewards!' }
+  ]);
+  const [aiInput, setAiInput] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+
+  const [flashTime, setFlashTime] = useState('04:12:08');
 
   const [customer, setCustomer] = useState(() => {
     try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
@@ -254,6 +271,25 @@ function App() {
     }
   }, [screen]);
 
+  // Flash sale countdown timer
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = new Date();
+      const endOfDay = new Date();
+      endOfDay.setHours(23, 59, 59, 999);
+      const diff = endOfDay - now;
+      if (diff <= 0) {
+        setFlashTime('00:00:00');
+        return;
+      }
+      const hrs = String(Math.floor(diff / (1000 * 60 * 60))).padStart(2, '0');
+      const mins = String(Math.floor((diff / (1000 * 60)) % 60)).padStart(2, '0');
+      const secs = String(Math.floor((diff / 1000) % 60)).padStart(2, '0');
+      setFlashTime(`${hrs}:${mins}:${secs}`);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   if (isAdmin) {
     return (
       <div className="app-container">
@@ -387,6 +423,67 @@ function App() {
         setCustLoyalty(d);
       }
     } catch (e) { console.error('Failed to load customer loyalty:', e); }
+  };
+
+  const spinTheWheel = () => {
+    if (wheelSpinning) return;
+    setWheelSpinning(true);
+    setWheelPrize(null);
+    
+    const prizes = [
+      { name: 'discount', message: 'You won KES 50 Off on your next order! Code: SPIN50', code: 'SPIN50', rotation: 1800 + 45 },
+      { name: 'delivery', message: 'You won Free Delivery on your next order! Code: SPINFREE', code: 'SPINFREE', rotation: 1800 + 135 },
+      { name: 'points', message: 'You won 100 loyalty points! Added to your profile.', code: '', rotation: 1800 + 225 },
+      { name: 'again', message: 'Ah, so close! Try again tomorrow.', code: '', rotation: 1800 + 315 },
+    ];
+    
+    const selected = prizes[Math.floor(Math.random() * prizes.length)];
+    
+    setTimeout(async () => {
+      setWheelSpinning(false);
+      setWheelPrize(selected);
+      const today = new Date().toLocaleDateString();
+      setLastSpinDate(today);
+      try { localStorage.setItem('last_spin_date', today); } catch {}
+      
+      if (selected.name === 'points' && customer?.phone) {
+        try {
+          await fetch(`${API_URL}/admin/loyalty/add-points`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: customer.phone, points: 100 })
+          });
+          loadCustLoyalty();
+        } catch (e) { console.error(e); }
+      }
+    }, 3000);
+  };
+
+  const sendAiMessage = async (e) => {
+    e.preventDefault();
+    if (!aiInput.trim()) return;
+    const userMsg = { sender: 'user', text: aiInput.trim() };
+    setAiMessages(prev => [...prev, userMsg]);
+    const text = aiInput.trim().toLowerCase();
+    setAiInput('');
+    setAiLoading(true);
+
+    setTimeout(() => {
+      let botResponse = '';
+      if (text.includes('recipe') || text.includes('cook') || text.includes('make')) {
+        botResponse = '🥞 *Recommended Recipe: Blitz Pancakes!*\nIngredients available in shop:\n• Wheat Flour\n• Milk\n• Sugar\n• Cooking Oil\n\nDirections:\n1. Mix flour, milk, and sugar to make a smooth batter.\n2. Heat a pan with a drop of oil.\n3. Pour batter and cook until golden brown on both sides. Serve hot!';
+      } else if (text.includes('loyalty') || text.includes('point') || text.includes('reward') || text.includes('cashback')) {
+        botResponse = '🎁 *BlitzMall Rewards Plan:*\n• Get 1 point for every KES 10 spent.\n• Redeem points for cashback (1 point = KES 0.5 cashback applied at checkout).\n• Unlock Silver tier at KES 5,000 spent, and Gold at KES 20,000 spent for extra perks!';
+      } else if (text.includes('delivery') || text.includes('shipping') || text.includes('fare')) {
+        botResponse = '🚚 *Delivery Options:*\n• Mall Delivery: FREE (KES 0) for standard orders.\n• Other Destinations: KES 150 standard delivery fee. We use coordinates pinned at checkout to navigate direct to your door!';
+      } else if (text.includes('discount') || text.includes('coupon') || text.includes('promo')) {
+        botResponse = '🏷️ *Active Store Coupons:*\n• Use code `BLITZ10` at checkout for 10% off orders above KES 1,000!\n• Or play the Daily Spin the Wheel on the home screen to win exclusive coupons.';
+      } else {
+        botResponse = '🤖 Jambo! I can help you find products, calculate rewards, or suggest recipe ingredients. Type "recipe", "rewards", "delivery", or "discount" to explore!';
+      }
+      setAiMessages(prev => [...prev, { sender: 'bot', text: botResponse }]);
+      setAiLoading(false);
+    }, 800);
   };
 
   const handleCheckout = async () => {
@@ -566,14 +663,21 @@ function App() {
         <div className="promo-banner-slider">
           <div className="promo-banner-track" style={{ transform: `translateX(-${bannerIndex * 100}%)` }}>
             {BANNERS.map(b => (
-              <div className="promo-banner-slide" key={b.id}>
-                <p>{b.text}</p>
+              <div className="promo-banner-slide" key={b.id} style={{ background: b.gradient }}>
+                <div className="promo-slide-decorations">
+                  <div className="promo-slide-circle" />
+                  <div className="promo-slide-triangle" />
+                </div>
+                <div className="promo-slide-content">
+                  <h4 className="promo-slide-title">{b.title}</h4>
+                  <p className="promo-slide-text">{b.text}</p>
+                </div>
                 {b.code && (
                   <button className="promo-copy-btn" onClick={(e) => {
                     e.stopPropagation();
                     navigator.clipboard.writeText(b.code);
                     alert(`Code ${b.code} copied! Use it at checkout.`);
-                  }}>Copy Code</button>
+                  }}>Copy Code: {b.code}</button>
                 )}
               </div>
             ))}
@@ -582,6 +686,39 @@ function App() {
             {BANNERS.map((_, i) => (
               <span key={i} className={`promo-dot ${i === bannerIndex ? 'active' : ''}`} onClick={() => setBannerIndex(i)} />
             ))}
+          </div>
+        </div>
+
+        {/* FLASH SALE CARD */}
+        <div className="flash-sale-card">
+          <div className="flash-sale-header">
+            <span className="flash-sale-title">⚡ FLASH SALE</span>
+            <div className="flash-sale-timer">Ends in: <span>{flashTime}</span></div>
+          </div>
+          <div className="flash-sale-items">
+            {products.slice(0, 2).map(p => {
+              const origPrice = p.price;
+              const discPrice = Math.round(origPrice * 0.8);
+              return (
+                <div className="flash-item" key={`flash-${p._id || p.id}`} onClick={() => openProduct(p)}>
+                  <span className="flash-badge">-20%</span>
+                  <div className="flash-item-img">
+                    {p.image ? <img src={p.image} alt={p.name} /> : '🛍️'}
+                  </div>
+                  <div className="flash-item-info">
+                    <span className="flash-item-name">{p.name}</span>
+                    <div className="flash-price-row">
+                      <span className="flash-price-disc">KES {discPrice}</span>
+                      <span className="flash-price-orig">KES {origPrice}</span>
+                    </div>
+                  </div>
+                  <button className="flash-add-btn" onClick={(e) => {
+                    e.stopPropagation();
+                    addToCart({ ...p, price: discPrice }, 1);
+                  }}>+</button>
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -605,6 +742,113 @@ function App() {
             )}
           </main>
         </div>
+
+        {/* Futuristic Floating Actions & Triggers */}
+        <div className="futuristic-floating-actions">
+          <button className="float-action-btn wheel-btn" onClick={() => setShowSpinWheel(true)}>
+            <span className="float-icon">🎡</span>
+            <span className="float-label">Spin & Win</span>
+          </button>
+          <button className="float-action-btn ai-btn" onClick={() => setShowAiBot(true)}>
+            <span className="float-icon">🤖</span>
+            <span className="float-label">AI Assistant</span>
+          </button>
+        </div>
+
+        {/* Daily Spin & Win Modal */}
+        {showSpinWheel && (
+          <div className="futuristic-modal-overlay" onClick={() => { if (!wheelSpinning) setShowSpinWheel(false); }}>
+            <div className="futuristic-modal-card wheel-card" onClick={e => e.stopPropagation()}>
+              <button className="modal-close-btn" onClick={() => setShowSpinWheel(false)} disabled={wheelSpinning}>✕</button>
+              <h2 className="modal-title">🎡 Daily Spin & Win</h2>
+              <p className="modal-subtitle">Spin once a day to win points or discount codes!</p>
+              
+              <div className="wheel-container">
+                <div className="wheel-pointer">⚡</div>
+                <div className={`neon-wheel ${wheelSpinning ? 'spinning' : ''}`} style={{
+                  transform: wheelPrize ? `rotate(${wheelPrize.rotation}deg)` : 'rotate(0deg)',
+                  transition: wheelSpinning ? 'transform 3s cubic-bezier(0.1, 0.8, 0.1, 1)' : 'none'
+                }}>
+                  <div className="wheel-sector sec-1"><span>🎁 KES 50</span></div>
+                  <div className="wheel-sector sec-2"><span>🚚 FREE DEL</span></div>
+                  <div className="wheel-sector sec-3"><span>⭐ 100 PTS</span></div>
+                  <div className="wheel-sector sec-4"><span>😢 TRY LATER</span></div>
+                </div>
+                <div className="wheel-center-hub">BLITZ</div>
+              </div>
+
+              {wheelPrize && (
+                <div className="wheel-prize-announcement animate-prize">
+                  <h4>🎉 Congratulations!</h4>
+                  <p>{wheelPrize.message}</p>
+                  {wheelPrize.code && (
+                    <div className="wheel-coupon-box" onClick={() => {
+                      navigator.clipboard.writeText(wheelPrize.code);
+                      alert('Coupon code copied!');
+                    }}>
+                      {wheelPrize.code} <small>(Tap to copy)</small>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button 
+                className="btn-neon spin-action-btn" 
+                onClick={spinTheWheel} 
+                disabled={wheelSpinning || lastSpinDate === new Date().toLocaleDateString()}
+              >
+                {wheelSpinning ? '🌀 Spinning...' : lastSpinDate === new Date().toLocaleDateString() ? '🔒 Come Back Tomorrow' : '🔥 Spin Now!'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* AI Assistant Chat Drawer */}
+        {showAiBot && (
+          <div className="ai-chat-drawer">
+            <div className="ai-chat-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span className="ai-chat-avatar">🤖</span>
+                <div>
+                  <h4 style={{ margin: 0 }}>Blitz AI Assistant</h4>
+                  <small style={{ color: 'var(--green)' }}>● Online</small>
+                </div>
+              </div>
+              <button className="ai-chat-close" onClick={() => setShowAiBot(false)}>✕</button>
+            </div>
+            
+            <div className="ai-chat-messages">
+              {aiMessages.map((msg, i) => (
+                <div className={`ai-message ${msg.sender}`} key={i}>
+                  <div className="ai-message-bubble">
+                    {msg.text.split('\n').map((line, idx) => (
+                      <p key={idx} style={{ margin: '4px 0' }}>{line}</p>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {aiLoading && (
+                <div className="ai-message bot">
+                  <div className="ai-message-bubble loading">
+                    <span>.</span><span>.</span><span>.</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <form className="ai-chat-input-row" onSubmit={sendAiMessage}>
+              <input 
+                type="text" 
+                placeholder="Ask me for a recipe, rewards info..." 
+                value={aiInput} 
+                onChange={e => setAiInput(e.target.value)} 
+                disabled={aiLoading} 
+              />
+              <button type="submit" className="btn-neon" disabled={aiLoading || !aiInput.trim()}>Send</button>
+            </form>
+          </div>
+        )}
+
         <BottomNav />
       </div>
     );

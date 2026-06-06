@@ -155,25 +155,40 @@ app.post('/api/admin/login', async (req, res) => {
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(401).json({ error: 'Invalid username or password' });
     const token = jwt.sign(
-      { userId: user._id.toString(), username: user.username, name: user.name, role: user.role, branchId: user.branchId || null },
+      { userId: user._id.toString(), username: user.username, name: user.name, role: user.role, branchId: user.branchId || null, permissions: user.permissions || [] },
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES }
     );
-    res.json({ success: true, token, user: { name: user.name, role: user.role, username: user.username, branchId: user.branchId || null } });
+    res.json({ success: true, token, user: { name: user.name, role: user.role, username: user.username, branchId: user.branchId || null, permissions: user.permissions || [] } });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Login failed' }); }
 });
 
 // Verify token
 app.get('/api/admin/me', authenticate, async (req, res) => {
-  res.json({ success: true, user: { name: req.user.name, role: req.user.role, username: req.user.username, branchId: req.user.branchId || null } });
+  res.json({ success: true, user: { name: req.user.name, role: req.user.role, username: req.user.username, branchId: req.user.branchId || null, permissions: req.user.permissions || [] } });
 });
 
 // Create cashier/manager users (owner only, now with branchId)
 app.post('/api/admin/users', authenticate, authorize('owner'), async (req, res) => {
-  const { username, password, name, role, branchId } = req.body;
+  const { username, password, name, role, branchId, permissions } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   const validRoles = ['cashier', 'manager', 'staff'];
   if (role && !validRoles.includes(role)) return res.status(400).json({ error: 'Role must be cashier, manager or staff' });
+
+  // Default permissions if none provided based on role
+  let userPermissions = permissions;
+  if (!userPermissions || !Array.isArray(userPermissions)) {
+    if (role === 'cashier') {
+      userPermissions = ['sales'];
+    } else if (role === 'staff') {
+      userPermissions = ['inventory', 'orders', 'expenses', 'reviews', 'loyalty'];
+    } else if (role === 'manager') {
+      userPermissions = ['sales', 'inventory', 'orders', 'records', 'expenses', 'credit', 'reviews', 'loyalty'];
+    } else {
+      userPermissions = ['sales'];
+    }
+  }
+
   try {
     const existing = await users_.findOne({ username: username.toLowerCase().trim() });
     if (existing) return res.status(400).json({ error: 'Username already exists' });
@@ -184,6 +199,7 @@ app.post('/api/admin/users', authenticate, authorize('owner'), async (req, res) 
       name: (name || username).trim(),
       role: role || 'cashier',
       branchId: branchId || null,
+      permissions: userPermissions,
       createdAt: new Date(),
     });
     res.json({ success: true, userId: r.insertedId, message: `${role || 'cashier'} created!` });
@@ -601,6 +617,30 @@ app.post('/api/admin/loyalty/redeem', authenticate, async (req, res) => {
     await loyalty_.updateOne({ phone }, { $inc: { points: -points }, $set: { updatedAt: new Date() } });
     res.json({ success: true, cashback, message: `${cashback} KES cashback applied!` });
   } catch { res.status(500).json({ error: 'Failed to redeem' }); }
+});
+
+app.post('/api/admin/loyalty/add-points', async (req, res) => {
+  const { phone, points } = req.body;
+  if (!phone || !points) return res.status(400).json({ error: 'Phone and points required' });
+  try {
+    const existing = await loyalty_.findOne({ phone });
+    if (existing) {
+      const newPoints = (existing.points || 0) + parseInt(points);
+      await loyalty_.updateOne({ phone }, { $set: { points: newPoints, updatedAt: new Date() } });
+      res.json({ success: true, points: newPoints });
+    } else {
+      await loyalty_.insertOne({
+        phone,
+        customerName: '',
+        totalSpent: 0,
+        points: parseInt(points),
+        tier: 'Bronze',
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      res.json({ success: true, points: parseInt(points) });
+    }
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to add points' }); }
 });
 
 // ===== COUPONS =====

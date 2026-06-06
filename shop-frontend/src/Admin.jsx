@@ -11,7 +11,7 @@ const BLANK = { name: '', category: '', barcode: '', buyingPrice: '', price: '',
 
 // JWT auth helper — adds Bearer token to every admin fetch
 const authHeaders = () => {
-  const token = localStorage.getItem('bm_token') || sessionStorage.getItem('bm_token');
+  const token = sessionStorage.getItem('bm_token');
   return token ? { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
 };
 const money = (n) => 'KES ' + (Math.round((n || 0) * 100) / 100).toLocaleString();
@@ -24,7 +24,6 @@ function Admin() {
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
-  const [rememberMe, setRememberMe] = useState(false);
   const [needsSetup, setNeedsSetup] = useState(false);
   const [setupUsername, setSetupUsername] = useState('');
   const [setupPassword, setSetupPassword] = useState('');
@@ -76,6 +75,7 @@ function Admin() {
   const [newPassword, setNewPassword] = useState('');
   const [newUserName, setNewUserName] = useState('');
   const [newUserRole, setNewUserRole] = useState('cashier');
+  const [newUserPermissions, setNewUserPermissions] = useState(['sales']);
   const [newUserBranch, setNewUserBranch] = useState('');
   const [offline, setOffline] = useState(!navigator.onLine);
   const [pendingSync, setPendingSync] = useState(getPendingCount());
@@ -196,9 +196,18 @@ function Admin() {
     e.preventDefault();
     if (!newUsername || !newPassword) { alert('Username and password required'); return; }
     try {
-      const r = await authPost(API_URL + '/admin/users', { username: newUsername, password: newPassword, name: newUserName || newUsername, role: newUserRole, branchId: newUserBranch || null });
+      const r = await authPost(API_URL + '/admin/users', { 
+        username: newUsername, 
+        password: newPassword, 
+        name: newUserName || newUsername, 
+        role: newUserRole, 
+        branchId: newUserBranch || null,
+        permissions: newUserPermissions 
+      });
       const d = await r.json();
-      if (d.success) { setNewUsername(''); setNewPassword(''); setNewUserName(''); setNewUserRole('cashier'); setNewUserBranch(''); loadUsers(); alert(d.message); }
+      if (d.success) { 
+        setNewUsername(''); setNewPassword(''); setNewUserName(''); setNewUserRole('cashier'); setNewUserBranch(''); setNewUserPermissions(['sales']); loadUsers(); alert(d.message); 
+      }
       else alert(d.error || 'Failed to create user');
     } catch (e) { console.error(e); alert('Network error'); }
   };
@@ -393,34 +402,7 @@ function Admin() {
     }
   };
 
-  // On mount, check if we have a saved token
-  useEffect(() => {
-    const savedToken = localStorage.getItem('bm_token') || sessionStorage.getItem('bm_token');
-    const savedUser = localStorage.getItem('bm_user') || sessionStorage.getItem('bm_user');
-    if (savedToken && savedUser) {
-      // Verify token is still valid
-      fetch(API_URL + '/admin/me', { headers: { 'Authorization': 'Bearer ' + savedToken } })
-        .then(r => { if (r.ok) return r.json(); throw new Error('Token expired'); })
-        .then(d => {
-          if (d.success) {
-            setUser(d.user);
-            setLoggedIn(true);
-            if (d.user.role !== 'owner') {
-              setActiveBranchId(d.user.branchId || null);
-            } else {
-              setActiveBranchId(null);
-            }
-            loadProducts(); loadOrders(); loadSales(); loadStaff();
-          }
-        })
-        .catch(() => {
-          localStorage.removeItem('bm_token');
-          localStorage.removeItem('bm_user');
-          sessionStorage.removeItem('bm_token');
-          sessionStorage.removeItem('bm_user');
-        });
-    }
-  }, []);
+  // Auto-login on mount disabled for maximum security. Owner/Staff must always authenticate via login form.
 
   // Inactivity timeout (15 minutes)
   useEffect(() => {
@@ -456,13 +438,8 @@ function Admin() {
       const r = await fetch(API_URL + '/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: loginUsername, password: loginPassword }) });
       const d = await r.json();
       if (d.success) {
-        if (rememberMe) {
-          localStorage.setItem('bm_token', d.token);
-          localStorage.setItem('bm_user', JSON.stringify(d.user));
-        } else {
-          sessionStorage.setItem('bm_token', d.token);
-          sessionStorage.setItem('bm_user', JSON.stringify(d.user));
-        }
+        sessionStorage.setItem('bm_token', d.token);
+        sessionStorage.setItem('bm_user', JSON.stringify(d.user));
         setUser(d.user);
         setLoggedIn(true);
         if (d.user.role !== 'owner') {
@@ -769,10 +746,6 @@ function Admin() {
         <form onSubmit={login}>
           <input className="owner-field" type="text" placeholder="Username" value={loginUsername} onChange={e => setLoginUsername(e.target.value)} required />
           <input className="owner-field" type="password" placeholder="Password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required />
-          <div style={{display:'flex',alignItems:'center',gap:8,margin:'10px 0 15px 0',userSelect:'none'}}>
-            <input type="checkbox" id="rememberMe" checked={rememberMe} onChange={e => setRememberMe(e.target.checked)} style={{accentColor:'var(--accent)',width:16,height:16,cursor:'pointer'}} />
-            <label htmlFor="rememberMe" style={{color:'var(--muted)',fontSize:'.85rem',cursor:'pointer'}}>Remember Me</label>
-          </div>
           {loginError && <p style={{color:'var(--red)',fontSize:'.85rem'}}>{loginError}</p>}
           <button className="blitz-admin-btn" type="submit">Sign In</button>
         </form>
@@ -795,16 +768,9 @@ function Admin() {
     { id: 'staff', label: '👷 Staff' },
     { id: 'branches', label: '🏪 Branches' },
   ];
-  let visibleTabs = [];
-  if (role === 'cashier') {
-    visibleTabs = allTabs.filter(t => t.id === 'sales');
-  } else if (role === 'staff') {
-    visibleTabs = allTabs.filter(t => ['inventory', 'orders', 'expenses', 'reviews', 'loyalty'].includes(t.id));
-  } else if (role === 'manager') {
-    visibleTabs = allTabs.filter(t => !['staff', 'branches'].includes(t.id));
-  } else {
-    visibleTabs = allTabs;
-  }
+  const visibleTabs = role === 'owner' 
+    ? allTabs 
+    : allTabs.filter(t => user?.permissions && user.permissions.includes(t.id));
   const isTabVisible = visibleTabs.some(t => t.id === tab);
   const safeTab = isTabVisible ? tab : (visibleTabs[0]?.id || 'sales');
 
@@ -1512,7 +1478,17 @@ function Admin() {
                 </div>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
                   <input value={newUserName} onChange={e => setNewUserName(e.target.value)} placeholder="Full name (optional)" />
-                  <select value={newUserRole} onChange={e => setNewUserRole(e.target.value)} style={{background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:10,padding:'10px',fontFamily:'inherit'}}>
+                  <select 
+                    value={newUserRole} 
+                    onChange={e => {
+                      const r = e.target.value;
+                      setNewUserRole(r);
+                      if (r === 'cashier') setNewUserPermissions(['sales']);
+                      else if (r === 'staff') setNewUserPermissions(['inventory', 'orders', 'expenses', 'reviews', 'loyalty']);
+                      else if (r === 'manager') setNewUserPermissions(['sales', 'inventory', 'orders', 'records', 'expenses', 'credit', 'reviews', 'loyalty']);
+                    }} 
+                    style={{background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:10,padding:'10px',fontFamily:'inherit'}}
+                  >
                     <option value="cashier">Cashier</option>
                     <option value="staff">Staff</option>
                     <option value="manager">Manager</option>
@@ -1522,6 +1498,30 @@ function Admin() {
                     {branches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
                   </select>
                 </div>
+                
+                <div style={{marginTop: 8, marginBottom: 8}}>
+                  <p className="blitz-admin-muted" style={{fontSize:'.8rem', marginBottom: 6}}><b>Tab Access Permissions:</b></p>
+                  <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 8, background: 'var(--bg-2)', padding: 10, borderRadius: 8, border: '1px solid var(--line)'}}>
+                    {allTabs.map(t => (
+                      <label key={t.id} style={{display: 'flex', alignItems: 'center', gap: 6, fontSize: '.78rem', cursor: 'pointer', color: 'var(--text)', userSelect: 'none'}}>
+                        <input 
+                          type="checkbox" 
+                          checked={newUserPermissions.includes(t.id)} 
+                          onChange={(ev) => {
+                            if (ev.target.checked) {
+                              setNewUserPermissions([...newUserPermissions, t.id]);
+                            } else {
+                              setNewUserPermissions(newUserPermissions.filter(x => x !== t.id));
+                            }
+                          }}
+                          style={{accentColor: 'var(--accent)', cursor: 'pointer'}}
+                        />
+                        {t.label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
                 <button className="blitz-admin-btn small" type="submit">👤 Create {newUserRole === 'cashier' ? 'Cashier' : newUserRole === 'staff' ? 'Staff' : 'Manager'} Login</button>
               </form>
               {users.length === 0 ? <p className="blitz-admin-empty">No staff logins yet.</p> : (
@@ -1530,9 +1530,14 @@ function Admin() {
                     const branchName = branches.find(b => b._id === u.branchId)?.name;
                     return (
                       <div className="exp-row" key={u._id}>
-                        <div>
-                          <b>{u.name || u.username}</b>
-                          <span className="blitz-admin-muted"> · @{u.username} · {u.role}{branchName ? ' · ' + branchName : ''} · Created {new Date(u.createdAt).toLocaleDateString()}</span>
+                        <div style={{display:'flex',flexDirection:'column',gap:2}}>
+                          <div>
+                            <b>{u.name || u.username}</b>
+                            <span className="blitz-admin-muted"> · @{u.username} · {u.role}{branchName ? ' · ' + branchName : ''} · Created {new Date(u.createdAt).toLocaleDateString()}</span>
+                          </div>
+                          <div style={{fontSize: '.72rem', color: 'var(--muted)', marginTop: 2}}>
+                            🔑 Allowed Tabs: {u.permissions && u.permissions.length ? u.permissions.map(p => allTabs.find(t => t.id === p)?.label || p).join(', ') : 'None'}
+                          </div>
                         </div>
                         <button className="pos-void" onClick={() => delUser(u._id)}>delete</button>
                       </div>
