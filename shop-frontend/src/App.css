@@ -24,6 +24,18 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
 @keyframes rise{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
 @keyframes blink{0%,100%{opacity:.3;}50%{opacity:1;}}
 
+/* WELCOME SPLASH */
+.welcome-splash{background:radial-gradient(circle at 50% 35%,#0f1a08 0%,#0a0a0c 55%);}
+.welcome-glow{background:radial-gradient(circle,rgba(46,204,113,.3),rgba(255,210,74,.15) 40%,transparent 70%) !important;animation:welcomePulse 2s ease-in-out infinite;}
+.welcome-inner{animation:welcomeRise .7s ease both;}
+.welcome-emoji{font-size:4.5rem;margin-bottom:12px;animation:welcomeBounce .8s ease both;}
+.welcome-title{font-family:'Unbounded',sans-serif;font-weight:600;font-size:1.6rem;color:var(--muted);letter-spacing:.5px;}
+.welcome-name{font-family:'Unbounded',sans-serif;font-weight:800;font-size:2.2rem;margin:4px 0 12px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 0 20px rgba(255,122,26,.4));}
+.welcome-sub{color:var(--muted);font-size:1rem;letter-spacing:.3px;margin-bottom:20px;}
+@keyframes welcomePulse{0%,100%{transform:scale(1);opacity:.7;}50%{transform:scale(1.2);opacity:1;}}
+@keyframes welcomeRise{from{opacity:0;transform:translateY(30px) scale(.95);}to{opacity:1;transform:translateY(0) scale(1);}}
+@keyframes welcomeBounce{0%{opacity:0;transform:scale(0) rotate(-20deg);}50%{transform:scale(1.3) rotate(5deg);}100%{opacity:1;transform:scale(1) rotate(0deg);}}
+
 /* SCREENS */
 .screen{min-height:100vh;display:flex;flex-direction:column;background:var(--bg);}
 .center-screen{align-items:center;justify-content:center;padding:24px;position:relative;overflow:hidden;}

@@ -1,12 +1,14 @@
 /* eslint-disable react-hooks/rules-of-hooks */
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import Admin from './Admin';
+import ErrorBoundary from './ErrorBoundary';
 
 const API_URL = process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api';
 const PRODUCTS_CACHE_KEY = 'blitz_products_cache';
 const ORDERS_CACHE_KEY = 'blitz_orders_cache';
 const OFFLINE_ORDERS_KEY = 'blitz_offline_orders';
+const CUSTOMER_KEY = 'blitz_customer';
 
 // Built-in avatars (served from public/avatars/). Upload-your-own also supported.
 const AVATARS = [
@@ -38,7 +40,10 @@ function Avatar({ profile, size = 40 }) {
 function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [screen, setScreen] = useState('splash');
-  const [customer, setCustomer] = useState(null);
+  const [customer, setCustomer] = useState(() => {
+    try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
+  });
+  const [welcomeMsg, setWelcomeMsg] = useState(null);
   const [profile, setProfile] = useState(() => {
     try { return JSON.parse(localStorage.getItem('blitz_profile')) || null; } catch { return null; }
   });
@@ -117,7 +122,25 @@ function App() {
   }, [loadProducts]);
 
   useEffect(() => {
-    if (screen === 'splash') { const t = setTimeout(() => setScreen('login'), 6000); return () => clearTimeout(t); }
+    if (screen === 'splash') {
+      const t = setTimeout(() => {
+        // Auto-login returning customers
+        if (customer && customer.customerId) {
+          setWelcomeMsg({ name: customer.name, returning: true });
+          setScreen('welcome');
+        } else {
+          setScreen('login');
+        }
+      }, 3000);
+      return () => clearTimeout(t);
+    }
+  }, [screen, customer]);
+
+  useEffect(() => {
+    if (screen === 'welcome') {
+      const t = setTimeout(() => setScreen('home'), 2500);
+      return () => clearTimeout(t);
+    }
   }, [screen]);
 
   useEffect(() => {
@@ -159,20 +182,48 @@ function App() {
     return () => { clearInterval(interval); clearTimeout(timeout); };
   }, [stkCheckoutId, stkStatus]);
 
+  const categoryOf = (p) => (p.category && p.category.trim()) ? p.category.trim() : 'Other';
+  const categories = ['All', ...[...new Set(products.map(categoryOf))].sort()];
+  const productId = (p) => p._id || p.id;
+  const total = cart.reduce((s, i) => s + i.price * i.quantity, 0);
+  const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
+
+  const ORDERS_CACHE_KEY_ORDERS = ORDERS_CACHE_KEY + '_' + (customer?.customerId || 'anon');
+  const syncOfflineOrders = useCallback(async () => {
+    try {
+      const queued = JSON.parse(localStorage.getItem(OFFLINE_ORDERS_KEY) || '[]');
+      if (!queued.length) return;
+      const synced = [];
+      for (const order of queued) {
+        try {
+          const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ customerId: order.customerId, customerName: order.customerName, items: order.items, paymentMethod: order.paymentMethod }) });
+          const d = await r.json();
+          if (!d.success) synced.push(order);
+        } catch { synced.push(order); }
+      }
+      localStorage.setItem(OFFLINE_ORDERS_KEY, JSON.stringify(synced));
+    } catch (e) { console.warn('Failed to sync offline orders:', e); }
+  }, [customer]);
+
+  useEffect(() => {
+    if (!customer?.customerId) return;
+    try {
+      const cached = JSON.parse(localStorage.getItem(ORDERS_CACHE_KEY + '_' + customer.customerId));
+      if (Array.isArray(cached) && cached.length) setMyOrders(cached);
+    } catch {}
+  }, [customer]);
+
   if (isAdmin) {
     return (
       <div className="app-container">
-        <Admin />
+        <ErrorBoundary>
+          <Admin />
+        </ErrorBoundary>
         <button className="back-to-shop-btn" onClick={() => setIsAdmin(false)}>← Back to Blitz Mall</button>
       </div>
     );
   }
-
-  const categoryOf = (p) => (p.category && p.category.trim()) ? p.category.trim() : 'Other';
-  const categories = useMemo(() => ['All', ...[...new Set(products.map(categoryOf))].sort()], [products]);
-  const productId = (p) => p._id || p.id;
-  const total = cart.reduce((s, i) => s + i.price * i.quantity, 0);
-  const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
 
   const catIcon = (c) => {
     c = c.toLowerCase();
@@ -203,11 +254,24 @@ function App() {
       const r = await fetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone }) });
       const d = await r.json();
       if (d.success) {
-        setCustomer({ customerId: d.customerId, name });
+        const isReturning = !!d.returning;
+        const cust = { customerId: d.customerId, name, phone };
+        setCustomer(cust);
+        try { localStorage.setItem(CUSTOMER_KEY, JSON.stringify(cust)); } catch {}
         if (!profile) saveProfile({ name, phone, avatarId: 'cat', photo: null });
-        setName(''); setPhone(''); setScreen('home');
+        setName(''); setPhone('');
+        setWelcomeMsg({ name, returning: isReturning });
+        setScreen('welcome');
       }
     } catch (e) { console.error(e); }
+  };
+
+  const handleLogout = () => {
+    setCustomer(null);
+    setCart([]);
+    setMyOrders([]);
+    try { localStorage.removeItem(CUSTOMER_KEY); } catch {}
+    setScreen('login');
   };
 
   const handleCheckout = async () => {
@@ -226,25 +290,7 @@ function App() {
         setCart([]); setScreen('confirmation');
       } catch (err) { console.error('Failed to queue order:', err); }
     }
-  };;
-
-  const ORDERS_CACHE_KEY_ORDERS = ORDERS_CACHE_KEY + '_' + (customer?.customerId || 'anon');
-  const syncOfflineOrders = useCallback(async () => {
-    try {
-      const queued = JSON.parse(localStorage.getItem(OFFLINE_ORDERS_KEY) || '[]');
-      if (!queued.length) return;
-      const synced = [];
-      for (const order of queued) {
-        try {
-          const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ customerId: order.customerId, customerName: order.customerName, items: order.items, paymentMethod: order.paymentMethod }) });
-          const d = await r.json();
-          if (!d.success) synced.push(order);
-        } catch { synced.push(order); }
-      }
-      localStorage.setItem(OFFLINE_ORDERS_KEY, JSON.stringify(synced));
-    } catch (e) { console.warn('Failed to sync offline orders:', e); }
-  }, [API_URL, customer]);;
+  };
 
   const loadMyOrders = async () => {
     try {
@@ -262,14 +308,6 @@ function App() {
       } catch {}
     }
   };
-
-  useEffect(() => {
-    if (!customer?.customerId) return;
-    try {
-      const cached = JSON.parse(localStorage.getItem(ORDERS_CACHE_KEY + '_' + customer.customerId));
-      if (Array.isArray(cached) && cached.length) setMyOrders(cached);
-    } catch {}
-  }, [customer]);
 
   const openProduct = (p) => { setActiveProduct(p); setDetailQty(1); setScreen('product'); };
   const onUpload = (e) => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader();
@@ -291,12 +329,40 @@ function App() {
 
   // SPLASH
   if (screen === 'splash') return (
-    <div className="splash" onClick={() => setScreen('login')}>
+    <div className="splash" onClick={() => {
+      if (customer && customer.customerId) {
+        setWelcomeMsg({ name: customer.name, returning: true });
+        setScreen('welcome');
+      } else {
+        setScreen('login');
+      }
+    }}>
       <div className="splash-glow" />
       <div className="splash-inner"><BlitzLogo size={140} />
         <h1 className="splash-title">BLITZ<span>MALL</span></h1>
         <p className="splash-tag">Everything you need. Lightning fast.</p></div>
       <span className="splash-skip">tap to enter</span>
+    </div>
+  );
+
+  // WELCOME SPLASH (after login)
+  if (screen === 'welcome' && welcomeMsg) return (
+    <div className="splash welcome-splash" onClick={() => setScreen('home')}>
+      <div className="splash-glow welcome-glow" />
+      <div className="splash-inner welcome-inner">
+        <div className="welcome-emoji">{welcomeMsg.returning ? '👋' : '🎉'}</div>
+        <h1 className="welcome-title">
+          {welcomeMsg.returning ? 'Welcome back,' : 'Welcome,'}
+        </h1>
+        <h2 className="welcome-name">{welcomeMsg.name}!</h2>
+        <p className="welcome-sub">
+          {welcomeMsg.returning
+            ? 'Great to see you again ⚡'
+            : 'Your account is ready. Let\'s shop! 🛍️'}
+        </p>
+        <BlitzLogo size={60} />
+      </div>
+      <span className="splash-skip">tap to shop</span>
     </div>
   );
 
@@ -331,7 +397,7 @@ function App() {
     let shown = products;
     if (activeCategory !== 'All') shown = shown.filter(p => categoryOf(p) === activeCategory);
     if (term) shown = shown.filter(p => p.name.toLowerCase().includes(term) || (p.description || '').toLowerCase().includes(term) || categoryOf(p).toLowerCase().includes(term));
-    const trending = useMemo(() => [...shown].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)), [shown]);
+    const trending = [...shown].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
 
     return (
       <div className="screen with-nav shop-scroll" onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
@@ -483,7 +549,7 @@ function App() {
         <button className="row-btn" onClick={() => { loadMyOrders(); setScreen('orders'); }}>📦 My orders<span>›</span></button>
         <button className="row-btn" onClick={() => setScreen('cart')}>🛒 My cart<span>›</span></button>
         <button className="row-btn" onClick={() => { setReviewStars(0); setReviewMsg(''); setReviewSent(false); setScreen('review'); }}>⭐ Rate us / Feedback<span>›</span></button>
-        <button className="row-btn danger" onClick={() => { setCustomer(null); setScreen('login'); }}>↩️ Logout<span>›</span></button>
+        <button className="row-btn danger" onClick={handleLogout}>↩️ Logout<span>›</span></button>
       </div>
       <BottomNav />
     </div>

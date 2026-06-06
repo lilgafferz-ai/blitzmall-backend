@@ -4,6 +4,8 @@ const config: CapacitorConfig = {
   appName: 'BlitzMall',
   webDir: 'build',
   server: {
+    url: 'https://blitzmall-frontend.vercel.app',
+    cleartext: false,
     androidScheme: 'https'
   },
   android: {
