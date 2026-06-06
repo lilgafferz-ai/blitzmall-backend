@@ -8,7 +8,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 720,
     title: "Blitz Mall HQ",
-    icon: path.join(__dirname, 'assets', 'logo.png'),
+    icon: path.join(__dirname, 'public', 'app-icon.ico'),
     show: false,
     backgroundColor: '#0a0a0c',
     webPreferences: {
