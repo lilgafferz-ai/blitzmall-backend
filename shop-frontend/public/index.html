@@ -29,6 +29,29 @@
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root"></div>
+    <div id="pre-splash" style="position:fixed;inset:0;z-index:99998;background:radial-gradient(circle at 50% 40%,#1a1206 0%,#0a0a0c 60%);display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'Segoe UI',system-ui,sans-serif;transition:opacity .5s ease;">
+      <div style="width:260px;height:260px;border-radius:50%;background:radial-gradient(circle,rgba(255,122,26,.3),transparent 70%);position:absolute;filter:blur(40px);animation:ppulse 2.4s ease-in-out infinite;"></div>
+      <img src="%PUBLIC_URL%/app-icon.png" alt="BlitzMall" style="width:120px;height:120px;position:relative;filter:drop-shadow(0 0 30px rgba(255,170,0,.5));animation:pfloat 2.8s ease-in-out infinite;" />
+      <h1 style="margin-top:18px;font-weight:800;font-size:2.2rem;letter-spacing:2px;position:relative;background:linear-gradient(135deg,#ff7a1a 0%,#ffb800 50%,#ff7a1a 100%);-webkit-background-clip:text;background-clip:text;color:transparent;">BLITZ<span style="font-weight:400;">MALL</span></h1>
+      <p style="color:#666;margin-top:6px;font-size:.85rem;letter-spacing:1px;position:relative;">Loading your store...</p>
+      <div style="margin-top:32px;width:44px;height:44px;border:3px solid rgba(255,170,0,.15);border-top-color:#ffaa00;border-radius:50%;position:relative;animation:pspin .8s linear infinite;"></div>
+    </div>
+    <style>
+      @keyframes ppulse{0%,100%{transform:scale(1);opacity:.7}50%{transform:scale(1.15);opacity:1}}
+      @keyframes pfloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+      @keyframes pspin{to{transform:rotate(360deg)}}
+    </style>
+    <script>
+      // Remove pre-splash once React renders
+      const observer = new MutationObserver(() => {
+        if (document.getElementById('root') && document.getElementById('root').children.length > 0) {
+          const ps = document.getElementById('pre-splash');
+          if (ps) { ps.style.opacity = '0'; setTimeout(() => ps.remove(), 500); }
+          observer.disconnect();
+        }
+      });
+      observer.observe(document.getElementById('root'), { childList: true });
+    </script>
     <!--
       This HTML file is a template.
       If you open it directly in the browser, you will see an empty page.

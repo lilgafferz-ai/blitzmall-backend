@@ -8,23 +8,26 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 720,
     title: "Blitz Mall HQ",
-    icon: path.join(__dirname, 'build', 'favicon.ico'),
+    icon: path.join(__dirname, 'assets', 'logo.png'),
+    show: false,
+    backgroundColor: '#0a0a0c',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true
     }
   });
 
-  // Hide the default electron browser menu bar for a premium native look
   win.setMenuBarVisibility(false);
 
-  // Load the built React index.html file
+  win.once('ready-to-show', () => {
+    win.show();
+  });
+
   win.loadFile(path.join(__dirname, 'build', 'index.html')).catch((err) => {
     console.error("Failed to load index.html. Make sure the React app is built first.", err);
   });
 }
 
-// Initialize Electron app when ready
 app.whenReady().then(() => {
   createWindow();
 
@@ -33,7 +36,6 @@ app.whenReady().then(() => {
   });
 });
 
-// Quit when all windows are closed on Windows and Linux
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
