@@ -54,27 +54,27 @@ function Avatar({ profile, size = 40 }) {
   return <img className="avatar" style={st} src={src} alt="me" />;
 }
 
+const BANNERS = [
+  { id: 1, text: "⚡ Grand Opening: Free Delivery on Mall Area orders! ⚡", code: "" },
+  { id: 2, text: "🎁 Get 10% discount on orders over KES 1000! Code: BLITZ10", code: "BLITZ10" },
+  { id: 3, text: "💳 Pay with Cash on Delivery or M-Pesa at checkout!", code: "" },
+];
+
 function App() {
   const [isAdmin, setIsAdmin] = useState(false);
-  const [screen, setScreen] = useState(() => {
-    try {
-      const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY));
-      return c && c.customerId ? 'welcome' : 'login';
-    } catch {
-      return 'login';
-    }
-  });
+  const [screen, setScreen] = useState('splash');
+
+  useEffect(() => {
+    if (screen !== 'home' && screen !== 'category') return;
+    const t = setInterval(() => {
+      setBannerIndex(i => (i + 1) % 3);
+    }, 4000);
+    return () => clearInterval(t);
+  }, [screen]);
   const [customer, setCustomer] = useState(() => {
     try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
   });
-  const [welcomeMsg, setWelcomeMsg] = useState(() => {
-    try {
-      const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY));
-      return c && c.customerId ? { name: c.name, returning: true } : null;
-    } catch {
-      return null;
-    }
-  });
+  const [welcomeMsg, setWelcomeMsg] = useState(null);
   const [profile, setProfile] = useState(() => {
     try { return JSON.parse(localStorage.getItem('blitz_profile')) || null; } catch { return null; }
   });
@@ -92,6 +92,15 @@ function App() {
   const [payMethod, setPayMethod] = useState('delivery');
   const [myOrders, setMyOrders] = useState([]);
   const [reviewStars, setReviewStars] = useState(0);
+  const [couponInput, setCouponInput] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState(null);
+  const [couponError, setCouponError] = useState('');
+  const [deliveryArea, setDeliveryArea] = useState('mall'); // 'mall' | 'standard'
+  const [deliveryLocation, setDeliveryLocation] = useState('');
+  const [gpsCoords, setGpsCoords] = useState(null);
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [bannerIndex, setBannerIndex] = useState(0);
+  const [custLoyalty, setCustLoyalty] = useState(null);
   const [stkCheckoutId, setStkCheckoutId] = useState(null);
   const [stkStatus, setStkStatus] = useState('idle'); // idle | waiting | confirmed | failed
   const [stkError, setStkError] = useState('');
@@ -163,7 +172,7 @@ function App() {
         } else {
           setScreen('login');
         }
-      }, 3000);
+      }, 5000);
       return () => clearTimeout(t);
     }
   }, [screen, customer]);
@@ -316,20 +325,116 @@ function App() {
     setScreen('login');
   };
 
+  const validateCoupon = async () => {
+    setCouponError('');
+    if (!couponInput.trim()) return;
+    try {
+      const r = await fetch(`${API_URL}/coupons/validate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: couponInput.trim().toUpperCase(), total })
+      });
+      const d = await r.json();
+      if (d.valid) {
+        setAppliedCoupon(d);
+        setCouponError('');
+      } else {
+        setAppliedCoupon(null);
+        setCouponError(d.error || 'Invalid coupon code');
+      }
+    } catch {
+      setCouponError('Network error validating coupon');
+    }
+  };
+
+  const pinGpsLocation = () => {
+    if (!navigator.geolocation) {
+      alert('Geolocation is not supported by your browser');
+      return;
+    }
+    setGpsLoading(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setGpsCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setGpsLoading(false);
+      },
+      (err) => {
+        console.warn('Geolocation error:', err);
+        alert('Could not pin location. Please enable GPS/location permissions on your device.');
+        setGpsLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  const reOrderPastOrder = (order) => {
+    const newCart = order.items.map(it => {
+      const p = products.find(prod => (prod._id || prod.id) === (it._id || it.id || it.productId));
+      return {
+        ...(p || it),
+        quantity: it.quantity || 1
+      };
+    });
+    setCart(newCart);
+    setScreen('cart');
+  };
+
+  const loadCustLoyalty = async () => {
+    if (!customer?.customerId) return;
+    try {
+      const r = await fetch(`${API_URL}/admin/loyalty/${customer.customerId}`);
+      const d = await r.json();
+      if (d.exists) {
+        setCustLoyalty(d);
+      }
+    } catch (e) { console.error('Failed to load customer loyalty:', e); }
+  };
+
+  useEffect(() => {
+    if (screen === 'profile') {
+      loadCustLoyalty();
+    }
+  }, [screen]);
+
   const handleCheckout = async () => {
     if (!cart.length) return;
-    const orderData = { customerId: customer.customerId, customerName: customer.name, items: cart, paymentMethod: payMethod, createdAt: new Date().toISOString() };
+    const finalFee = appliedCoupon?.type === 'free_delivery' || deliveryArea === 'mall' ? 0 : 150;
+    const discountAmt = appliedCoupon ? appliedCoupon.discount : 0;
+    const orderData = {
+      customerId: customer.customerId,
+      customerName: customer.name,
+      items: cart,
+      paymentMethod: payMethod,
+      createdAt: new Date().toISOString(),
+      deliveryLocation: `${deliveryArea === 'mall' ? 'Mall Area' : 'Standard Delivery'} - ${deliveryLocation}`,
+      deliveryFee: finalFee,
+      gpsCoords,
+      couponCode: appliedCoupon ? appliedCoupon.code : null,
+      discount: discountAmt
+    };
     try {
       const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(orderData) });
       const d = await r.json();
-      if (d.success) { setCart([]); setScreen('confirmation'); }
+      if (d.success) {
+        setCart([]);
+        setAppliedCoupon(null);
+        setCouponInput('');
+        setDeliveryLocation('');
+        setGpsCoords(null);
+        setScreen('confirmation');
+      }
     } catch (e) {
       // Offline: queue order for later sync
       try {
         const queued = JSON.parse(localStorage.getItem(OFFLINE_ORDERS_KEY) || '[]');
         queued.push({ ...orderData, _queued: true, _id: 'offline_' + Date.now() });
         localStorage.setItem(OFFLINE_ORDERS_KEY, JSON.stringify(queued));
-        setCart([]); setScreen('confirmation');
+        setCart([]);
+        setAppliedCoupon(null);
+        setCouponInput('');
+        setDeliveryLocation('');
+        setGpsCoords(null);
+        setScreen('confirmation');
       } catch (err) { console.error('Failed to queue order:', err); }
     }
   };
@@ -465,6 +570,28 @@ function App() {
           {searchTerm && <button onClick={() => setSearchTerm('')}>✕</button>}
         </div>
 
+        <div className="promo-banner-slider">
+          <div className="promo-banner-track" style={{ transform: `translateX(-${bannerIndex * 100}%)` }}>
+            {BANNERS.map(b => (
+              <div className="promo-banner-slide" key={b.id}>
+                <p>{b.text}</p>
+                {b.code && (
+                  <button className="promo-copy-btn" onClick={(e) => {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(b.code);
+                    alert(`Code ${b.code} copied! Use it at checkout.`);
+                  }}>Copy Code</button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="promo-banner-dots">
+            {BANNERS.map((_, i) => (
+              <span key={i} className={`promo-dot ${i === bannerIndex ? 'active' : ''}`} onClick={() => setBannerIndex(i)} />
+            ))}
+          </div>
+        </div>
+
         <div className="home-layout">
           <aside className="cat-rail">
             {categories.map(c => (
@@ -539,20 +666,106 @@ function App() {
   );
 
   // CHECKOUT
-  if (screen === 'checkout') return (
-    <div className="screen with-nav">
-      <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('cart')}>‹</button><h2 className="topbar-title">Checkout</h2></header>
-      <div className="scroll">
-        <h3 className="section-h">Delivery to</h3>
-        <div className="info-card"><b>{customer?.name}</b><span className="muted">{customer?.customerId}</span></div>
-        <h3 className="section-h">Payment method</h3>
-        <button className={`pay-opt ${payMethod === 'delivery' ? 'sel' : ''}`} onClick={() => setPayMethod('delivery')}><span>💵</span><div><b>Pay on delivery</b><small>Pay cash when it arrives</small></div><i className="radio" /></button>
-        <button className={`pay-opt soon ${payMethod === 'mpesa' ? 'sel' : ''}`} onClick={() => setPayMethod('mpesa')}><span>📱</span><div><b>M-Pesa</b><small>Coming soon — enter PIN to pay</small></div><i className="radio" /></button>
-        <div className="summary"><div className="summary-row"><span>Subtotal</span><b>KES {total}</b></div><div className="summary-row total"><span>Total</span><b>KES {total}</b></div></div>
+  if (screen === 'checkout') {
+    const finalFee = appliedCoupon?.type === 'free_delivery' || deliveryArea === 'mall' ? 0 : 150;
+    const discountAmt = appliedCoupon ? appliedCoupon.discount : 0;
+    const finalTotal = Math.max(0, total + finalFee - discountAmt);
+
+    return (
+      <div className="screen with-nav">
+        <header className="topbar">
+          <button className="icon-btn back" onClick={() => {
+            setAppliedCoupon(null);
+            setCouponInput('');
+            setDeliveryLocation('');
+            setGpsCoords(null);
+            setScreen('cart');
+          }}>‹</button>
+          <h2 className="topbar-title">Checkout</h2>
+        </header>
+        <div className="scroll">
+          <h3 className="section-h">Delivery to</h3>
+          <div className="info-card">
+            <b>{customer?.name}</b>
+            <span className="muted">{customer?.customerId}</span>
+          </div>
+
+          <h3 className="section-h">Delivery destination</h3>
+          <div className="info-card" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <label style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              Select Delivery Area:
+              <select className="field" value={deliveryArea} onChange={e => setDeliveryArea(e.target.value)} style={{ width: '100%', padding: '8px', borderRadius: '8px', background: 'var(--bg-2)', border: '1px solid var(--line)', color: 'var(--text)' }}>
+                <option value="mall">Mall Area (KES 0 - Free)</option>
+                <option value="standard">Standard Delivery (KES 150)</option>
+              </select>
+            </label>
+
+            <label style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              Detailed Address / Landmark:
+              <input className="field" placeholder="e.g. Apartment, House No, Landmark" value={deliveryLocation} onChange={e => setDeliveryLocation(e.target.value)} style={{ padding: '8px', borderRadius: '8px' }} required />
+            </label>
+
+            <button type="button" className="btn-ghost" onClick={pinGpsLocation} style={{ width: '100%', padding: '8px', fontSize: '0.85rem' }} disabled={gpsLoading}>
+              {gpsLoading ? '⏳ Fetching Location...' : gpsCoords ? '✅ GPS Location Pinned' : '📍 Pin Location (Get GPS)'}
+            </button>
+            {gpsCoords && (
+              <small style={{ color: 'var(--green)', fontSize: '0.75rem', textAlign: 'center' }}>
+                Coordinates: {gpsCoords.lat.toFixed(5)}, {gpsCoords.lng.toFixed(5)}
+              </small>
+            )}
+          </div>
+
+          <h3 className="section-h">Promo code</h3>
+          <div className="info-card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input className="field" placeholder="Enter coupon code (e.g. BLITZ10)" value={couponInput} onChange={e => setCouponInput(e.target.value)} style={{ flex: 1, padding: '8px', borderRadius: '8px' }} />
+              <button type="button" className="btn-neon" onClick={validateCoupon} style={{ padding: '8px 16px', fontSize: '0.85rem' }}>Apply</button>
+            </div>
+            {appliedCoupon && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(54, 211, 153, 0.1)', color: 'var(--green)', padding: '6px 10px', borderRadius: '6px', fontSize: '0.85rem' }}>
+                <span>Applied: <b>{appliedCoupon.code}</b> (- KES {appliedCoupon.discount})</span>
+                <button type="button" onClick={() => { setAppliedCoupon(null); setCouponInput(''); }} style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: '1rem' }}>✕</button>
+              </div>
+            )}
+            {couponError && (
+              <small style={{ color: 'var(--red)', fontSize: '0.8rem' }}>{couponError}</small>
+            )}
+          </div>
+
+          <h3 className="section-h">Payment method</h3>
+          <button className={`pay-opt ${payMethod === 'delivery' ? 'sel' : ''}`} onClick={() => setPayMethod('delivery')}>
+            <span>💵</span>
+            <div>
+              <b>Pay on delivery</b>
+              <small>Pay cash when it arrives</small>
+            </div>
+            <i className="radio" />
+          </button>
+          <button className={`pay-opt soon ${payMethod === 'mpesa' ? 'sel' : ''}`} onClick={() => setPayMethod('mpesa')}>
+            <span>📱</span>
+            <div>
+              <b>M-Pesa</b>
+              <small>Coming soon — enter PIN to pay</small>
+            </div>
+            <i className="radio" />
+          </button>
+
+          <div className="summary">
+            <div className="summary-row"><span>Subtotal</span><b>KES {total}</b></div>
+            <div className="summary-row"><span>Delivery fee</span><b>KES {finalFee}</b></div>
+            {discountAmt > 0 && (
+              <div className="summary-row" style={{ color: 'var(--green)' }}><span>Discount</span><b>- KES {discountAmt}</b></div>
+            )}
+            <div className="summary-row total"><span>Total</span><b>KES {finalTotal}</b></div>
+          </div>
+        </div>
+        <div className="detail-bar">
+          <div className="detail-bar-total">KES {finalTotal}</div>
+          <button className="btn-neon" onClick={handleCheckout}>Place order</button>
+        </div>
       </div>
-      <div className="detail-bar"><div className="detail-bar-total">KES {total}</div><button className="btn-neon" onClick={handleCheckout}>Place order</button></div>
-    </div>
-  );
+    );
+  }
 
   // CONFIRMATION
   if (screen === 'confirmation') return (
@@ -575,6 +788,32 @@ function App() {
           <h2>{profile?.name || customer?.name}</h2>
           <span className="muted">{profile?.phone || customer?.customerId}</span>
         </div>
+
+        {custLoyalty && (
+          <div className="loyalty-card-wrapper" style={{ margin: '16px 14px', background: 'var(--grad)', borderRadius: '14px', padding: '16px', color: '#000', position: 'relative', overflow: 'hidden', boxShadow: '0 8px 20px rgba(255, 122, 26, 0.25)' }}>
+            <div style={{ position: 'absolute', right: '-20px', bottom: '-20px', fontSize: '6rem', opacity: 0.12, transform: 'rotate(-15deg)' }}>⚡</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+              <div>
+                <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 'bold', opacity: 0.7 }}>Blitz Loyalty Card</span>
+                <h3 style={{ margin: '4px 0 0 0', fontFamily: 'Unbounded, sans-serif', fontSize: '1.2rem' }}>{custLoyalty.tier} Tier</h3>
+              </div>
+              <span style={{ fontSize: '1.5rem' }}>🎁</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+              <div>
+                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Accumulated Points</span>
+                <div style={{ fontFamily: 'Unbounded, sans-serif', fontSize: '1.5rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>{custLoyalty.points} PTS</div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Est. Cashback</span>
+                <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {Math.round(custLoyalty.points * 5).toLocaleString()}</div>
+              </div>
+            </div>
+            <small style={{ display: 'block', marginTop: '10px', fontSize: '0.65rem', opacity: 0.7, borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: '6px' }}>
+              * 100 PTS = KES 500 cashback. Ask cashier to redeem at counter!
+            </small>
+          </div>
+        )}
 
         <h3 className="section-h">Choose an avatar</h3>
         <div className="avatar-row">
@@ -611,9 +850,23 @@ function App() {
             <div className="order-card" key={o._id}>
               <div className="order-top"><b>KES {o.totalPrice}</b><span className="muted">{new Date(o.createdAt).toLocaleDateString()}</span></div>
               <div className="order-items">{o.items.map((it, k) => <span key={k}>{it.name} ×{it.quantity}</span>)}</div>
+              
+              {o.status === 'on_the_way' && (
+                <div className="bike-anim-container">
+                  <span className="bike-node">🏪 Mall</span>
+                  <div className="bike-track" />
+                  <span className="bike-emoji">🛵</span>
+                  <span className="bike-node">📍 Dest</span>
+                </div>
+              )}
+
               <div className="tracker">{steps.map((s, i) => (
                 <div className={`t-step ${i <= idx ? 'done' : ''} ${i === idx ? 'now' : ''}`} key={s}><i /><small>{stepLabel[s]}</small></div>
               ))}</div>
+
+              <button type="button" className="btn-ghost small" onClick={() => reOrderPastOrder(o)} style={{ marginTop: '12px', fontSize: '0.8rem', width: '100%', padding: '6px' }}>
+                🔄 Order Again
+              </button>
             </div>
           );
         })}

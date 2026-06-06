@@ -11,7 +11,7 @@ const BLANK = { name: '', category: '', barcode: '', buyingPrice: '', price: '',
 
 // JWT auth helper — adds Bearer token to every admin fetch
 const authHeaders = () => {
-  const token = localStorage.getItem('bm_token');
+  const token = localStorage.getItem('bm_token') || sessionStorage.getItem('bm_token');
   return token ? { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
 };
 const money = (n) => 'KES ' + (Math.round((n || 0) * 100) / 100).toLocaleString();
@@ -24,6 +24,7 @@ function Admin() {
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
   const [needsSetup, setNeedsSetup] = useState(false);
   const [setupUsername, setSetupUsername] = useState('');
   const [setupPassword, setSetupPassword] = useState('');
@@ -290,14 +291,24 @@ function Admin() {
 
   // New order browser notifications
   useEffect(() => {
-    if (!loggedIn || !notifGranted || !('Notification' in window)) return;
+    if (!loggedIn) return;
     if (prevOrderCount.current === 0 && orders.length > 0) { prevOrderCount.current = orders.length; return; }
     if (orders.length > prevOrderCount.current) {
       const newCount = orders.length - prevOrderCount.current;
-      const key = 'newOrder_' + Date.now();
-      if (!notifSent.current.has(key)) {
-        notifSent.current.add(key);
-        new Notification('🛒 New Order!', { body: newCount + ' new order' + (newCount > 1 ? 's' : '') + ' received!', icon: '/favicon.ico' });
+      const newOrders = orders.slice(0, newCount);
+      playAlarm();
+      if (notifGranted && ('Notification' in window)) {
+        newOrders.forEach(o => {
+          const key = 'newOrder_' + o._id;
+          if (!notifSent.current.has(key)) {
+            notifSent.current.add(key);
+            const loc = o.deliveryLocation || 'In-Store / Standard';
+            new Notification('🛒 New Order!', { 
+              body: `${o.customerName || 'Customer'} (${o.customerId || ''})\n📍 Delivery: ${loc}`, 
+              icon: '/favicon.ico' 
+            });
+          }
+        });
       }
       prevOrderCount.current = orders.length;
     }
@@ -307,8 +318,12 @@ function Admin() {
   useEffect(() => {
     if (!loggedIn) return;
     checkAlerts();
+    loadOrders();
     keepAlive();
-    const id = setInterval(checkAlerts, 25000);
+    const id = setInterval(() => {
+      checkAlerts();
+      loadOrders();
+    }, 25000);
     const kaId = setInterval(keepAlive, 240000); // ping every 4 min to keep Render awake
     return () => { clearInterval(id); clearInterval(kaId); };
   }, [loggedIn]);
@@ -380,8 +395,8 @@ function Admin() {
 
   // On mount, check if we have a saved token
   useEffect(() => {
-    const savedToken = localStorage.getItem('bm_token');
-    const savedUser = localStorage.getItem('bm_user');
+    const savedToken = localStorage.getItem('bm_token') || sessionStorage.getItem('bm_token');
+    const savedUser = localStorage.getItem('bm_user') || sessionStorage.getItem('bm_user');
     if (savedToken && savedUser) {
       // Verify token is still valid
       fetch(API_URL + '/admin/me', { headers: { 'Authorization': 'Bearer ' + savedToken } })
@@ -390,15 +405,49 @@ function Admin() {
           if (d.success) {
             setUser(d.user);
             setLoggedIn(true);
+            if (d.user.role !== 'owner') {
+              setActiveBranchId(d.user.branchId || null);
+            } else {
+              setActiveBranchId(null);
+            }
             loadProducts(); loadOrders(); loadSales(); loadStaff();
           }
         })
         .catch(() => {
           localStorage.removeItem('bm_token');
           localStorage.removeItem('bm_user');
+          sessionStorage.removeItem('bm_token');
+          sessionStorage.removeItem('bm_user');
         });
     }
   }, []);
+
+  // Inactivity timeout (15 minutes)
+  useEffect(() => {
+    if (!loggedIn) return;
+    let timer;
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        localStorage.removeItem('bm_token');
+        localStorage.removeItem('bm_user');
+        sessionStorage.removeItem('bm_token');
+        sessionStorage.removeItem('bm_user');
+        setLoggedIn(false);
+        setUser(null);
+        alert('You have been logged out due to inactivity.');
+      }, 15 * 60 * 1000);
+    };
+
+    const events = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
+    events.forEach(event => window.addEventListener(event, resetTimer));
+    resetTimer();
+
+    return () => {
+      clearTimeout(timer);
+      events.forEach(event => window.removeEventListener(event, resetTimer));
+    };
+  }, [loggedIn]);
 
   const login = async (e) => {
     e.preventDefault();
@@ -407,10 +456,20 @@ function Admin() {
       const r = await fetch(API_URL + '/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: loginUsername, password: loginPassword }) });
       const d = await r.json();
       if (d.success) {
-        localStorage.setItem('bm_token', d.token);
-        localStorage.setItem('bm_user', JSON.stringify(d.user));
+        if (rememberMe) {
+          localStorage.setItem('bm_token', d.token);
+          localStorage.setItem('bm_user', JSON.stringify(d.user));
+        } else {
+          sessionStorage.setItem('bm_token', d.token);
+          sessionStorage.setItem('bm_user', JSON.stringify(d.user));
+        }
         setUser(d.user);
         setLoggedIn(true);
+        if (d.user.role !== 'owner') {
+          setActiveBranchId(d.user.branchId || null);
+        } else {
+          setActiveBranchId(null);
+        }
         setLoginUsername(''); setLoginPassword('');
         loadProducts(); loadOrders(); loadSales(); loadStaff();
       } else {
@@ -453,9 +512,23 @@ function Admin() {
       if ((await r.json()).success) { resetForm(); loadProducts(); }
     } catch (e) { console.error(e); }
   };
+  const submitProductAndNext = async (e) => {
+    if (e) e.preventDefault();
+    if (!form.name || form.price === '') { alert('Name and selling price required'); return; }
+    try {
+      const payload = { ...form, branchId: activeBranchId || undefined };
+      const url = API_URL + '/admin/products';
+      const r = await authPost(url, payload);
+      if ((await r.json()).success) {
+        const prevCat = form.category;
+        setForm({ ...BLANK, category: prevCat });
+        loadProducts();
+      }
+    } catch (e) { console.error(e); }
+  };
   const editProduct = (p) => { setForm({ name: p.name||'', category: p.category||'', barcode: p.barcode||'', buyingPrice: p.buyingPrice??'', price: p.price??'', stock: p.stock??'', description: p.description||'', image: p.image||null, expiryDate: p.expiryDate ? new Date(p.expiryDate).toISOString().slice(0,10) : '' }); setEditingId(p._id); setShowForm(true); window.scrollTo(0,0); };
   const delProduct = async (id) => { if (!window.confirm('Delete this item?')) return; try { const r = await authDelete(API_URL + '/admin/products/' + id); if ((await r.json()).success) loadProducts(); } catch (e) { console.error(e); } };
-  const setStatus = async (id, status) => { try { await authPut(API_URL + '/admin/orders/' + id, { status }); loadOrders(); } catch (e) { console.error(e); } };
+  const updateOrder = async (id, payload) => { try { const r = await authPut(API_URL + '/admin/orders/' + id, payload); if ((await r.json()).success) loadOrders(); } catch (e) { console.error(e); } };
 
   // Camera barcode scanning
   const startCamera = async () => {
@@ -696,6 +769,10 @@ function Admin() {
         <form onSubmit={login}>
           <input className="owner-field" type="text" placeholder="Username" value={loginUsername} onChange={e => setLoginUsername(e.target.value)} required />
           <input className="owner-field" type="password" placeholder="Password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required />
+          <div style={{display:'flex',alignItems:'center',gap:8,margin:'10px 0 15px 0',userSelect:'none'}}>
+            <input type="checkbox" id="rememberMe" checked={rememberMe} onChange={e => setRememberMe(e.target.checked)} style={{accentColor:'var(--accent)',width:16,height:16,cursor:'pointer'}} />
+            <label htmlFor="rememberMe" style={{color:'var(--muted)',fontSize:'.85rem',cursor:'pointer'}}>Remember Me</label>
+          </div>
           {loginError && <p style={{color:'var(--red)',fontSize:'.85rem'}}>{loginError}</p>}
           <button className="blitz-admin-btn" type="submit">Sign In</button>
         </form>
@@ -704,7 +781,8 @@ function Admin() {
   }
 
   // Determine which tabs are visible based on role
-  const isCashier = user?.role === 'cashier';
+  const role = user?.role || 'cashier';
+  const isCashier = role === 'cashier';
   const allTabs = [
     { id: 'sales', label: '🧾 Sell' },
     { id: 'inventory', label: `📦 Inventory (${products.length})` },
@@ -717,11 +795,18 @@ function Admin() {
     { id: 'staff', label: '👷 Staff' },
     { id: 'branches', label: '🏪 Branches' },
   ];
-  const visibleTabs = isCashier
-    ? allTabs.filter(t => t.id === 'sales')
-    : allTabs;
-  // If cashier, make sure current tab is visible
-  const safeTab = isCashier && tab !== 'sales' ? 'sales' : tab;
+  let visibleTabs = [];
+  if (role === 'cashier') {
+    visibleTabs = allTabs.filter(t => t.id === 'sales');
+  } else if (role === 'staff') {
+    visibleTabs = allTabs.filter(t => ['inventory', 'orders', 'expenses', 'reviews', 'loyalty'].includes(t.id));
+  } else if (role === 'manager') {
+    visibleTabs = allTabs.filter(t => !['staff', 'branches'].includes(t.id));
+  } else {
+    visibleTabs = allTabs;
+  }
+  const isTabVisible = visibleTabs.some(t => t.id === tab);
+  const safeTab = isTabVisible ? tab : (visibleTabs[0]?.id || 'sales');
 
   const productList = Array.isArray(products) ? products : [];
   const filtered = productList.filter(p => !search.trim() || p.name.toLowerCase().includes(search.toLowerCase()) || (p.barcode||'').includes(search) || (p.category||'').toLowerCase().includes(search.toLowerCase()));
@@ -752,8 +837,12 @@ function Admin() {
           <button className={"blitz-admin-bell" + (alerts.out.length ? " ring" : "")} onClick={() => setMuted(m => !m)}>
             {muted ? "🔕" : "🔔"}{totalAlerts > 0 && <i className="blitz-admin-bell-dot">{totalAlerts}</i>}
           </button>
-          {!isCashier && <span className="blitz-admin-muted" style={{fontSize:'.78rem'}}>{user?.name} · {user?.role}</span>}
-          <button className="blitz-admin-exit" onClick={() => { localStorage.removeItem('bm_token'); localStorage.removeItem('bm_user'); setLoggedIn(false); setUser(null); }}>Exit</button>
+          {!isCashier && <span className="blitz-admin-muted" style={{fontSize:'.78rem'}}>{user?.name} · {user?.role}{user?.branchId ? ' · ' + (branches.find(b => b._id === user.branchId)?.name || 'Branch') : ''}</span>}
+          <button className="blitz-admin-exit" onClick={() => { 
+            localStorage.removeItem('bm_token'); localStorage.removeItem('bm_user'); 
+            sessionStorage.removeItem('bm_token'); sessionStorage.removeItem('bm_user'); 
+            setLoggedIn(false); setUser(null); 
+          }}>Exit</button>
         </div>
       </header>
 
@@ -906,7 +995,12 @@ function Admin() {
               <label className="blitz-admin-full">Description<textarea value={form.description} onChange={e => setForm(s=>({...s,description:e.target.value}))} placeholder="Optional notes for customers" /></label>
               <label className="blitz-admin-full">Image<input type="file" accept="image/*" onChange={onImage} /></label>
               {form.image && <div className="blitz-admin-preview"><img src={form.image} alt="preview" /></div>}
-              <button className="blitz-admin-btn" type="submit">{editingId ? "Save changes" : "Add to inventory"}</button>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button className="blitz-admin-btn" type="submit" style={{ flex: 1 }}>{editingId ? "Save changes" : "Add to inventory"}</button>
+                {!editingId && (
+                  <button className="blitz-admin-btn" type="button" onClick={submitProductAndNext} style={{ flex: 1, background: 'var(--orange)' }}>Next (Add & Keep Open)</button>
+                )}
+              </div>
             </form>
           )}
           <div className="blitz-admin-search"><span>🔍</span><input placeholder="Search name, barcode or category…" value={search} onChange={e => setSearch(e.target.value)} /></div>
@@ -936,9 +1030,38 @@ function Admin() {
               <div className="blitz-admin-order" key={o._id}>
                 <div className="blitz-admin-order-top"><b>{o.customerName}</b><span className="blitz-admin-phone">{o.customerId}</span></div>
                 <div className="blitz-admin-order-items">{o.items.map((it,k) => <p key={k}>{it.name} ×{it.quantity} — {money(it.price*it.quantity)}</p>)}</div>
-                <div className="blitz-admin-order-foot"><b>{money(o.totalPrice)}</b><span className="blitz-admin-muted">{new Date(o.createdAt).toLocaleString()}</span></div>
+                
+                {/* Delivery details, maps link, and fee adjustments */}
+                <div style={{marginTop: 8, padding: 8, background: 'var(--bg-2)', borderRadius: 8, fontSize: '.8rem', display: 'flex', flexDirection: 'column', gap: 6}}>
+                  <div>📍 <b>Location:</b> {o.deliveryLocation || 'None (In-Store / Standard)'}</div>
+                  {o.deliveryFee !== undefined && (
+                    <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between'}}>
+                      <span>🚚 <b>Delivery Fee:</b> {money(o.deliveryFee)}</span>
+                      <button 
+                        className="blitz-admin-btn small" 
+                        onClick={() => updateOrder(o._id, { deliveryFee: o.deliveryFee > 0 ? 0 : 150 })}
+                        style={{padding: '2px 6px', fontSize: '.7rem', borderRadius: 4, cursor: 'pointer', background: 'var(--line)', color: 'var(--text)', border: '1px solid var(--muted)'}}
+                      >
+                        {o.deliveryFee > 0 ? 'Make Free' : 'Add Fee (KES 150)'}
+                      </button>
+                    </div>
+                  )}
+                  {o.gpsCoords && o.gpsCoords.lat && (
+                    <div>
+                      🗺️ <b>GPS Route:</b> <a href={`https://www.google.com/maps/search/?api=1&query=${o.gpsCoords.lat},${o.gpsCoords.lng}`} target="_blank" rel="noreferrer" style={{color: 'var(--gold)', textDecoration: 'underline', fontWeight: 'bold'}}>Google Maps Routing</a>
+                    </div>
+                  )}
+                </div>
+
+                <div className="blitz-admin-order-foot">
+                  <div>
+                    {o.discount > 0 && <small style={{color:'var(--green)',display:'block'}}>Discount: -{money(o.discount)}</small>}
+                    <b>Total: {money(o.totalPrice)}</b>
+                  </div>
+                  <span className="blitz-admin-muted">{new Date(o.createdAt).toLocaleString()}</span>
+                </div>
                 <div style={{display:'flex',gap:6,alignItems:'center',marginTop:6}}>
-                  <select value={o.status} onChange={e => setStatus(o._id, e.target.value)} style={{flex:1}}>
+                  <select value={o.status} onChange={e => updateOrder(o._id, { status: e.target.value })} style={{flex:1}}>
                     <option value="pending">⏳ Pending</option><option value="packed">📦 Packed</option><option value="on_the_way">🚚 On the way</option><option value="delivered">✅ Delivered</option>
                   </select>
                   {o.status === 'delivered' && o.customerId && (
@@ -1117,6 +1240,55 @@ function Admin() {
                           {(summary.low||[]).map(p => <div className="rec-line" key={p.name}><span>{p.name}</span><b className="gold">Low: {p.stock}</b></div>)}
                         </div>
                       )}
+                    </div>
+
+                    {/* KRA Tax Estimator panel */}
+                    <div style={chartStyle}>
+                      <h3 style={{fontSize:'.95rem',marginBottom:12}}>🇰🇪 KRA Tax Estimator ({periodLabel[period]})</h3>
+                      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,flexWrap:'wrap'}}>
+                        <div style={{background:'var(--bg-2)',padding:12,borderRadius:10,border:'1px solid var(--line)'}}>
+                          <h4 style={{fontSize:'.85rem',color:'var(--gold)',marginBottom:8}}>Turnover Tax (TOT) <small style={{fontSize:'.7rem',color:'var(--muted)'}}>Gross &lt; 25M KES/yr</small></h4>
+                          <div style={{display:'flex',justifyContent:'space-between',marginBottom:4,fontSize:'.8rem'}}>
+                            <span>Gross Turnover:</span>
+                            <b>{money(P.revenue)}</b>
+                          </div>
+                          <div style={{display:'flex',justifyContent:'space-between',fontSize:'.8rem',color:'var(--accent)'}}>
+                            <span>TOT Rate:</span>
+                            <b>3%</b>
+                          </div>
+                          <hr style={{border:'0',borderTop:'1px solid var(--line)',margin:'8px 0'}} />
+                          <div style={{display:'flex',justifyContent:'space-between',fontSize:'.85rem',fontWeight:'bold'}}>
+                            <span>TOT Payable:</span>
+                            <span style={{color:'var(--orange)'}}>{money(P.revenue * 0.03)}</span>
+                          </div>
+                        </div>
+
+                        <div style={{background:'var(--bg-2)',padding:12,borderRadius:10,border:'1px solid var(--line)'}}>
+                          <h4 style={{fontSize:'.85rem',color:'var(--gold)',marginBottom:8}}>Standard VAT (16%) <small style={{fontSize:'.7rem',color:'var(--muted)'}}>VAT Inclusive</small></h4>
+                          <div style={{display:'flex',justifyContent:'space-between',marginBottom:4,fontSize:'.78rem'}}>
+                            <span>Output VAT (16% of sales):</span>
+                            <b>{money(P.revenue * 16 / 116)}</b>
+                          </div>
+                          <div style={{display:'flex',justifyContent:'space-between',marginBottom:4,fontSize:'.78rem'}}>
+                            <span>Estimated COGS:</span>
+                            <b>{money(P.revenue - P.profit)}</b>
+                          </div>
+                          <div style={{display:'flex',justifyContent:'space-between',marginBottom:4,fontSize:'.78rem'}}>
+                            <span>Input VAT (16% of COGS):</span>
+                            <b>{money((P.revenue - P.profit) * 16 / 116)}</b>
+                          </div>
+                          <hr style={{border:'0',borderTop:'1px solid var(--line)',margin:'8px 0'}} />
+                          <div style={{display:'flex',justifyContent:'space-between',fontSize:'.85rem',fontWeight:'bold'}}>
+                            <span>Net VAT Liability:</span>
+                            <span style={{color: (P.revenue * 16 / 116) - ((P.revenue - P.profit) * 16 / 116) >= 0 ? 'var(--red)' : 'var(--green)'}}>
+                              {money((P.revenue * 16 / 116) - ((P.revenue - P.profit) * 16 / 116))}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <p style={{fontSize:'.7rem',color:'var(--muted)',marginTop:10,fontStyle:'italic'}}>
+                        *Disclaimer: This is an estimate based on recorded POS transactions for the selected period. Consult a certified KRA tax agent for official filing.
+                      </p>
                     </div>
                   </>
                 );
@@ -1342,6 +1514,7 @@ function Admin() {
                   <input value={newUserName} onChange={e => setNewUserName(e.target.value)} placeholder="Full name (optional)" />
                   <select value={newUserRole} onChange={e => setNewUserRole(e.target.value)} style={{background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:10,padding:'10px',fontFamily:'inherit'}}>
                     <option value="cashier">Cashier</option>
+                    <option value="staff">Staff</option>
                     <option value="manager">Manager</option>
                   </select>
                   <select value={newUserBranch} onChange={e => setNewUserBranch(e.target.value)} style={{background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:10,padding:'10px',fontFamily:'inherit'}}>
@@ -1349,7 +1522,7 @@ function Admin() {
                     {branches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
                   </select>
                 </div>
-                <button className="blitz-admin-btn small" type="submit">👤 Create {newUserRole === 'cashier' ? 'Cashier' : 'Manager'} Login</button>
+                <button className="blitz-admin-btn small" type="submit">👤 Create {newUserRole === 'cashier' ? 'Cashier' : newUserRole === 'staff' ? 'Staff' : 'Manager'} Login</button>
               </form>
               {users.length === 0 ? <p className="blitz-admin-empty">No staff logins yet.</p> : (
                 <div className="blitz-admin-list">

@@ -77,13 +77,20 @@ app.post('/api/auth', async (req, res) => {
   }
 });
 app.post('/api/orders', async (req, res) => {
-  const { customerId, items, customerName, paymentMethod } = req.body;
+  const { customerId, items, customerName, paymentMethod, deliveryLocation, deliveryFee, gpsCoords, couponCode, discount } = req.body;
   if (!customerId || !items || !items.length) return res.status(400).json({ error: 'Missing data' });
   try {
+    const fee = parseFloat(deliveryFee) || 0;
+    const discountAmt = parseFloat(discount) || 0;
     const order = {
       customerId, customerName, items,
-      totalPrice: items.reduce((s, i) => s + i.price * i.quantity, 0),
+      totalPrice: Math.max(0, items.reduce((s, i) => s + i.price * i.quantity, 0) + fee - discountAmt),
       paymentMethod: paymentMethod || 'delivery', status: 'pending', createdAt: new Date(),
+      deliveryLocation: deliveryLocation || '',
+      deliveryFee: fee,
+      gpsCoords: gpsCoords || null,
+      couponCode: couponCode || null,
+      discount: discountAmt
     };
     const result = await orders_.insertOne(order);
     for (const it of items) { const id = it._id || it.id; if (id && ObjectId.isValid(id)) await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: -Math.abs(it.quantity) } }); }
@@ -165,8 +172,8 @@ app.get('/api/admin/me', authenticate, async (req, res) => {
 app.post('/api/admin/users', authenticate, authorize('owner'), async (req, res) => {
   const { username, password, name, role, branchId } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-  const validRoles = ['cashier', 'manager'];
-  if (role && !validRoles.includes(role)) return res.status(400).json({ error: 'Role must be cashier or manager' });
+  const validRoles = ['cashier', 'manager', 'staff'];
+  if (role && !validRoles.includes(role)) return res.status(400).json({ error: 'Role must be cashier, manager or staff' });
   try {
     const existing = await users_.findOne({ username: username.toLowerCase().trim() });
     if (existing) return res.status(400).json({ error: 'Username already exists' });
@@ -280,8 +287,23 @@ app.get('/api/admin/orders', authenticate, async (req, res) => {
   catch { res.status(500).json({ error: 'Failed' }); }
 });
 app.put('/api/admin/orders/:orderId', authenticate, async (req, res) => {
-  try { const r = await orders_.updateOne({ _id: new ObjectId(req.params.orderId) }, { $set: { status: req.body.status } }); if (!r.matchedCount) return res.status(404).json({ error: 'Order not found' }); res.json({ success: true }); }
-  catch { res.status(500).json({ error: 'Failed' }); }
+  try {
+    const { status, deliveryFee } = req.body;
+    const update = {};
+    if (status !== undefined) update.status = status;
+    if (deliveryFee !== undefined) {
+      const fee = parseFloat(deliveryFee) || 0;
+      update.deliveryFee = fee;
+      const order = await orders_.findOne({ _id: new ObjectId(req.params.orderId) });
+      if (order) {
+        const itemsTotal = order.items.reduce((s, i) => s + i.price * i.quantity, 0);
+        update.totalPrice = Math.max(0, itemsTotal + fee - (order.discount || 0));
+      }
+    }
+    const r = await orders_.updateOne({ _id: new ObjectId(req.params.orderId) }, { $set: update });
+    if (!r.matchedCount) return res.status(404).json({ error: 'Order not found' });
+    res.json({ success: true });
+  } catch { res.status(500).json({ error: 'Failed' }); }
 });
 
 // ===== POS SALES =====

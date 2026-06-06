@@ -278,3 +278,117 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
 .share-steps ol{padding-left:18px;margin:0;}
 .share-steps li{margin-bottom:6px;}
 
+
+
+/* ===== PROMO BANNER SLIDER ===== */
+.promo-banner-slider {
+  position: relative;
+  margin: 16px 14px 0 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+  height: 80px;
+}
+.promo-banner-track {
+  display: flex;
+  height: 100%;
+  transition: transform 0.6s cubic-bezier(0.25, 1, 0.5, 1);
+}
+.promo-banner-slide {
+  min-width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 20px;
+  text-align: center;
+}
+.promo-banner-slide p {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+}
+.promo-copy-btn {
+  margin-top: 6px;
+  background: var(--grad);
+  border: none;
+  color: #1a0a00;
+  font-weight: bold;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(255, 122, 26, 0.3);
+}
+.promo-banner-dots {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+}
+.promo-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3a3a44;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.promo-dot.active {
+  background: var(--orange);
+  width: 14px;
+  border-radius: 3px;
+}
+
+/* ===== DELIVERY BIKE TRACKING ANIMATION ===== */
+.bike-anim-container {
+  position: relative;
+  height: 38px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  margin: 12px 0;
+  border: 1px dashed var(--line);
+  overflow: hidden;
+}
+.bike-track {
+  position: absolute;
+  left: 60px;
+  right: 60px;
+  height: 2px;
+  background: repeating-linear-gradient(to right, transparent, transparent 4px, var(--muted) 4px, var(--muted) 8px);
+  z-index: 0;
+}
+.bike-emoji {
+  position: absolute;
+  left: 60px;
+  font-size: 1.3rem;
+  z-index: 1;
+  animation: drive-bike 7s linear infinite;
+}
+.bike-node {
+  font-size: 0.78rem;
+  font-weight: bold;
+  z-index: 2;
+  background: var(--card);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+@keyframes drive-bike {
+  0% { left: 60px; transform: scaleX(1); }
+  47% { left: calc(100% - 95px); transform: scaleX(1); }
+  50% { transform: scaleX(-1); }
+  97% { left: 60px; transform: scaleX(-1); }
+  100% { left: 60px; transform: scaleX(1); }
+}
