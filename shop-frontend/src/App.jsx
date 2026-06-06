@@ -1,4 +1,4 @@
-/* eslint-disable react-hooks/rules-of-hooks */
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import ErrorBoundary from './ErrorBoundary';
@@ -64,13 +64,6 @@ function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [screen, setScreen] = useState('splash');
 
-  useEffect(() => {
-    if (screen !== 'home' && screen !== 'category') return;
-    const t = setInterval(() => {
-      setBannerIndex(i => (i + 1) % 3);
-    }, 4000);
-    return () => clearInterval(t);
-  }, [screen]);
   const [customer, setCustomer] = useState(() => {
     try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
   });
@@ -255,6 +248,12 @@ function App() {
     } catch {}
   }, [customer]);
 
+  useEffect(() => {
+    if (screen === 'profile') {
+      loadCustLoyalty();
+    }
+  }, [screen]);
+
   if (isAdmin) {
     return (
       <div className="app-container">
@@ -389,12 +388,6 @@ function App() {
       }
     } catch (e) { console.error('Failed to load customer loyalty:', e); }
   };
-
-  useEffect(() => {
-    if (screen === 'profile') {
-      loadCustLoyalty();
-    }
-  }, [screen]);
 
   const handleCheckout = async () => {
     if (!cart.length) return;
