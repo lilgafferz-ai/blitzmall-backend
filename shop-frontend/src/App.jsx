@@ -110,6 +110,15 @@ function App() {
   const [gpsCoords, setGpsCoords] = useState(null);
   const [gpsLoading, setGpsLoading] = useState(false);
   const [bannerIndex, setBannerIndex] = useState(0);
+  const [savedBaskets, setSavedBaskets] = useState([]);
+  const [basketNameInput, setBasketNameInput] = useState('');
+  const [showBasketSaveForm, setShowBasketSaveForm] = useState(false);
+  const [loyaltyRewards, setLoyaltyRewards] = useState([]);
+  const [scratchRevealed, setScratchRevealed] = useState(() => {
+    try { return localStorage.getItem('scratch_revealed') === 'true'; } catch { return false; }
+  });
+  const [scratchRevealing, setScratchRevealing] = useState(false);
+  const [toasts, setToasts] = useState([]);
   const [custLoyalty, setCustLoyalty] = useState(null);
   const [stkCheckoutId, setStkCheckoutId] = useState(null);
   const [stkStatus, setStkStatus] = useState('idle'); // idle | waiting | confirmed | failed
@@ -219,6 +228,7 @@ function App() {
           clearInterval(interval);
           setStkStatus('confirmed');
           setCart([]); setScreen('confirmation');
+          triggerSimulatedNotifications();
         } else if (d.status === 'failed') {
           clearInterval(interval);
           setStkStatus('failed');
@@ -232,6 +242,165 @@ function App() {
     }, 90000);
     return () => { clearInterval(interval); clearTimeout(timeout); };
   }, [stkCheckoutId, stkStatus]);
+
+  const loadSavedBaskets = async () => {
+    if (!customer?.customerId) return;
+    try {
+      const r = await fetch(`${API_URL}/customer/baskets/${customer.customerId}`);
+      const d = await r.json();
+      setSavedBaskets(Array.isArray(d) ? d : []);
+    } catch (e) { console.error('Failed to load saved baskets:', e); }
+  };
+
+  const saveCurrentBasket = async () => {
+    if (!basketNameInput.trim()) return;
+    try {
+      const r = await fetch(`${API_URL}/customer/baskets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customerId: customer?.customerId,
+          basketName: basketNameInput.trim(),
+          items: cart.map(i => ({
+            _id: i._id,
+            id: i.id,
+            name: i.name,
+            price: i.price,
+            quantity: i.quantity,
+            image: i.image,
+            category: i.category
+          }))
+        })
+      });
+      const d = await r.json();
+      if (d.success) {
+        alert('🛒 Basket template saved successfully!');
+        setBasketNameInput('');
+        setShowBasketSaveForm(false);
+        loadSavedBaskets();
+      } else {
+        alert('Failed to save basket');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Error saving basket');
+    }
+  };
+
+  const loadSavedBasketToCart = (basket) => {
+    setCart(basket.items);
+    alert(`🛒 Loaded basket "${basket.basketName}" into your cart!`);
+  };
+
+  const deleteSavedBasket = async (id) => {
+    try {
+      const r = await fetch(`${API_URL}/customer/baskets/${id}`, { method: 'DELETE' });
+      const d = await r.json();
+      if (d.success) {
+        loadSavedBaskets();
+      }
+    } catch (e) { console.error(e); }
+  };
+
+  const loadLoyaltyRewards = async () => {
+    try {
+      const r = await fetch(`${API_URL}/loyalty/rewards`);
+      const d = await r.json();
+      setLoyaltyRewards(d || []);
+    } catch (e) { console.error('Failed to load loyalty rewards:', e); }
+  };
+
+  const redeemReward = async (rewardId) => {
+    try {
+      const r = await fetch(`${API_URL}/loyalty/redeem-reward`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customerId: customer?.customerId, rewardId })
+      });
+      const d = await r.json();
+      if (d.success) {
+        alert(`🎉 Successfully redeemed!\nCopy coupon code: ${d.couponCode} to use at checkout.`);
+        loadCustLoyalty();
+        if (d.couponCode) {
+          setCouponInput(d.couponCode);
+        }
+      } else {
+        alert(d.error || 'Failed to redeem reward');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Error redeeming reward');
+    }
+  };
+
+  const scratchCoupon = () => {
+    if (scratchRevealed || scratchRevealing) return;
+    setScratchRevealing(true);
+    setTimeout(() => {
+      setScratchRevealing(false);
+      setScratchRevealed(true);
+      try { localStorage.setItem('scratch_revealed', 'true'); } catch {}
+      setCouponInput('SHAKE15');
+      showToast("🎁 15% OFF Shake Coupon applied at checkout!");
+    }, 1200);
+  };
+
+  const showToast = (message) => {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, message }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 5000);
+  };
+
+  const triggerSimulatedNotifications = () => {
+    setTimeout(() => {
+      showToast("🛒 Your order has been received by Blitz Mall Cashier!");
+    }, 4000);
+    setTimeout(() => {
+      showToast("📦 Order Packing: Items are being packed and sealed.");
+    }, 12000);
+    setTimeout(() => {
+      showToast("🚴 Out for Delivery: A rider has picked up your parcel!");
+    }, 24000);
+  };
+
+  const renderToasts = () => (
+    <div style={{position:'fixed',top:20,left:'50%',transform:'translateX(-50%)',zIndex:99999,display:'flex',flexDirection:'column',gap:10,width:'90%',maxWidth:360,pointerEvents:'none'}}>
+      {toasts.map(t => (
+        <div key={t.id} style={{
+          background:'rgba(22, 22, 27, 0.95)',
+          border:'1px solid var(--orange)',
+          borderRadius:12,
+          padding:'12px 16px',
+          color:'var(--text)',
+          fontSize:'.82rem',
+          boxShadow:'0 10px 25px rgba(255, 122, 26, 0.2)',
+          display:'flex',
+          alignItems:'center',
+          gap:10,
+          pointerEvents:'auto'
+        }}>
+          <span style={{fontSize:'1.1rem'}}>🔔</span>
+          <span style={{flex:1}}>{t.message}</span>
+          <button onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))} style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:'1rem'}}>✕</button>
+        </div>
+      ))}
+    </div>
+  );
+
+  const renderShakeStyle = () => (
+    <style>{`
+      @keyframes shake {
+        0%, 100% { transform: translateX(0); }
+        10%, 30%, 50%, 70%, 90% { transform: translateX(-6px); }
+        20%, 40%, 60%, 80% { transform: translateX(6px); }
+      }
+      .shake-animation {
+        animation: shake 0.6s ease-in-out infinite;
+      }
+    `}</style>
+  );
 
   const categoryOf = (p) => (p.category && p.category.trim()) ? p.category.trim() : 'Other';
   const categories = ['All', ...[...new Set(products.map(categoryOf))].sort()];
@@ -263,11 +432,13 @@ function App() {
       const cached = JSON.parse(localStorage.getItem(ORDERS_CACHE_KEY + '_' + customer.customerId));
       if (Array.isArray(cached) && cached.length) setMyOrders(cached);
     } catch {}
+    loadSavedBaskets();
   }, [customer]);
 
   useEffect(() => {
     if (screen === 'profile') {
       loadCustLoyalty();
+      loadLoyaltyRewards();
     }
   }, [screen]);
 
@@ -494,7 +665,7 @@ function App() {
 
   const handleCheckout = async () => {
     if (!cart.length) return;
-    const finalFee = appliedCoupon?.type === 'free_delivery' || deliveryArea === 'mall' ? 0 : 150;
+    const finalFee = total >= 1500 || appliedCoupon?.type === 'free_delivery' || deliveryArea === 'mall' ? 0 : 150;
     const discountAmt = appliedCoupon ? appliedCoupon.discount : 0;
     const orderData = {
       customerId: customer.customerId,
@@ -518,6 +689,7 @@ function App() {
         setDeliveryLocation('');
         setGpsCoords(null);
         setScreen('confirmation');
+        triggerSimulatedNotifications();
       }
     } catch (e) {
       // Offline: queue order for later sync
@@ -531,6 +703,7 @@ function App() {
         setDeliveryLocation('');
         setGpsCoords(null);
         setScreen('confirmation');
+        triggerSimulatedNotifications();
       } catch (err) { console.error('Failed to queue order:', err); }
     }
   };
@@ -728,6 +901,73 @@ function App() {
           </div>
         </div>
 
+        {/* SHAKE-TO-REVEAL SCRATCH CARD */}
+        <div style={{
+          margin: '16px',
+          background: 'var(--card)',
+          borderRadius: 20,
+          border: '2px dashed var(--orange)',
+          padding: '20px',
+          position: 'relative',
+          overflow: 'hidden',
+          boxShadow: 'var(--shadow)',
+          textAlign: 'center'
+        }}>
+          {!scratchRevealed ? (
+            <div 
+              onClick={scratchCoupon}
+              className={scratchRevealing ? 'shake-animation' : ''}
+              style={{
+                cursor: 'pointer',
+                background: 'linear-gradient(135deg, #ffd24a, #ff7a1a)',
+                borderRadius: 12,
+                padding: '30px 20px',
+                color: '#000',
+                fontWeight: 'bold',
+                fontFamily: 'Unbounded, sans-serif',
+                position: 'relative',
+                boxShadow: '0 8px 20px rgba(255, 122, 26, 0.3)',
+                userSelect: 'none'
+              }}
+            >
+              <div style={{fontSize: '2rem', marginBottom: 8}}>🎁</div>
+              <div style={{fontSize: '1rem'}}>SHAKE OR CLICK TO SCRATCH</div>
+              <div style={{fontSize: '0.75rem', opacity: 0.8, marginTop: 4}}>Reveal a special 15% OFF coupon!</div>
+            </div>
+          ) : (
+            <div style={{
+              background: 'rgba(54, 211, 153, 0.1)',
+              border: '1px solid var(--green)',
+              borderRadius: 12,
+              padding: '24px 20px',
+              animation: 'fadeIn 0.5s ease'
+            }}>
+              <span style={{fontSize: '2rem'}}>🎉</span>
+              <h4 style={{margin: '8px 0 4px 0', color: 'var(--green)', fontFamily: 'Unbounded, sans-serif'}}>15% Discount Unlocked!</h4>
+              <p className="muted" style={{fontSize: '0.8rem', marginBottom: 12}}>Use code at checkout to claim your deal.</p>
+              <div style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                background: 'var(--bg-2)',
+                border: '1px solid var(--line)',
+                borderRadius: 8,
+                padding: '8px 16px',
+                fontFamily: 'monospace',
+                fontSize: '1.1rem',
+                fontWeight: 'bold',
+                color: 'var(--gold)',
+                cursor: 'pointer'
+              }} onClick={() => {
+                navigator.clipboard.writeText('SHAKE15');
+                alert('Copied to clipboard!');
+              }}>
+                SHAKE15 <small style={{fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 'normal'}}>(Tap to copy)</small>
+              </div>
+            </div>
+          )}
+        </div>
+
         <div className="home-layout">
           <aside className="cat-rail">
             {categories.map(c => (
@@ -856,6 +1096,8 @@ function App() {
         )}
 
         <BottomNav />
+        {renderToasts()}
+        {renderShakeStyle()}
       </div>
     );
   }
@@ -880,6 +1122,7 @@ function App() {
         </div>
         <div className="detail-bar"><div className="detail-bar-total">KES {p.price * detailQty}</div>
           <button className="btn-neon" onClick={() => { addToCart(p, detailQty); setScreen('cart'); }}>Add to cart</button></div>
+        {renderToasts()}
       </div>
     );
   }
@@ -890,7 +1133,32 @@ function App() {
       <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('home')}>‹</button><h2 className="topbar-title">Your Cart</h2></header>
       <div className="scroll">
         {cart.length === 0 ? (
-          <div className="empty-cart"><span>🛒</span><p>Your cart is empty</p><button className="btn-ghost" onClick={() => setScreen('home')}>Start shopping</button></div>
+          <div className="empty-cart">
+            <span>🛒</span>
+            <p>Your cart is empty</p>
+            <button className="btn-ghost" onClick={() => setScreen('home')} style={{marginBottom: 20}}>Start shopping</button>
+            {savedBaskets.length > 0 && (
+              <div style={{marginTop: 30, width: '100%', textAlign: 'left', padding: '0 16px'}}>
+                <h3 className="section-h" style={{margin: '0 0 10px 0', padding: 0}}>📋 Saved Carts / Templates</h3>
+                <div style={{display: 'flex', flexDirection: 'column', gap: 10}}>
+                  {savedBaskets.map(b => (
+                    <div key={b._id} style={{background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 12, padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                      <div style={{flex: 1, marginRight: 10}}>
+                        <b style={{fontSize: '.85rem', color: 'var(--gold)'}}>{b.basketName}</b>
+                        <div style={{fontSize: '.72rem', color: 'var(--muted)', marginTop: 2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden'}}>
+                          {b.items.map(it => `${it.name} (${it.quantity})`).join(', ')}
+                        </div>
+                      </div>
+                      <div style={{display: 'flex', gap: 6}}>
+                        <button className="btn-neon" onClick={() => loadSavedBasketToCart(b)} style={{padding: '6px 12px', fontSize: '.75rem'}}>Load</button>
+                        <button className="btn-ghost" onClick={() => deleteSavedBasket(b._id)} style={{padding: '6px 8px', fontSize: '.75rem', borderColor: 'var(--red)', color: 'var(--red)'}}>✕</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         ) : (<>
           <div className="cart-list">{cart.map(i => (
             <div className="cart-row" key={productId(i)}>
@@ -900,17 +1168,60 @@ function App() {
               <button className="trash" onClick={() => setQty(productId(i), 0)}>🗑️</button>
             </div>))}
           </div>
+
+          {/* Cart progress bar */}
+          <div className="gamified-delivery-bar" style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:'16px',margin:'12px 16px'}}>
+            {total >= 1500 ? (
+              <div style={{textAlign:'center'}}>
+                <span style={{fontSize:'1.3rem'}}>🎉</span> <b style={{color:'var(--green)',fontSize:'.88rem'}}>Free Delivery Unlocked!</b>
+                <p className="muted" style={{fontSize:'.75rem',marginTop:4,marginBottom:0}}>Your order qualifies for free shipping (save KES 150).</p>
+              </div>
+            ) : (
+              <div>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:'.82rem',marginBottom:6}}>
+                  <span>Free Delivery progress:</span>
+                  <b>KES {total} / KES 1,500</b>
+                </div>
+                <div style={{background:'var(--bg-2)',height:8,borderRadius:4,overflow:'hidden',border:'1px solid var(--line)'}}>
+                  <div style={{background:'linear-gradient(90deg, var(--orange), var(--gold))',width:`${Math.min(100, (total/1500)*100)}%`,height:'100%',borderRadius:4,transition:'width 0.3s ease'}} />
+                </div>
+                <p className="muted" style={{fontSize:'.75rem',marginTop:6,marginBottom:0,textAlign:'center'}}>
+                  Add <b>KES {1500 - total}</b> more to unlock free delivery!
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Save active cart template */}
+          <div style={{margin: '12px 16px'}}>
+            {!showBasketSaveForm ? (
+              <button className="btn-ghost" onClick={() => setShowBasketSaveForm(true)} style={{width: '100%', padding: '8px 12px', fontSize: '.82rem'}}>
+                💾 Save Current Cart as Template
+              </button>
+            ) : (
+              <div style={{background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 12, padding: '12px 14px'}}>
+                <h4 style={{margin: '0 0 8px 0', fontSize: '.85rem'}}>Save Cart Template</h4>
+                <div style={{display: 'flex', gap: 8}}>
+                  <input className="field" placeholder="Template name e.g. Weekly Groceries" value={basketNameInput} onChange={e => setBasketNameInput(e.target.value)} style={{flex: 1, padding: 8, borderRadius: 8, fontSize: '.82rem'}} />
+                  <button className="btn-neon" onClick={saveCurrentBasket} style={{padding: '8px 12px', fontSize: '.82rem'}}>Save</button>
+                  <button className="btn-ghost" onClick={() => { setShowBasketSaveForm(false); setBasketNameInput(''); }} style={{padding: '8px 10px', fontSize: '.82rem'}}>✕</button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="summary"><div className="summary-row"><span>Subtotal</span><b>KES {total}</b></div>
             <div className="summary-row muted"><span>Delivery</span><span>Calculated later</span></div></div>
         </>)}
       </div>
       {cart.length > 0 && <div className="detail-bar"><div className="detail-bar-total">KES {total}</div><button className="btn-neon" onClick={() => setScreen('checkout')}>Checkout</button></div>}
+      {renderToasts()}
     </div>
   );
 
   // CHECKOUT
   if (screen === 'checkout') {
-    const finalFee = appliedCoupon?.type === 'free_delivery' || deliveryArea === 'mall' ? 0 : 150;
+    const finalFee = total >= 1500 || appliedCoupon?.type === 'free_delivery' || deliveryArea === 'mall' ? 0 : 150;
     const discountAmt = appliedCoupon ? appliedCoupon.discount : 0;
     const finalTotal = Math.max(0, total + finalFee - discountAmt);
 
@@ -1006,6 +1317,7 @@ function App() {
           <div className="detail-bar-total">KES {finalTotal}</div>
           <button className="btn-neon" onClick={handleCheckout}>Place order</button>
         </div>
+        {renderToasts()}
       </div>
     );
   }
@@ -1058,6 +1370,40 @@ function App() {
           </div>
         )}
 
+        {custLoyalty && loyaltyRewards.length > 0 && (
+          <div style={{margin: '16px 14px', background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '16px'}}>
+            <h3 style={{margin: '0 0 10px 0', fontSize: '.95rem', fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)'}}>🎁 Points Redemption Store</h3>
+            <p className="muted" style={{fontSize: '.75rem', marginBottom: 12}}>Trade your accumulated loyalty points for checkout coupon codes!</p>
+            <div style={{display:'flex', flexDirection:'column', gap:8}}>
+              {loyaltyRewards.map(r => {
+                const canRedeem = custLoyalty.points >= r.pointsCost;
+                return (
+                  <div key={r._id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'var(--bg-2)', border:'1px solid var(--line)', borderRadius:10, padding:'10px 12px'}}>
+                    <div>
+                      <b style={{fontSize:'.82rem', color:'#fff'}}>{r.name}</b>
+                      <div className="muted" style={{fontSize:'.7rem', marginTop:2}}>Costs: <b style={{color:'var(--orange)'}}>{r.pointsCost} PTS</b> · Value: KES {r.rewardValue}</div>
+                    </div>
+                    <button 
+                      className="btn-neon" 
+                      disabled={!canRedeem} 
+                      onClick={() => redeemReward(r._id)} 
+                      style={{
+                        padding: '6px 12px', 
+                        fontSize: '.72rem', 
+                        background: canRedeem ? 'var(--grad)' : 'var(--line)',
+                        borderColor: canRedeem ? 'transparent' : 'var(--line)',
+                        color: canRedeem ? '#000' : 'var(--muted)'
+                      }}
+                    >
+                      Trade
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <h3 className="section-h">Choose an avatar</h3>
         <div className="avatar-row">
           {AVATARS.map(a => (
@@ -1077,6 +1423,7 @@ function App() {
         <button className="row-btn danger" onClick={handleLogout}>↩️ Logout<span>›</span></button>
       </div>
       <BottomNav />
+      {renderToasts()}
     </div>
   );
 
@@ -1115,6 +1462,7 @@ function App() {
         })}
       </div>
       <BottomNav />
+      {renderToasts()}
     </div>
   );
 
@@ -1140,6 +1488,7 @@ function App() {
         )}
       </div>
       <BottomNav />
+      {renderToasts()}
     </div>
   );
 
@@ -1187,6 +1536,7 @@ function App() {
           </div>
         </div>
         <BottomNav />
+        {renderToasts()}
       </div>
     );
   }

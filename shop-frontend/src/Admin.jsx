@@ -95,6 +95,28 @@ function Admin() {
   const [predictions, setPredictions] = useState(null);
   const [predLoading, setPredLoading] = useState(false);
   const [branchForm, setBranchForm] = useState({ name:'', location:'', phone:'', email:'' });
+
+  // Shift management states
+  const [activeShift, setActiveShift] = useState(null);
+  const [startingCashInput, setStartingCashInput] = useState('');
+  const [closingCashInput, setClosingCashInput] = useState('');
+  const [showCloseShiftModal, setShowCloseShiftModal] = useState(false);
+  const [shiftSummary, setShiftSummary] = useState(null);
+  const [shiftsList, setShiftsList] = useState([]);
+
+  // Audit logs states
+  const [auditLogs, setAuditLogs] = useState([]);
+
+  // Dynamic pricing rules states
+  const [pricingRules, setPricingRules] = useState([]);
+  const [newRuleForm, setNewRuleForm] = useState({ name: '', type: 'expiry', discountPercent: '', conditionValue: '', startHour: '', endHour: '' });
+
+  // Stock transfers states
+  const [stockTransfers, setStockTransfers] = useState([]);
+  const [transferForm, setTransferForm] = useState({ fromBranchId: '', toBranchId: '', items: [] });
+  const [transferSelectedProduct, setTransferSelectedProduct] = useState('');
+  const [transferSelectedQty, setTransferSelectedQty] = useState('');
+
   const prevOut = useRef(new Set());
   const prevBranchId = useRef(null);
   const notifSent = useRef(new Set());
@@ -192,6 +214,177 @@ function Admin() {
   const loadReviews = async () => { try { const r = await authGet(API_URL + '/admin/reviews'); setReviews(asArray(await r.json())); } catch (e) { console.error(e); setReviews([]); } };
   const loadStaff = async () => { try { const r = await authGet(API_URL + '/admin/staff'); setStaffList(asArray(await r.json())); } catch (e) { console.error(e); setStaffList([]); } };
   const loadUsers = async () => { try { const r = await authGet(API_URL + '/admin/users'); setUsers(asArray(await r.json())); } catch (e) { console.error(e); setUsers([]); } };
+
+  const checkActiveShift = async () => {
+    try {
+      const r = await authGet(API_URL + '/admin/shifts/active');
+      const d = await r.json();
+      if (d.active) {
+        setActiveShift(d.shift);
+      } else {
+        setActiveShift(null);
+      }
+    } catch (e) { console.error('Failed to load active shift status:', e); }
+  };
+
+  const handleOpenShiftSubmit = async (e) => {
+    e.preventDefault();
+    if (!startingCashInput.trim()) return;
+    try {
+      const r = await authPost(API_URL + '/admin/shifts/start', { startingCash: parseFloat(startingCashInput) });
+      const d = await r.json();
+      if (d.success) {
+        setStartingCashInput('');
+        checkActiveShift();
+        alert('Cashier shift opened successfully!');
+      } else {
+        alert(d.error || 'Failed to open shift');
+      }
+    } catch (e) { console.error(e); alert('Error starting shift'); }
+  };
+
+  const handleCloseShiftSubmit = async (e) => {
+    e.preventDefault();
+    if (!closingCashInput.trim()) return;
+    try {
+      const r = await authPost(API_URL + '/admin/shifts/end', { closingCash: parseFloat(closingCashInput) });
+      const d = await r.json();
+      if (d.success) {
+        setClosingCashInput('');
+        setShowCloseShiftModal(false);
+        setShiftSummary(d.summary);
+        checkActiveShift();
+        loadShiftsList();
+      } else {
+        alert(d.error || 'Failed to close shift');
+      }
+    } catch (e) { console.error(e); alert('Error closing shift'); }
+  };
+
+  const loadShiftsList = async () => {
+    try {
+      const r = await authGet(API_URL + '/admin/shifts');
+      setShiftsList(asArray(await r.json()));
+    } catch (e) { console.error(e); }
+  };
+
+  const loadAuditLogs = async () => {
+    try {
+      const r = await authGet(API_URL + '/admin/audit-logs');
+      setAuditLogs(asArray(await r.json()));
+    } catch (e) { console.error(e); }
+  };
+
+  const loadPricingRules = async () => {
+    try {
+      const r = await authGet(API_URL + '/admin/pricing-rules');
+      setPricingRules(asArray(await r.json()));
+    } catch (e) { console.error(e); }
+  };
+
+  const createPricingRule = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await authPost(API_URL + '/admin/pricing-rules', newRuleForm);
+      const d = await r.json();
+      if (d.success) {
+        setNewRuleForm({ name: '', type: 'expiry', discountPercent: '', conditionValue: '', startHour: '', endHour: '' });
+        loadPricingRules();
+        loadProducts();
+        alert('Pricing rule created!');
+      } else {
+        alert(d.error || 'Failed to create pricing rule');
+      }
+    } catch (e) { console.error(e); }
+  };
+
+  const togglePricingRule = async (id, active) => {
+    try {
+      const r = await authPut(API_URL + '/admin/pricing-rules/' + id, { active: !active });
+      if ((await r.json()).success) {
+        loadPricingRules();
+        loadProducts();
+      }
+    } catch (e) { console.error(e); }
+  };
+
+  const deletePricingRule = async (id) => {
+    if (!window.confirm('Delete this rule?')) return;
+    try {
+      const r = await authDelete(API_URL + '/admin/pricing-rules/' + id);
+      if ((await r.json()).success) {
+        loadPricingRules();
+        loadProducts();
+      }
+    } catch (e) { console.error(e); }
+  };
+
+  const loadStockTransfers = async () => {
+    try {
+      const r = await authGet(API_URL + '/admin/transfers');
+      setStockTransfers(asArray(await r.json()));
+    } catch (e) { console.error(e); }
+  };
+
+  const addTransferItem = () => {
+    if (!transferSelectedProduct || !transferSelectedQty) return;
+    const prod = products.find(p => (p._id || p.id) === transferSelectedProduct);
+    if (!prod) return;
+
+    const exists = transferForm.items.find(i => i.productId === transferSelectedProduct);
+    if (exists) {
+      setTransferForm(f => ({
+        ...f,
+        items: f.items.map(i => i.productId === transferSelectedProduct ? { ...i, qty: parseInt(i.qty) + parseInt(transferSelectedQty) } : i)
+      }));
+    } else {
+      setTransferForm(f => ({
+        ...f,
+        items: [...f.items, { productId: transferSelectedProduct, name: prod.name, qty: parseInt(transferSelectedQty) }]
+      }));
+    }
+    setTransferSelectedProduct('');
+    setTransferSelectedQty('');
+  };
+
+  const removeTransferItem = (prodId) => {
+    setTransferForm(f => ({
+      ...f,
+      items: f.items.filter(i => i.productId !== prodId)
+    }));
+  };
+
+  const createStockTransfer = async (e) => {
+    e.preventDefault();
+    if (!transferForm.fromBranchId || !transferForm.toBranchId || !transferForm.items.length) {
+      alert('Fill all transfer details and add items');
+      return;
+    }
+    if (transferForm.fromBranchId === transferForm.toBranchId) {
+      alert('Source and destination branches must be different');
+      return;
+    }
+    try {
+      const r = await authPost(API_URL + '/admin/transfers', transferForm);
+      if ((await r.json()).success) {
+        setTransferForm({ fromBranchId: '', toBranchId: '', items: [] });
+        loadStockTransfers();
+        loadProducts();
+        alert('Stock transfer request submitted!');
+      }
+    } catch (e) { console.error(e); }
+  };
+
+  const completeStockTransfer = async (id) => {
+    try {
+      const r = await authPost(API_URL + '/admin/transfers/' + id + '/complete');
+      if ((await r.json()).success) {
+        loadStockTransfers();
+        loadProducts();
+        alert('Stock transfer completed!');
+      }
+    } catch (e) { console.error(e); }
+  };
   const createUser = async (e) => {
     e.preventDefault();
     if (!newUsername || !newPassword) { alert('Username and password required'); return; }
@@ -329,6 +522,7 @@ function Admin() {
     checkAlerts();
     loadOrders();
     keepAlive();
+    checkActiveShift();
     const id = setInterval(() => {
       checkAlerts();
       loadOrders();
@@ -343,9 +537,10 @@ function Admin() {
     else if (tab === 'expenses') { loadExpenses(); loadSummary(); }
     else if (tab === 'credit') loadCredit();
     else if (tab === 'reviews') loadReviews();
-    else if (tab === 'staff') { loadStaff(); if (user?.role === 'owner') { loadUsers(); loadBranches(); } }
+    else if (tab === 'staff') { loadStaff(); if (user?.role === 'owner') { loadUsers(); loadBranches(); loadShiftsList(); loadAuditLogs(); } }
     else if (tab === 'loyalty') { loadLoyaltyMembers(); loadCoupons(); }
     else if (tab === 'branches' && (!user || user.role === 'owner')) loadBranches();
+    else if (tab === 'inventory') { loadProducts(); loadPricingRules(); loadStockTransfers(); }
   }, [tab, loggedIn]);
 
   // Reload data when branch filter changes
@@ -403,6 +598,14 @@ function Admin() {
   };
 
   // Auto-login on mount disabled for maximum security. Owner/Staff must always authenticate via login form.
+  useEffect(() => {
+    return () => {
+      localStorage.removeItem('bm_token');
+      localStorage.removeItem('bm_user');
+      sessionStorage.removeItem('bm_token');
+      sessionStorage.removeItem('bm_user');
+    };
+  }, []);
 
   // Inactivity timeout (15 minutes)
   useEffect(() => {
@@ -830,17 +1033,40 @@ function Admin() {
         ))}
       </div>
 
-      {safeTab === "sales" && (
+      {safeTab === "sales" && !activeShift && (
+        <div className="blitz-admin-body shift-locked-overlay" style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'65vh',textAlign:'center'}}>
+          <div className="shift-lock-card" style={{background:'var(--card)',border:'1px solid var(--line)',padding:'40px',borderRadius:20,maxWidth:400,boxShadow:'0 10px 30px rgba(0,0,0,0.5)',margin:'0 auto'}}>
+            <span style={{fontSize:'3.5rem'}}>🔒</span>
+            <h2 style={{fontFamily:'Unbounded, sans-serif',margin:'15px 0 10px 0',color:'var(--gold)'}}>POS Register Locked</h2>
+            <p className="blitz-admin-muted" style={{fontSize:'.9rem',marginBottom:24}}>A cashier shift must be opened before you can scan products or record sales transactions.</p>
+            <form onSubmit={handleOpenShiftSubmit} style={{display:'flex',flexDirection:'column',gap:12}}>
+              <input 
+                type="number" 
+                placeholder="Enter starting cash balance (KES)" 
+                value={startingCashInput} 
+                onChange={e => setStartingCashInput(e.target.value)} 
+                required 
+                style={{textAlign:'center',padding:12,borderRadius:10,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)',fontSize:'1rem',width:'100%',boxSizing:'border-box'}}
+              />
+              <button className="blitz-admin-btn" type="submit" style={{width:'100%',padding:12}}>➕ Start Cashier Shift</button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {safeTab === "sales" && activeShift && (
         <div className="blitz-admin-body pos-wrap">
           <div className="pos-left">
             <div className="pos-head-row">
               <h2>Sell</h2>
-              <div className="pos-cashier-wrap">
-                <span>Cashier:</span>
-                <select className="pos-cashier-sel" value={cashier} onChange={e => setCashier(e.target.value)}>
-                  <option value="Owner">Owner</option>
-                  {staffList.map(s => <option key={s._id} value={s.name}>{s.name}</option>)}
-                </select>
+              <div style={{display:'flex',alignItems:'center',gap:12}}>
+                <div style={{background:'rgba(54, 211, 153, 0.1)',color:'var(--green)',padding:'6px 12px',borderRadius:8,fontSize:'.8rem',border:'1px solid rgba(54,211,153,0.2)',fontWeight:600}}>
+                  🟢 Shift Active: <b>{activeShift.cashierName}</b> (Started: {new Date(activeShift.startTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})})
+                </div>
+                <button className="pos-void" onClick={() => {
+                  setClosingCashInput('');
+                  setShowCloseShiftModal(true);
+                }} style={{padding:'6px 12px',fontSize:'.8rem',margin:0,background:'#ff2d2d',color:'#fff'}}>🔴 End Shift</button>
               </div>
             </div>
             <form className="pos-scan" onSubmit={handleScanSubmit}>
@@ -942,6 +1168,56 @@ function Admin() {
         </div>
       )}
 
+      {/* End Shift Modal */}
+      {showCloseShiftModal && (
+        <div className="blitz-admin-modal-overlay" style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,backdropFilter:'blur(5px)'}}>
+          <div className="blitz-admin-modal-card" style={{background:'var(--card)',border:'1px solid var(--line)',padding:30,borderRadius:16,width:'100%',maxWidth:400,textAlign:'center'}}>
+            <h3 style={{fontFamily:'Unbounded, sans-serif',color:'var(--orange)',marginBottom:10}}>🔴 End Cashier Shift</h3>
+            <p className="blitz-admin-muted" style={{fontSize:'.85rem',marginBottom:20}}>Count the cash in your drawer and enter the total balance below to reconcile sales.</p>
+            <form onSubmit={handleCloseShiftSubmit} style={{display:'flex',flexDirection:'column',gap:12}}>
+              <input 
+                type="number" 
+                placeholder="Enter actual closing cash balance (KES)" 
+                value={closingCashInput} 
+                onChange={e => setClosingCashInput(e.target.value)} 
+                required 
+                style={{textAlign:'center',padding:12,borderRadius:10,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)',fontSize:'1rem',width:'100%',boxSizing:'border-box'}}
+              />
+              <div style={{display:'flex',gap:10,marginTop:10}}>
+                <button className="blitz-admin-btn" type="submit" style={{flex:1,padding:12}}>Confirm & Close</button>
+                <button className="blitz-admin-btn" type="button" onClick={() => setShowCloseShiftModal(false)} style={{flex:1,padding:12,background:'none',border:'1px solid var(--line)',color:'var(--text)'}}>Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Shift Summary Report Overlay */}
+      {shiftSummary && (
+        <div className="blitz-admin-modal-overlay" style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,backdropFilter:'blur(5px)'}}>
+          <div className="blitz-admin-modal-card" style={{background:'var(--card)',border:'1px solid var(--line)',padding:30,borderRadius:16,width:'100%',maxWidth:450}}>
+            <h3 style={{fontFamily:'Unbounded, sans-serif',color:'var(--green)',textAlign:'center',marginBottom:6}}>📊 Shift Reconciliation Report</h3>
+            <p className="blitz-admin-muted" style={{fontSize:'.8rem',textAlign:'center',marginBottom:20}}>Shift completed successfully. Summary details of sales records:</p>
+            
+            <div style={{display:'flex',flexDirection:'column',gap:10,background:'var(--bg-2)',padding:16,borderRadius:12,border:'1px solid var(--line)',fontSize:'.9rem',marginBottom:20}}>
+              <div style={{display:'flex',justifyContent:'space-between'}}><span>Starting Cash:</span><b>KES {shiftSummary.startingCash.toLocaleString()}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between'}}><span>Cash Sales:</span><b>KES {shiftSummary.cashSales.toLocaleString()}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between'}}><span>M-Pesa Sales:</span><b>KES {shiftSummary.mpesaSales.toLocaleString()}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between',borderTop:'1px solid var(--line)',paddingTop:6}}><span>Expected Drawer Cash:</span><b>KES {shiftSummary.expectedCash.toLocaleString()}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between'}}><span>Actual Drawer Cash:</span><b>KES {shiftSummary.closingCash.toLocaleString()}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between',color:shiftSummary.difference >= 0 ? 'var(--green)' : 'var(--red)',fontWeight:'bold'}}>
+                <span>Difference:</span>
+                <span>{shiftSummary.difference >= 0 ? '+' : ''}KES {shiftSummary.difference.toLocaleString()}</span>
+              </div>
+              <div style={{display:'flex',justifyContent:'space-between'}}><span>Total Sales Processed:</span><b>{shiftSummary.salesCount} sales</b></div>
+            </div>
+
+            <button className="blitz-admin-btn" style={{width:'100%',padding:12}} onClick={() => setShiftSummary(null)}>Got it, Close Report</button>
+          </div>
+        </div>
+      )}
+
+
       {safeTab === "inventory" && (
         <div className="blitz-admin-body">
           <div className="blitz-admin-row-between"><h2>Inventory</h2><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="blitz-admin-btn small" onClick={exportInventoryExcel}>📊 Excel</button><button className="blitz-admin-btn small" onClick={() => { showForm ? resetForm() : setShowForm(true); }}>{showForm ? "✕ Cancel" : "➕ Add stock"}</button></div></div>
@@ -985,6 +1261,126 @@ function Admin() {
                 </div>
               );
             })}</div>
+          )}
+
+          {/* PRICING RULES */}
+          <div style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:'16px',marginTop:20,marginBottom:16}}>
+            <h3 style={{fontSize:'.95rem',marginBottom:6,fontFamily:'Unbounded, sans-serif',color:'var(--gold)'}}>🏷️ Dynamic Price Scheduler</h3>
+            <p className="blitz-admin-muted" style={{marginBottom:12,fontSize:'.8rem'}}>Schedule automated discounts for items near expiration or launch custom Happy Hour price drops.</p>
+            
+            <form onSubmit={createPricingRule} style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(130px, 1fr))',gap:8,marginBottom:16}}>
+              <input value={newRuleForm.name} onChange={e => setNewRuleForm(f=>({...f,name:e.target.value}))} placeholder="Rule Name e.g. Bread 6PM" required style={{padding:8,borderRadius:8,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)'}} />
+              <select value={newRuleForm.type} onChange={e => setNewRuleForm(f=>({...f,type:e.target.value}))} style={{background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:8,padding:8,fontFamily:'inherit'}}>
+                <option value="expiry">Expiry Discount</option>
+                <option value="happy_hour">Happy Hour (Time Scheduled)</option>
+              </select>
+              <input type="number" value={newRuleForm.discountPercent} onChange={e => setNewRuleForm(f=>({...f,discountPercent:e.target.value}))} placeholder="Discount % e.g. 30" required style={{padding:8,borderRadius:8,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)'}} />
+              {newRuleForm.type === 'expiry' ? (
+                <input type="number" value={newRuleForm.conditionValue} onChange={e => setNewRuleForm(f=>({...f,conditionValue:e.target.value}))} placeholder="Within days e.g. 3" required style={{padding:8,borderRadius:8,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)'}} />
+              ) : (
+                <>
+                  <input type="text" value={newRuleForm.startHour} onChange={e => setNewRuleForm(f=>({...f,startHour:e.target.value}))} placeholder="Start Time e.g. 18:00" required style={{padding:8,borderRadius:8,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)'}} />
+                  <input type="text" value={newRuleForm.endHour} onChange={e => setNewRuleForm(f=>({...f,endHour:e.target.value}))} placeholder="End Time e.g. 21:00" required style={{padding:8,borderRadius:8,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)'}} />
+                </>
+              )}
+              <button className="blitz-admin-btn small" type="submit" style={{gridColumn:'1 / -1'}}>➕ Add Pricing Rule</button>
+            </form>
+
+            {pricingRules.length === 0 ? <p className="blitz-admin-empty sm">No active pricing rules</p> : (
+              <div className="blitz-admin-list">
+                {pricingRules.map(r => (
+                  <div className="exp-row" key={r._id} style={{fontSize:'.85rem'}}>
+                    <div>
+                      <b>{r.name}</b>
+                      <span className="blitz-admin-muted"> · {r.type === 'expiry' ? `Within ${r.conditionValue} days of expiry` : `Daily from ${r.startHour} to ${r.endHour}`} · <b>-{r.discountPercent}% OFF</b></span>
+                    </div>
+                    <div style={{display:'flex',gap:6}}>
+                      <button className="pos-void" type="button" onClick={() => togglePricingRule(r._id, r.active)} style={{background:r.active?'rgba(54,211,153,0.1)':'rgba(255,45,45,0.1)',color:r.active?'var(--green)':'var(--red)',border:'none',padding:'4px 8px',cursor:'pointer'}}>{r.active?'ON':'OFF'}</button>
+                      <button className="pos-void" type="button" onClick={() => deletePricingRule(r._id)}>delete</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* STOCK TRANSFERS */}
+          {user?.role === 'owner' && (
+            <div style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:'16px',marginTop:16,marginBottom:16}}>
+              <h3 style={{fontSize:'.95rem',marginBottom:6,fontFamily:'Unbounded, sans-serif',color:'var(--gold)'}}>🏪 Inter-Branch Stock Transfers</h3>
+              <p className="blitz-admin-muted" style={{marginBottom:12,fontSize:'.8rem'}}>Transfer stock quantities from one branch store to another.</p>
+
+              <form onSubmit={createStockTransfer} style={{display:'flex',flexDirection:'column',gap:10,marginBottom:16}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                  <label style={{fontSize:'.8rem',display:'flex',flexDirection:'column',gap:4}}>From Source Branch:
+                    <select value={transferForm.fromBranchId} onChange={e => setTransferForm(f=>({...f,fromBranchId:e.target.value}))} style={{width:'100%',background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:8,padding:8,fontFamily:'inherit'}}>
+                      <option value="">Select source...</option>
+                      {branches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
+                    </select>
+                  </label>
+                  <label style={{fontSize:'.8rem',display:'flex',flexDirection:'column',gap:4}}>To Destination Branch:
+                    <select value={transferForm.toBranchId} onChange={e => setTransferForm(f=>({...f,toBranchId:e.target.value}))} style={{width:'100%',background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:8,padding:8,fontFamily:'inherit'}}>
+                      <option value="">Select destination...</option>
+                      {branches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
+                    </select>
+                  </label>
+                </div>
+
+                <div style={{display:'grid',gridTemplateColumns:'2fr 1fr auto',gap:8,alignItems:'end'}}>
+                  <label style={{fontSize:'.8rem',display:'flex',flexDirection:'column',gap:4}}>Select Product:
+                    <select value={transferSelectedProduct} onChange={e => setTransferSelectedProduct(e.target.value)} style={{width:'100%',background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:8,padding:8,fontFamily:'inherit'}}>
+                      <option value="">Choose item...</option>
+                      {products.filter(p => !transferForm.fromBranchId || p.branchId === transferForm.fromBranchId).map(p => (
+                        <option key={p._id || p.id} value={p._id || p.id}>{p.name} (Stock: {p.stock})</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{fontSize:'.8rem',display:'flex',flexDirection:'column',gap:4}}>Transfer Qty:
+                    <input type="number" value={transferSelectedQty} onChange={e => setTransferSelectedQty(e.target.value)} placeholder="Qty" style={{width:'100%',padding:7,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)',borderRadius:8}} />
+                  </label>
+                  <button className="blitz-admin-btn small" type="button" onClick={addTransferItem} style={{padding:'8px 12px',margin:0}}>Add item</button>
+                </div>
+
+                {transferForm.items.length > 0 && (
+                  <div style={{background:'var(--bg-2)',padding:10,borderRadius:8,border:'1px solid var(--line)',fontSize:'.8rem'}}>
+                    <b>Items to transfer:</b>
+                    <ul style={{margin:'6px 0 0 0',paddingLeft:16}}>
+                      {transferForm.items.map(it => (
+                        <li key={it.productId} style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                          <span>{it.name} × <b>{it.qty}</b></span>
+                          <button type="button" onClick={() => removeTransferItem(it.productId)} style={{background:'none',border:'none',color:'var(--red)',cursor:'pointer'}}>remove</button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <button className="blitz-admin-btn small" type="submit" disabled={!transferForm.items.length} style={{margin:0}}>🚀 Initiate Transfer</button>
+              </form>
+
+              {stockTransfers.length === 0 ? <p className="blitz-admin-empty sm">No stock transfers recorded</p> : (
+                <div className="blitz-admin-list">
+                  {stockTransfers.map(tr => {
+                    const fromName = branches.find(b => b._id === tr.fromBranchId)?.name || 'Source';
+                    const toName = branches.find(b => b._id === tr.toBranchId)?.name || 'Destination';
+                    return (
+                      <div className="exp-row" key={tr._id} style={{fontSize:'.8rem'}}>
+                        <div>
+                          <b>{fromName} ➜ {toName}</b>
+                          <span className="blitz-admin-muted"> · {tr.items.length} items · Status: <b>{tr.status}</b></span>
+                          <div style={{fontSize:'.72rem',color:'var(--muted)',marginTop:2}}>
+                            {tr.items.map(it => `${it.name} (${it.qty})`).join(', ')}
+                          </div>
+                        </div>
+                        {tr.status === 'pending' && (
+                          <button className="pos-void" type="button" onClick={() => completeStockTransfer(tr._id)} style={{background:'rgba(54,211,153,0.15)',color:'var(--green)',padding:'4px 8px'}}>Approve & Complete</button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -1546,6 +1942,71 @@ function Admin() {
                 </div>
               )}
             </div>
+          )}
+
+          {user?.role === 'owner' && (
+            <>
+              {/* PAST SHIFTS */}
+              <div style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:'16px',marginTop:20,marginBottom:16}}>
+                <h3 style={{fontSize:'.95rem',marginBottom:10,fontFamily:'Unbounded, sans-serif',color:'var(--gold)'}}>📋 Cashier Shift Log & Drawer Reconciliation</h3>
+                <p className="blitz-admin-muted" style={{marginBottom:10,fontSize:'.8rem'}}>Review cashier drawer reports, expected vs actual cash, and reconciliation differences.</p>
+                {shiftsList.length === 0 ? <p className="blitz-admin-empty">No cashier shifts recorded yet.</p> : (
+                  <div className="blitz-admin-list" style={{maxHeight:'300px',overflowY:'auto'}}>
+                    {shiftsList.map(s => {
+                      const diff = s.difference || 0;
+                      return (
+                        <div className="exp-row" key={s._id} style={{fontSize:'.82rem',display:'flex',flexDirection:'column',alignItems:'stretch',gap:4,padding:'12px',borderBottom:'1px solid var(--line)'}}>
+                          <div style={{display:'flex',justifyContent:'space-between'}}>
+                            <b>👤 {s.cashierName}</b>
+                            <span style={{color: s.status === 'open' ? 'var(--green)' : 'var(--muted)'}}>
+                              {s.status === 'open' ? '🟢 Active Now' : '🔴 Closed'}
+                            </span>
+                          </div>
+                          <div className="blitz-admin-muted" style={{fontSize:'.75rem'}}>
+                            🕒 Start: {new Date(s.startTime).toLocaleString()} {s.endTime ? `| End: ${new Date(s.endTime).toLocaleString()}` : ''}
+                          </div>
+                          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(100px, 1fr))',gap:8,marginTop:4}}>
+                            <div><span className="blitz-admin-muted">Start Cash:</span> <br/><b>{money(s.startingCash)}</b></div>
+                            {s.status === 'closed' && (
+                              <>
+                                <div><span className="blitz-admin-muted">Sales:</span> <br/><b>{money(s.cashSales)} Cash / {money(s.mpesaSales)} Mpesa</b></div>
+                                <div><span className="blitz-admin-muted">Expected:</span> <br/><b>{money(s.expectedCash)}</b></div>
+                                <div><span className="blitz-admin-muted">Actual:</span> <br/><b>{money(s.closingCash)}</b></div>
+                                <div>
+                                  <span className="blitz-admin-muted">Diff:</span> <br/>
+                                  <b style={{color: diff === 0 ? 'var(--green)' : diff > 0 ? 'var(--gold)' : 'var(--red)'}}>
+                                    {diff > 0 ? '+' : ''}{money(diff)}
+                                  </b>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* SYSTEM AUDIT LOGS */}
+              <div style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:'16px',marginBottom:16}}>
+                <h3 style={{fontSize:'.95rem',marginBottom:10,fontFamily:'Unbounded, sans-serif',color:'var(--gold)'}}>📜 System Modification Audit Logs</h3>
+                <p className="blitz-admin-muted" style={{marginBottom:10,fontSize:'.8rem'}}>Track all actions performed by managers and cashiers (e.g. price updates, shifts, rules).</p>
+                {auditLogs.length === 0 ? <p className="blitz-admin-empty">No audit logs recorded yet.</p> : (
+                  <div className="blitz-admin-list" style={{maxHeight:'350px',overflowY:'auto'}}>
+                    {auditLogs.map(l => (
+                      <div className="exp-row" key={l._id} style={{fontSize:'.8rem',display:'flex',flexDirection:'column',gap:2,padding:'8px 12px'}}>
+                        <div style={{display:'flex',justifyContent:'space-between'}}>
+                          <span><b>@{l.username}</b> · <span className="blitz-admin-muted">{l.action}</span></span>
+                          <span className="blitz-admin-muted" style={{fontSize:'.7rem'}}>{new Date(l.timestamp).toLocaleString()}</span>
+                        </div>
+                        <div style={{color:'var(--text)',fontSize:'.82rem'}}>{l.details}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </div>
       )}
