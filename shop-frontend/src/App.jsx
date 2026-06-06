@@ -21,12 +21,28 @@ const AVATARS = [
 function BlitzLogo({ size = 80 }) {
   return (
     <svg className="blitz-logo" width={size} height={size} viewBox="0 0 100 100" fill="none">
-      <path d="M25 35 H75 L70 85 H30 Z" stroke="url(#bg1)" strokeWidth="3.5" fill="none" strokeLinejoin="round" />
-      <path d="M37 35 V28 a13 13 0 0 1 26 0 V35" stroke="url(#bg1)" strokeWidth="3.5" fill="none" strokeLinecap="round" />
-      <path d="M52 48 L44 62 H53 L46 76 L62 56 H52 L57 48 Z" fill="url(#bg1)" />
-      <defs><linearGradient id="bg1" x1="0" y1="0" x2="100" y2="100">
-        <stop offset="0%" stopColor="#ffd24a" /><stop offset="50%" stopColor="#ff7a1a" /><stop offset="100%" stopColor="#ff2d2d" />
-      </linearGradient></defs>
+      <defs>
+        <linearGradient id="bg1" x1="0" y1="0" x2="100" y2="100">
+          <stop offset="0%" stopColor="#ffd24a" />
+          <stop offset="50%" stopColor="#ff7a1a" />
+          <stop offset="100%" stopColor="#ff2d2d" />
+        </linearGradient>
+        <filter id="glow-react" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="3.2" result="blur" />
+          <feComponentTransfer in="blur" result="glow1">
+            <feFuncA type="linear" slope="0.75"/>
+          </feComponentTransfer>
+          <feMerge>
+            <feMergeNode in="glow1" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+      <g filter="url(#glow-react)">
+        <path d="M25 35 H75 L70 85 H30 Z" stroke="url(#bg1)" strokeWidth="4.5" fill="none" strokeLinejoin="round" />
+        <path d="M37 35 V28 a13 13 0 0 1 26 0 V35" stroke="url(#bg1)" strokeWidth="4.5" fill="none" strokeLinecap="round" />
+        <path d="M52 48 L44 62 H53 L46 76 L62 56 H52 L57 48 Z" fill="url(#bg1)" />
+      </g>
     </svg>
   );
 }
