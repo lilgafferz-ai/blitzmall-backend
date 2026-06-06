@@ -8,8 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const MONGO_URI = process.env.MONGODB_URI;
-if (!MONGO_URI || !/^mongodb(\+srv)?:\/\//i.test(MONGO_URI)) { throw new Error('MONGODB_URI is missing or invalid'); }
+const MONGO_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/my_shop';
 const client = new MongoClient(MONGO_URI);
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
@@ -28,6 +27,19 @@ const authenticate = (req, res, next) => {
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+};
+
+// Helper: extract branchId from query/body/user
+const branchFilter = (req) => {
+  // If user is owner and no branch specified, return {} (view all)
+  // If user is owner and branch specified, filter by it
+  // If user is manager/cashier, filter by their branch
+  if (req.user.role === 'owner') {
+    const b = req.query.branchId || req.body?.branchId;
+    return b ? { branchId: b } : {};
+  }
+  // Manager/cashier only see their branch
+  return req.user.branchId ? { branchId: req.user.branchId } : {};
 };
 
 client.connect().then(() => {
@@ -89,18 +101,7 @@ const authorize = (...roles) => {
   };
 };
 
-// Helper: extract branchId from query/body/user
-const branchFilter = (req) => {
-  // If user is owner and no branch specified, return {} (view all)
-  // If user is owner and branch specified, filter by it
-  // If user is manager/cashier, filter by their branch
-  if (req.user.role === 'owner') {
-    const b = req.query.branchId || req.body?.branchId;
-    return b ? { branchId: b } : {};
-  }
-  // Manager/cashier only see their branch
-  return req.user.branchId ? { branchId: req.user.branchId } : {};
-};
+// Helper branchFilter definition moved to top level
 
 // ===== USERS & JWT AUTH =====
 
@@ -127,7 +128,10 @@ app.post('/api/admin/setup', async (req, res) => {
 
 // JWT Login
 app.post('/api/admin/login', async (req, res) => {
-  const { username, password } = req.body;
+  let { username, password } = req.body;
+  if (!username && password) {
+    username = 'owner';
+  }
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   try {
     const userCount = await users_.countDocuments();
