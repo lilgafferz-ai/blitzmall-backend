@@ -14,6 +14,20 @@ const client = new MongoClient(MONGO_URI);
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
 const JWT_SECRET = process.env.JWT_SECRET || 'blitzmall_jwt_secret_change_in_prod_2024'; // ⚠️ SET JWT_SECRET env var in production!
 const JWT_EXPIRES = '24h';
+const authenticate = (req, res, next) => {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  try {
+    const token = header.split(' ')[1];
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+};
 
 client.connect().then(() => {
   db = client.db('my_shop');
