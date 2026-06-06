@@ -2,6 +2,8 @@
   "name": "shop-frontend",
   "version": "0.1.0",
   "private": true,
+  "main": "build/electron.js",
+  "homepage": "./",
   "dependencies": {
     "@capacitor/android": "^8.4.0",
     "@capacitor/cli": "^8.4.0",
@@ -26,7 +28,9 @@
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "android:build": "npm run build && npx cap sync android",
-    "android:open": "npx cap open android"
+    "android:open": "npx cap open android",
+    "electron": "electron .",
+    "electron:build": "npm run build && electron-builder"
   },
   "eslintConfig": {
     "extends": [
@@ -47,6 +51,23 @@
     ]
   },
   "devDependencies": {
-    "@capacitor/assets": "^3.0.5"
+    "@capacitor/assets": "^3.0.5",
+    "electron": "^42.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.blitzmall.app",
+    "productName": "BlitzMall",
+    "files": [
+      "build/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "portable",
+      "icon": "build/logo512.png"
+    }
   }
 }
