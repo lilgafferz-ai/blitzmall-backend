@@ -1,5 +1,6 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 // Set the application name and App User Model ID for proper Windows taskbar grouping and branding
 app.name = "BlitzMall";
@@ -8,13 +9,17 @@ if (process.platform === 'win32') {
 }
 
 function createWindow() {
+  const iconPath = fs.existsSync(path.join(__dirname, 'build', 'app-icon.ico'))
+    ? path.join(__dirname, 'build', 'app-icon.ico')
+    : path.join(__dirname, 'public', 'app-icon.ico');
+
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 1024,
     minHeight: 720,
     title: "Blitz Mall HQ",
-    icon: path.join(__dirname, 'public', 'app-icon.ico'),
+    icon: iconPath,
     show: false,
     backgroundColor: '#0a0a0c',
     webPreferences: {

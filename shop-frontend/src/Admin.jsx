@@ -2309,7 +2309,6 @@ const loadStockTransfers = async () => {
               )}
                         </div>
               <div ref={adminAiMessagesEndRef} />
-            </div>
             {/* Quick action buttons */}
             {adminAiMessages.length === 1 && adminAiMessages[0].sender === 'bot' && !adminAiLoading && (
               <div style={{padding:'4px 12px 2px',display:'flex',flexDirection:'column',gap:4}}>
@@ -2327,7 +2326,6 @@ const loadStockTransfers = async () => {
             </form>
           </div>
         )}
-        {headerEndMarker}
         {showFlashSaleModal && flashSaleProduct && (
         <div className="blitz-admin-modal-overlay" style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,backdropFilter:'blur(5px)'}}>
           <div className="blitz-admin-modal-card" style={{background:'var(--card)',border:'1px solid var(--line)',padding:30,borderRadius:16,width:'100%',maxWidth:420}}>
