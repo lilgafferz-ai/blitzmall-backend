@@ -61,11 +61,44 @@ function Avatar({ profile, size = 40 }) {
   return <img className="avatar" style={st} src={src} alt="me" />;
 }
 
-const BANNERS = [
+const DEFAULT_BANNERS = [
   { id: 1, title: "🚀 MEGA LAUNCH", text: "Free Delivery on Mall Area orders! Limited time.", code: "", gradient: "linear-gradient(135deg, #ff007f, #7f00ff)" },
   { id: 2, title: "🎁 WEEKEND SPECIAL", text: "Get 10% discount on orders over KES 1000!", code: "BLITZ10", gradient: "linear-gradient(135deg, #00f2fe, #4facfe)" },
   { id: 3, title: "💳 INSTANT PAY", text: "Scan & Pay with secure M-Pesa STK push!", code: "", gradient: "linear-gradient(135deg, #38ef7d, #11998e)" },
 ];
+
+function FlashSaleCountdown({ expires }) {
+  const [timeLeft, setTimeLeft] = useState('...');
+  useEffect(() => {
+    if (!expires) {
+      setTimeLeft('Limited time');
+      return;
+    }
+    const updateTimer = () => {
+      const diff = new Date(expires) - new Date();
+      if (diff <= 0) {
+        setTimeLeft('Ended');
+        return;
+      }
+      const secs = Math.floor(diff / 1000);
+      const mins = Math.floor(secs / 60);
+      const hours = Math.floor(mins / 60);
+      const days = Math.floor(hours / 24);
+      if (days > 0) {
+        setTimeLeft(`${days}d ${hours % 24}h`);
+      } else {
+        const h = String(hours % 24).padStart(2, '0');
+        const m = String(mins % 60).padStart(2, '0');
+        const s = String(secs % 60).padStart(2, '0');
+        setTimeLeft(`${h}:${m}:${s}`);
+      }
+    };
+    updateTimer();
+    const id = setInterval(updateTimer, 1000);
+    return () => clearInterval(id);
+  }, [expires]);
+  return <span>{timeLeft}</span>;
+}
 
 function App() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -75,18 +108,25 @@ function App() {
   const [showSpinWheel, setShowSpinWheel] = useState(false);
   const [wheelSpinning, setWheelSpinning] = useState(false);
   const [wheelPrize, setWheelPrize] = useState(null);
+  const [wheelRotation, setWheelRotation] = useState(0);
   const [lastSpinDate, setLastSpinDate] = useState(() => {
     try { return localStorage.getItem('last_spin_date') || ''; } catch { return ''; }
   });
 
   const [showAiBot, setShowAiBot] = useState(false);
   const [aiMessages, setAiMessages] = useState([
-    { sender: 'bot', text: 'Jambo! I am your BlitzMall AI Assistant. Ask me to suggest a recipe, find cheap groceries, or explain checkout rewards!' }
+    { sender: 'bot', text: 'Jambo! I am your BlitzMall AI Assistant. Ask me to add products to cart, track or cancel orders, or file complaints!' }
   ]);
   const [aiInput, setAiInput] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
 
-  const [flashTime, setFlashTime] = useState('04:12:08');
+  const [banners, setBanners] = useState(DEFAULT_BANNERS);
+  const [lastScratchDate, setLastScratchDate] = useState(() => {
+    try { return localStorage.getItem('last_scratch_date') || ''; } catch { return ''; }
+  });
+  const [scratchResult, setScratchResult] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('scratch_result')); } catch { return null; }
+  });
 
   const [customer, setCustomer] = useState(() => {
     try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
@@ -121,15 +161,14 @@ function App() {
   const [basketNameInput, setBasketNameInput] = useState('');
   const [showBasketSaveForm, setShowBasketSaveForm] = useState(false);
   const [loyaltyRewards, setLoyaltyRewards] = useState([]);
-  const [scratchRevealed, setScratchRevealed] = useState(() => {
-    try { return localStorage.getItem('scratch_revealed') === 'true'; } catch { return false; }
-  });
+  const scratchRevealed = lastScratchDate === new Date().toLocaleDateString();
   const [scratchRevealing, setScratchRevealing] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [custLoyalty, setCustLoyalty] = useState(null);
   const [stkCheckoutId, setStkCheckoutId] = useState(null);
   const [stkStatus, setStkStatus] = useState('idle'); // idle | waiting | confirmed | failed
   const [stkError, setStkError] = useState('');
+  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
   const [reviewMsg, setReviewMsg] = useState('');
   const [reviewSent, setReviewSent] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -146,6 +185,16 @@ function App() {
         localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(d));
       }
     } catch (e) { console.warn('Offline: using cached products'); }
+  }, []);
+
+  const loadBanners = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_URL}/banners`);
+      const d = await r.json();
+      if (Array.isArray(d) && d.length) {
+        setBanners(d);
+      }
+    } catch (e) { console.warn('Failed to load banners'); }
   }, []);
 
   const touchStartYRef = useRef(0);
@@ -166,6 +215,7 @@ function App() {
     if (pullDistance >= pullThreshold && !isRefreshing) {
       setIsRefreshing(true);
       await loadProducts();
+      await loadBanners();
       setIsRefreshing(false);
     }
     setPullDistance(0);
@@ -175,18 +225,30 @@ function App() {
   const refreshProducts = async () => {
     setIsRefreshing(true);
     await loadProducts();
+    await loadBanners();
     setIsRefreshing(false);
     setShowRefreshBtn(false);
   };
 
-  
-
   useEffect(() => {
     loadProducts();
+    loadBanners();
     window.addEventListener('online', loadProducts);
+    window.addEventListener('online', loadBanners);
     try { SplashScreen.hide(); } catch {}
-    return () => window.removeEventListener('online', loadProducts);
-  }, [loadProducts]);
+    return () => {
+      window.removeEventListener('online', loadProducts);
+      window.removeEventListener('online', loadBanners);
+    };
+  }, [loadProducts, loadBanners]);
+
+  useEffect(() => {
+    if (!banners || banners.length <= 1) return;
+    const interval = setInterval(() => {
+      setBannerIndex((prevIndex) => (prevIndex + 1) % banners.length);
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [banners]);
 
   useEffect(() => {
     if (screen === 'splash') {
@@ -343,12 +405,35 @@ function App() {
   const scratchCoupon = () => {
     if (scratchRevealed || scratchRevealing) return;
     setScratchRevealing(true);
+    const todayStr = new Date().toLocaleDateString();
+    
+    // Choose result: 80% lose, 10% lucky30, 7% lucky50, 3% free delivery
+    const rand = Math.random();
+    let prize;
+    if (rand < 0.80) {
+      prize = { name: 'lose', message: 'Ah, no discount today. Try again tomorrow!', code: '', title: 'Better Luck Tomorrow!' };
+    } else if (rand < 0.90) {
+      prize = { name: 'lucky30', message: 'You won KES 30 off! Code: LUCKY30', code: 'LUCKY30', title: 'KES 30 Discount Unlocked!' };
+    } else if (rand < 0.97) {
+      prize = { name: 'lucky50', message: 'You won KES 50 off! Code: LUCKY50', code: 'LUCKY50', title: 'KES 50 Discount Unlocked!' };
+    } else {
+      prize = { name: 'delivery', message: 'You won Free Delivery! Code: LUCKYDEL', code: 'LUCKYDEL', title: 'Free Delivery Unlocked!' };
+    }
+
     setTimeout(() => {
       setScratchRevealing(false);
-      setScratchRevealed(true);
-      try { localStorage.setItem('scratch_revealed', 'true'); } catch {}
-      setCouponInput('SHAKE15');
-      showToast("🎁 15% OFF Shake Coupon applied at checkout!");
+      setLastScratchDate(todayStr);
+      setScratchResult(prize);
+      try {
+        localStorage.setItem('last_scratch_date', todayStr);
+        localStorage.setItem('scratch_result', JSON.stringify(prize));
+      } catch {}
+      if (prize.code) {
+        setCouponInput(prize.code);
+        showToast(`🎁 ${prize.title}`);
+      } else {
+        showToast(`😢 ${prize.title}`);
+      }
     }, 1200);
   };
 
@@ -448,25 +533,6 @@ function App() {
       loadLoyaltyRewards();
     }
   }, [screen]);
-
-  // Flash sale countdown timer
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const now = new Date();
-      const endOfDay = new Date();
-      endOfDay.setHours(23, 59, 59, 999);
-      const diff = endOfDay - now;
-      if (diff <= 0) {
-        setFlashTime('00:00:00');
-        return;
-      }
-      const hrs = String(Math.floor(diff / (1000 * 60 * 60))).padStart(2, '0');
-      const mins = String(Math.floor((diff / (1000 * 60)) % 60)).padStart(2, '0');
-      const secs = String(Math.floor((diff / 1000) % 60)).padStart(2, '0');
-      setFlashTime(`${hrs}:${mins}:${secs}`);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   if (isAdmin) {
     return (
@@ -614,14 +680,22 @@ function App() {
     setWheelSpinning(true);
     setWheelPrize(null);
     
-    const prizes = [
-      { name: 'discount', message: 'You won KES 50 Off on your next order! Code: SPIN50', code: 'SPIN50', rotation: 1800 + 45 },
-      { name: 'delivery', message: 'You won Free Delivery on your next order! Code: SPINFREE', code: 'SPINFREE', rotation: 1800 + 135 },
-      { name: 'points', message: 'You won 100 loyalty points! Added to your profile.', code: '', rotation: 1800 + 225 },
-      { name: 'again', message: 'Ah, so close! Try again tomorrow.', code: '', rotation: 1800 + 315 },
-    ];
-    
-    const selected = prizes[Math.floor(Math.random() * prizes.length)];
+    // Choose prize with hard probabilities: 70% lose, 20% points, 7% free delivery, 3% KES 50 discount
+    const rand = Math.random();
+    let selected;
+    if (rand < 0.70) {
+      selected = { name: 'again', message: 'Ah, so close! Try again tomorrow.', code: '', rotationAngle: 135 };
+    } else if (rand < 0.90) {
+      selected = { name: 'points', message: 'You won 100 loyalty points! Added to your profile.', code: '', rotationAngle: 225 };
+    } else if (rand < 0.97) {
+      selected = { name: 'delivery', message: 'You won Free Delivery on your next order! Code: SPINFREE', code: 'SPINFREE', rotationAngle: 315 };
+    } else {
+      selected = { name: 'discount', message: 'You won KES 50 Off on your next order! Code: SPIN50', code: 'SPIN50', rotationAngle: 45 };
+    }
+
+    // Spin smoothly by adding rotation
+    const newRotation = wheelRotation + 1800 + selected.rotationAngle - (wheelRotation % 360);
+    setWheelRotation(newRotation);
     
     setTimeout(async () => {
       setWheelSpinning(false);
@@ -645,14 +719,15 @@ function App() {
 
   const sendAiMessage = async (e) => {
     e.preventDefault();
-    if (!aiInput.trim()) return;
-    const userMsg = { sender: 'user', text: aiInput.trim() };
+    const messageText = aiInput.trim();
+    if (!messageText) return;
+    const userMsg = { sender: 'user', text: messageText };
     setAiMessages(prev => [...prev, userMsg]);
-    const text = aiInput.trim().toLowerCase();
+    const text = messageText.toLowerCase();
     setAiInput('');
     setAiLoading(true);
 
-    setTimeout(() => {
+    try {
       let botResponse = '';
       if (text.includes('recipe') || text.includes('cook') || text.includes('make')) {
         botResponse = '🥞 *Recommended Recipe: Blitz Pancakes!*\nIngredients available in shop:\n• Wheat Flour\n• Milk\n• Sugar\n• Cooking Oil\n\nDirections:\n1. Mix flour, milk, and sugar to make a smooth batter.\n2. Heat a pan with a drop of oil.\n3. Pour batter and cook until golden brown on both sides. Serve hot!';
@@ -662,18 +737,102 @@ function App() {
         botResponse = '🚚 *Delivery Options:*\n• Mall Delivery: FREE (KES 0) for standard orders.\n• Other Destinations: KES 150 standard delivery fee. We use coordinates pinned at checkout to navigate direct to your door!';
       } else if (text.includes('discount') || text.includes('coupon') || text.includes('promo')) {
         botResponse = '🏷️ *Active Store Coupons:*\n• Use code `BLITZ10` at checkout for 10% off orders above KES 1,000!\n• Or play the Daily Spin the Wheel on the home screen to win exclusive coupons.';
+      } else if (text.includes('add') || text.includes('buy') || text.includes('order')) {
+        let matchedProduct = null;
+        for (const p of products) {
+          if (text.includes(p.name.toLowerCase())) {
+            matchedProduct = p;
+            break;
+          }
+        }
+        if (matchedProduct) {
+          addToCart(matchedProduct, 1);
+          botResponse = `🛒 *Cart Updated:* Added 1x **${matchedProduct.name}** (KES ${matchedProduct.price}) to your cart! You can view it in the cart or checkout.`;
+        } else {
+          botResponse = '🛒 I couldn\'t find a matching product name in the store. Try saying something like: "add milk to cart" or "buy Bread".';
+        }
+      } else if (text.includes('track') || text.includes('status') || text.includes('where is') || text.includes('follow up')) {
+        if (!customer?.customerId) {
+          botResponse = '👤 Please log in first to track your orders.';
+        } else {
+          const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
+          const d = await r.json();
+          if (Array.isArray(d) && d.length) {
+            const latest = d[d.length - 1];
+            botResponse = `📦 *Latest Order Status:*
+- *Order ID:* \`#${latest._id.substring(latest._id.length - 6)}\`
+- *Status:* **${(latest.status || 'pending').toUpperCase()}**
+- *Total:* KES ${latest.totalPrice}
+- *Payment Method:* ${latest.paymentMethod.toUpperCase()}
+- *Date:* ${new Date(latest.createdAt).toLocaleString()}
+
+I can cancel this order if it is still pending.`;
+          } else {
+            botResponse = '🔍 You don\'t have any past orders. Start shopping today!';
+          }
+        }
+      } else if (text.includes('cancel')) {
+        if (!customer?.customerId) {
+          botResponse = '👤 Please log in first to manage your orders.';
+        } else {
+          const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
+          const d = await r.json();
+          const pending = Array.isArray(d) ? d.find(o => o.status === 'pending') : null;
+          if (pending) {
+            const cancelRes = await fetch(`${API_URL}/customer-orders/${pending._id}/cancel`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ customerId: customer.customerId })
+            });
+            const cancelData = await cancelRes.json();
+            if (cancelData.success) {
+              await loadMyOrders();
+              botResponse = `❌ *Order Cancelled:* Order \`#${pending._id.substring(pending._id.length - 6)}\` has been cancelled and its stock is returned.`;
+            } else {
+              botResponse = `⚠️ Failed to cancel order: ${cancelData.error || 'Unknown error'}`;
+            }
+          } else {
+            botResponse = '🔍 You don\'t have any active pending orders that can be cancelled.';
+          }
+        }
+      } else if (text.includes('complain') || text.includes('issue') || text.includes('bad') || text.includes('wrong') || text.includes('delay') || text.includes('complaint')) {
+        const rReview = await fetch(API_URL + '/reviews', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            customerId: customer?.customerId || 'guest',
+            customerName: customer?.name || 'Guest Customer',
+            rating: 1,
+            message: `[AI Complaint] ${messageText}`
+          })
+        });
+        const dReview = await rReview.json();
+        botResponse = `📝 *Complaint Filed:*
+Your complaint has been logged in our system.
+- *Ref ID:* \`${dReview.reviewId || 'COMP-' + Date.now().toString().slice(-4)}\`
+- *Details:* "${messageText}"
+
+We apologize for the inconvenience and will look into this immediately.`;
       } else {
-        botResponse = '🤖 Jambo! I can help you find products, calculate rewards, or suggest recipe ingredients. Type "recipe", "rewards", "delivery", or "discount" to explore!';
+        botResponse = '🤖 Jambo! I am your BlitzMall AI assistant. I can help you:\n- *Add products to cart* (e.g., "add milk to cart")\n- *Track your order* ("track order" or "order status")\n- *Cancel order* ("cancel order")\n- *File complaints* ("complain about delayed delivery")\n- *Answer questions* ("recipe", "rewards", "delivery", "discounts")';
       }
+
       setAiMessages(prev => [...prev, { sender: 'bot', text: botResponse }]);
+    } catch (e) {
+      console.error(e);
+      setAiMessages(prev => [...prev, { sender: 'bot', text: '🤖 Sorry, I encountered an error. Please try again later.' }]);
+    } finally {
       setAiLoading(false);
-    }, 800);
+    }
   };
 
   const handleCheckout = async () => {
     if (!cart.length) return;
+    if (isSubmittingOrder) return;
+    setIsSubmittingOrder(true);
     const finalFee = total >= 1500 || appliedCoupon?.type === 'free_delivery' || deliveryArea === 'mall' ? 0 : 150;
     const discountAmt = appliedCoupon ? appliedCoupon.discount : 0;
+    const finalTotal = Math.max(0, total + finalFee - discountAmt);
     const orderData = {
       customerId: customer.customerId,
       customerName: customer.name,
@@ -690,13 +849,42 @@ function App() {
       const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(orderData) });
       const d = await r.json();
       if (d.success) {
-        setCart([]);
-        setAppliedCoupon(null);
-        setCouponInput('');
-        setDeliveryLocation('');
-        setGpsCoords(null);
-        setScreen('confirmation');
-        triggerSimulatedNotifications();
+        if (payMethod === 'mpesa') {
+          // Trigger STK push
+          setStkStatus('waiting');
+          setStkError('');
+          try {
+            const stkRes = await fetch(API_URL + '/mpesa/stk-push', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                phone: customer.customerId,
+                amount: finalTotal,
+                orderId: d.orderId
+              })
+            });
+            const stkData = await stkRes.json();
+            if (stkData.success) {
+              setStkCheckoutId(stkData.checkoutRequestId);
+            } else {
+              setStkStatus('failed');
+              alert(stkData.error || 'Failed to initiate M-Pesa STK push');
+            }
+          } catch (e) {
+            setStkStatus('failed');
+            alert('Failed to connect to M-Pesa service.');
+          }
+        } else {
+          setCart([]);
+          setAppliedCoupon(null);
+          setCouponInput('');
+          setDeliveryLocation('');
+          setGpsCoords(null);
+          setScreen('confirmation');
+          triggerSimulatedNotifications();
+        }
+      } else {
+        alert(d.error || 'Failed to place order');
       }
     } catch (e) {
       // Offline: queue order for later sync
@@ -712,6 +900,8 @@ function App() {
         setScreen('confirmation');
         triggerSimulatedNotifications();
       } catch (err) { console.error('Failed to queue order:', err); }
+    } finally {
+      setIsSubmittingOrder(false);
     }
   };
 
@@ -848,8 +1038,8 @@ function App() {
 
         <div className="promo-banner-slider">
           <div className="promo-banner-track" style={{ transform: `translateX(-${bannerIndex * 100}%)` }}>
-            {BANNERS.map(b => (
-              <div className="promo-banner-slide" key={b.id} style={{ background: b.gradient }}>
+            {banners.map(b => (
+              <div className="promo-banner-slide" key={b._id || b.id} style={{ background: b.gradient }}>
                 <div className="promo-slide-decorations">
                   <div className="promo-slide-circle" />
                   <div className="promo-slide-triangle" />
@@ -869,44 +1059,63 @@ function App() {
             ))}
           </div>
           <div className="promo-banner-dots">
-            {BANNERS.map((_, i) => (
+            {banners.map((_, i) => (
               <span key={i} className={`promo-dot ${i === bannerIndex ? 'active' : ''}`} onClick={() => setBannerIndex(i)} />
             ))}
           </div>
         </div>
 
         {/* FLASH SALE CARD */}
-        <div className="flash-sale-card">
-          <div className="flash-sale-header">
-            <span className="flash-sale-title">⚡ FLASH SALE</span>
-            <div className="flash-sale-timer">Ends in: <span>{flashTime}</span></div>
-          </div>
-          <div className="flash-sale-items">
-            {products.slice(0, 2).map(p => {
-              const origPrice = p.price;
-              const discPrice = Math.round(origPrice * 0.8);
-              return (
-                <div className="flash-item" key={`flash-${p._id || p.id}`} onClick={() => openProduct(p)}>
-                  <span className="flash-badge">-20%</span>
-                  <div className="flash-item-img">
-                    {p.image ? <img src={p.image} alt={p.name} /> : '🛍️'}
-                  </div>
-                  <div className="flash-item-info">
-                    <span className="flash-item-name">{p.name}</span>
-                    <div className="flash-price-row">
-                      <span className="flash-price-disc">KES {discPrice}</span>
-                      <span className="flash-price-orig">KES {origPrice}</span>
-                    </div>
-                  </div>
-                  <button className="flash-add-btn" onClick={(e) => {
-                    e.stopPropagation();
-                    addToCart({ ...p, price: discPrice }, 1);
-                  }}>+</button>
+        {(() => {
+          const flashSaleProducts = products.filter(p => p.isFlashSale);
+          if (flashSaleProducts.length === 0) return null;
+          
+          const closestExpiry = flashSaleProducts.reduce((min, p) => {
+            if (!p.flashSaleExpires) return min;
+            const exp = new Date(p.flashSaleExpires);
+            return !min || exp < min ? exp : min;
+          }, null);
+
+          return (
+            <div className="flash-sale-card">
+              <div className="flash-sale-header">
+                <span className="flash-sale-title">⚡ FLASH SALE</span>
+                <div className="flash-sale-timer">
+                  Ends in: <FlashSaleCountdown expires={closestExpiry} />
                 </div>
-              );
-            })}
-          </div>
-        </div>
+              </div>
+              <div className="flash-sale-items">
+                {flashSaleProducts.map(p => {
+                  const origPrice = p.originalPrice || p.price;
+                  const discPrice = p.price;
+                  const pct = p.flashSaleDiscount || Math.round((1 - discPrice / origPrice) * 100);
+                  return (
+                    <div className="flash-item" key={`flash-${p._id || p.id}`} onClick={() => openProduct(p)}>
+                      <span className="flash-badge">-{pct}%</span>
+                      <div className="flash-item-img">
+                        {p.image ? <img src={p.image} alt={p.name} /> : '🛍️'}
+                      </div>
+                      <div className="flash-item-info">
+                        <span className="flash-item-name">{p.name}</span>
+                        <div className="flash-price-row">
+                          <span className="flash-price-disc">KES {discPrice}</span>
+                          <span className="flash-price-orig">KES {origPrice}</span>
+                        </div>
+                        <div style={{ fontSize: '0.65rem', color: 'var(--muted)', marginTop: '2px' }}>
+                          {p.flashSaleReason || 'Limited deal'}
+                        </div>
+                      </div>
+                      <button className="flash-add-btn" onClick={(e) => {
+                        e.stopPropagation();
+                        addToCart(p, 1);
+                      }}>+</button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* SHAKE-TO-REVEAL SCRATCH CARD */}
         <div style={{
@@ -939,38 +1148,44 @@ function App() {
             >
               <div style={{fontSize: '2rem', marginBottom: 8}}>🎁</div>
               <div style={{fontSize: '1rem'}}>SHAKE OR CLICK TO SCRATCH</div>
-              <div style={{fontSize: '0.75rem', opacity: 0.8, marginTop: 4}}>Reveal a special 15% OFF coupon!</div>
+              <div style={{fontSize: '0.75rem', opacity: 0.8, marginTop: 4}}>Reveal your daily lucky coupon!</div>
             </div>
           ) : (
             <div style={{
-              background: 'rgba(54, 211, 153, 0.1)',
-              border: '1px solid var(--green)',
+              background: scratchResult?.name === 'lose' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(54, 211, 153, 0.1)',
+              border: scratchResult?.name === 'lose' ? '1px dashed var(--muted)' : '1px solid var(--green)',
               borderRadius: 12,
               padding: '24px 20px',
               animation: 'fadeIn 0.5s ease'
             }}>
-              <span style={{fontSize: '2rem'}}>🎉</span>
-              <h4 style={{margin: '8px 0 4px 0', color: 'var(--green)', fontFamily: 'Unbounded, sans-serif'}}>15% Discount Unlocked!</h4>
-              <p className="muted" style={{fontSize: '0.8rem', marginBottom: 12}}>Use code at checkout to claim your deal.</p>
-              <div style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                background: 'var(--bg-2)',
-                border: '1px solid var(--line)',
-                borderRadius: 8,
-                padding: '8px 16px',
-                fontFamily: 'monospace',
-                fontSize: '1.1rem',
-                fontWeight: 'bold',
-                color: 'var(--gold)',
-                cursor: 'pointer'
-              }} onClick={() => {
-                navigator.clipboard.writeText('SHAKE15');
-                alert('Copied to clipboard!');
-              }}>
-                SHAKE15 <small style={{fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 'normal'}}>(Tap to copy)</small>
-              </div>
+              <span style={{fontSize: '2rem'}}>{scratchResult?.name === 'lose' ? '😢' : '🎉'}</span>
+              <h4 style={{margin: '8px 0 4px 0', color: scratchResult?.name === 'lose' ? 'var(--muted)' : 'var(--green)', fontFamily: 'Unbounded, sans-serif'}}>
+                {scratchResult?.title || 'Better Luck Tomorrow!'}
+              </h4>
+              <p className="muted" style={{fontSize: '0.8rem', marginBottom: 12}}>
+                {scratchResult?.name === 'lose' ? 'Try scratching again tomorrow to win.' : 'Use code at checkout to claim your deal.'}
+              </p>
+              {scratchResult?.code && (
+                <div style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  background: 'var(--bg-2)',
+                  border: '1px solid var(--line)',
+                  borderRadius: 8,
+                  padding: '8px 16px',
+                  fontFamily: 'monospace',
+                  fontSize: '1.1rem',
+                  fontWeight: 'bold',
+                  color: 'var(--gold)',
+                  cursor: 'pointer'
+                }} onClick={() => {
+                  navigator.clipboard.writeText(scratchResult.code);
+                  alert('Copied to clipboard!');
+                }}>
+                  {scratchResult.code} <small style={{fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 'normal'}}>(Tap to copy)</small>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1018,9 +1233,9 @@ function App() {
               
               <div className="wheel-container">
                 <div className="wheel-pointer">⚡</div>
-                <div className={`neon-wheel ${wheelSpinning ? 'spinning' : ''}`} style={{
-                  transform: wheelPrize ? `rotate(${wheelPrize.rotation}deg)` : 'rotate(0deg)',
-                  transition: wheelSpinning ? 'transform 3s cubic-bezier(0.1, 0.8, 0.1, 1)' : 'none'
+                <div className="neon-wheel" style={{
+                  transform: `rotate(${wheelRotation}deg)`,
+                  transition: 'transform 3s cubic-bezier(0.1, 0.8, 0.1, 1)'
                 }}>
                   <div className="wheel-sector sec-1"><span>🎁 KES 50</span></div>
                   <div className="wheel-sector sec-2"><span>🚚 FREE DEL</span></div>
@@ -1302,11 +1517,11 @@ function App() {
             </div>
             <i className="radio" />
           </button>
-          <button className={`pay-opt soon ${payMethod === 'mpesa' ? 'sel' : ''}`} onClick={() => setPayMethod('mpesa')}>
+          <button className={`pay-opt ${payMethod === 'mpesa' ? 'sel' : ''}`} onClick={() => setPayMethod('mpesa')}>
             <span>📱</span>
             <div>
               <b>M-Pesa</b>
-              <small>Coming soon — enter PIN to pay</small>
+              <small>Pay instantly via secure M-Pesa STK Push</small>
             </div>
             <i className="radio" />
           </button>
@@ -1322,9 +1537,29 @@ function App() {
         </div>
         <div className="detail-bar">
           <div className="detail-bar-total">KES {finalTotal}</div>
-          <button className="btn-neon" onClick={handleCheckout}>Place order</button>
+          <button className="btn-neon" onClick={handleCheckout} disabled={isSubmittingOrder}>
+            {isSubmittingOrder ? 'Processing...' : 'Place order'}
+          </button>
         </div>
         {renderToasts()}
+        {stkStatus === 'waiting' && (
+          <div className="futuristic-modal-overlay" style={{ zIndex: 9999 }}>
+            <div className="futuristic-modal-card" style={{ textAlign: 'center', padding: '30px' }}>
+              <div className="spinner" style={{ margin: '0 auto 20px auto', width: '50px', height: '50px', borderRadius: '50%', border: '4px solid rgba(255,255,255,0.1)', borderTopColor: 'var(--gold)', animation: 'spin 1s linear infinite' }}></div>
+              <h3 style={{ fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)' }}>Waiting for Payment</h3>
+              <p className="muted" style={{ fontSize: '0.9rem', margin: '12px 0' }}>
+                We have sent an M-Pesa STK push prompt to your phone number <b>{customer?.customerId}</b>.<br />
+                Please enter your M-Pesa PIN to authorize the payment of <b>KES {finalTotal}</b>.
+              </p>
+              <small style={{ color: 'var(--muted)', display: 'block', marginBottom: '20px' }}>
+                Checking status automatically...
+              </small>
+              <button className="btn-ghost" onClick={() => setStkStatus('idle')}>
+                Cancel & Pay Later / Cash
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

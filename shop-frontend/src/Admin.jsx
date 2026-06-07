@@ -29,6 +29,19 @@ function Admin() {
   const [setupPassword, setSetupPassword] = useState('');
   const [setupName, setSetupName] = useState('');
   const [tab, setTab] = useState('sales');
+  
+  // Banner CMS States
+  const [banners, setBanners] = useState([]);
+  const [bannerTitle, setBannerTitle] = useState('');
+  const [bannerText, setBannerText] = useState('');
+  const [bannerCode, setBannerCode] = useState('');
+  const [bannerGradient, setBannerGradient] = useState('linear-gradient(135deg, #ff007f, #7f00ff)');
+
+  // Flash Sale configuration States
+  const [showFlashSaleModal, setShowFlashSaleModal] = useState(false);
+  const [flashSaleProduct, setFlashSaleProduct] = useState(null);
+  const [flashSaleDiscountInput, setFlashSaleDiscountInput] = useState('30');
+  const [flashSaleDurationInput, setFlashSaleDurationInput] = useState('24');
   const [products, setProducts] = useState([]);
   const [orders, setOrders] = useState([]);
   const [form, setForm] = useState(BLANK);
@@ -214,6 +227,7 @@ function Admin() {
   const loadReviews = async () => { try { const r = await authGet(API_URL + '/admin/reviews'); setReviews(asArray(await r.json())); } catch (e) { console.error(e); setReviews([]); } };
   const loadStaff = async () => { try { const r = await authGet(API_URL + '/admin/staff'); setStaffList(asArray(await r.json())); } catch (e) { console.error(e); setStaffList([]); } };
   const loadUsers = async () => { try { const r = await authGet(API_URL + '/admin/users'); setUsers(asArray(await r.json())); } catch (e) { console.error(e); setUsers([]); } };
+  const loadBanners = async () => { try { const r = await authGet(API_URL + '/admin/banners'); setBanners(asArray(await r.json())); } catch (e) { console.error(e); setBanners([]); } };
 
   const checkActiveShift = async () => {
     try {
@@ -259,6 +273,43 @@ function Admin() {
         alert(d.error || 'Failed to close shift');
       }
     } catch (e) { console.error(e); alert('Error closing shift'); }
+  };
+
+  const handleFlashSaleSubmit = async (e) => {
+    e.preventDefault();
+    if (!flashSaleProduct) return;
+    try {
+      const r = await authPost(API_URL + '/admin/products/' + flashSaleProduct._id + '/flash-sale', {
+        flashSale: true,
+        flashSaleDiscount: parseFloat(flashSaleDiscountInput) || 0,
+        durationHours: parseFloat(flashSaleDurationInput) || 24
+      });
+      const d = await r.json();
+      if (d.success) {
+        setShowFlashSaleModal(false);
+        loadProducts();
+        alert('Flash sale started successfully!');
+      } else {
+        alert(d.error || 'Failed to start flash sale');
+      }
+    } catch (e) { console.error(e); alert('Error updating flash sale'); }
+  };
+
+  const handleStopFlashSale = async () => {
+    if (!flashSaleProduct) return;
+    try {
+      const r = await authPost(API_URL + '/admin/products/' + flashSaleProduct._id + '/flash-sale', {
+        flashSale: false
+      });
+      const d = await r.json();
+      if (d.success) {
+        setShowFlashSaleModal(false);
+        loadProducts();
+        alert('Flash sale stopped successfully!');
+      } else {
+        alert(d.error || 'Failed to stop flash sale');
+      }
+    } catch (e) { console.error(e); alert('Error stopping flash sale'); }
   };
 
   const loadShiftsList = async () => {
@@ -537,6 +588,7 @@ function Admin() {
     else if (tab === 'expenses') { loadExpenses(); loadSummary(); }
     else if (tab === 'credit') loadCredit();
     else if (tab === 'reviews') loadReviews();
+    else if (tab === 'banners') loadBanners();
     else if (tab === 'staff') { loadStaff(); if (user?.role === 'owner') { loadUsers(); loadBranches(); loadShiftsList(); loadAuditLogs(); } }
     else if (tab === 'loyalty') { loadLoyaltyMembers(); loadCoupons(); }
     else if (tab === 'branches' && (!user || user.role === 'owner')) loadBranches();
@@ -967,6 +1019,7 @@ function Admin() {
     { id: 'expenses', label: '💸 Expenses' },
     { id: 'credit', label: '🧍 Credit' },
     { id: 'reviews', label: '⭐ Reviews' },
+    { id: 'banners', label: '🚀 Banners' },
     { id: 'loyalty', label: '🎁 Loyalty' },
     { id: 'staff', label: '👷 Staff' },
     { id: 'branches', label: '🏪 Branches' },
@@ -1253,11 +1306,38 @@ function Admin() {
                 <div className="blitz-admin-item" key={p._id}>
                   <div className="blitz-admin-thumb">{p.image ? <img src={p.image} alt={p.name}/> : "🛍️"}</div>
                   <div className="blitz-admin-item-main">
-                    <div className="blitz-admin-item-top"><b>{p.name}</b>{stockTag(p.stock)}{expiryTag(p.expiryDate)}</div>
+                    <div className="blitz-admin-item-top">
+                      <b>{p.name}</b>
+                      {stockTag(p.stock)}
+                      {expiryTag(p.expiryDate)}
+                      {p.isFlashSale && (
+                        <span className="flash-sale-badge" style={{
+                          background: 'rgba(255,122,26,0.15)',
+                          color: 'var(--orange)',
+                          border: '1px solid var(--orange)',
+                          borderRadius: '6px',
+                          fontSize: '0.68rem',
+                          padding: '2px 6px',
+                          fontWeight: 'bold',
+                          marginLeft: '6px'
+                        }}>
+                          ⚡ SALE -{p.flashSaleDiscount}%
+                        </span>
+                      )}
+                    </div>
                     <div className="blitz-admin-item-sub"><span className="blitz-admin-cat">{p.category||"Other"}</span>{p.barcode && <span className="blitz-admin-bc">#{p.barcode}</span>}</div>
                     <div className="blitz-admin-item-prices"><span>Buy {money(p.buyingPrice||0)}</span><span>Sell {money(p.price||0)}</span><span className={margin>=0?"profit":"loss"}>Margin {money(margin)}</span></div>
                   </div>
-                  <div className="blitz-admin-item-actions"><button onClick={() => editProduct(p)}>✏️</button><button onClick={() => delProduct(p._id)}>🗑️</button></div>
+                  <div className="blitz-admin-item-actions">
+                    <button onClick={() => {
+                      setFlashSaleProduct(p);
+                      setFlashSaleDiscountInput(p.flashSaleDiscount ? String(p.flashSaleDiscount) : '30');
+                      setFlashSaleDurationInput('24');
+                      setShowFlashSaleModal(true);
+                    }} title="Configure Flash Sale">⚡</button>
+                    <button onClick={() => editProduct(p)}>✏️</button>
+                    <button onClick={() => delProduct(p._id)}>🗑️</button>
+                  </div>
                 </div>
               );
             })}</div>
@@ -1697,6 +1777,143 @@ function Admin() {
         );
       })()}
 
+      {safeTab === "banners" && (
+        <div className="blitz-admin-body">
+          <h2>📢 Promo Banners CMS</h2>
+          <p className="blitz-admin-muted" style={{ marginBottom: 16 }}>
+            Manage promotional sliders displayed at the top of the customer homepage. You can activate, take down, or delete banners here.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '20px' }}>
+            {/* Left side: Add Banner form */}
+            <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: '16px', padding: '20px' }}>
+              <h3 style={{ fontSize: '.95rem', marginBottom: 12, fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)' }}>➕ Add Promo Banner</h3>
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (!bannerTitle.trim()) return;
+                try {
+                  const r = await authPost(API_URL + '/admin/banners', {
+                    title: bannerTitle.trim(),
+                    text: bannerText.trim(),
+                    code: bannerCode.trim(),
+                    gradient: bannerGradient
+                  });
+                  const d = await r.json();
+                  if (d.success) {
+                    setBannerTitle('');
+                    setBannerText('');
+                    setBannerCode('');
+                    loadBanners();
+                    alert('Banner added successfully!');
+                  } else {
+                    alert(d.error || 'Failed to add banner');
+                  }
+                } catch (err) {
+                  console.error(err);
+                  alert('Error adding banner');
+                }
+              }} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '0.8rem' }}>
+                  Banner Title:
+                  <input className="owner-field" placeholder="e.g. 🚀 MEGA DISCOUNT" value={bannerTitle} onChange={e => setBannerTitle(e.target.value)} required style={{ padding: '8px 12px', borderRadius: '8px', background: 'var(--bg-2)', border: '1px solid var(--line)', color: 'var(--text)' }} />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '0.8rem' }}>
+                  Promo Message / Text:
+                  <textarea className="owner-field" placeholder="e.g. Get 20% off all milk products this weekend!" value={bannerText} onChange={e => setBannerText(e.target.value)} style={{ minHeight: '60px', resize: 'vertical', padding: '8px 12px', borderRadius: '8px', background: 'var(--bg-2)', border: '1px solid var(--line)', color: 'var(--text)' }} />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '0.8rem' }}>
+                  Coupon Code (Optional):
+                  <input className="owner-field" placeholder="e.g. MILK20" value={bannerCode} onChange={e => setBannerCode(e.target.value)} style={{ padding: '8px 12px', borderRadius: '8px', background: 'var(--bg-2)', border: '1px solid var(--line)', color: 'var(--text)' }} />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '0.8rem' }}>
+                  Banner Theme Gradient:
+                  <select className="owner-field" value={bannerGradient} onChange={e => setBannerGradient(e.target.value)} style={{ padding: '8px 12px', borderRadius: '8px', background: 'var(--bg-2)', border: '1px solid var(--line)', color: 'var(--text)', fontFamily: 'inherit' }}>
+                    <option value="linear-gradient(135deg, #ff007f, #7f00ff)">Pink to Purple (Megalaunch)</option>
+                    <option value="linear-gradient(135deg, #00f2fe, #4facfe)">Blue to Cyan (Weekend Special)</option>
+                    <option value="linear-gradient(135deg, #38ef7d, #11998e)">Green to Teal (Instant Pay)</option>
+                    <option value="linear-gradient(135deg, #ffd24a, #ff7a1a)">Gold to Orange (Golden Fire)</option>
+                    <option value="linear-gradient(135deg, #ff2d2d, #ff7a1a)">Red to Orange (Hot Flash)</option>
+                  </select>
+                </label>
+                <button type="submit" className="blitz-admin-btn small" style={{ marginTop: '10px' }}>Add Banner</button>
+              </form>
+            </div>
+            
+            {/* Right side: List Banners */}
+            <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: '16px', padding: '20px' }}>
+              <h3 style={{ fontSize: '.95rem', marginBottom: 12, fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)' }}>Banners list</h3>
+              {banners.length === 0 ? (
+                <p className="blitz-admin-empty">No banners created yet.</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {banners.map(b => (
+                    <div key={b._id} style={{
+                      background: 'var(--bg-2)',
+                      border: '1px solid var(--line)',
+                      borderRadius: '12px',
+                      padding: '12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '10px'
+                    }}>
+                      <div style={{
+                        background: b.gradient,
+                        borderRadius: '8px',
+                        padding: '12px',
+                        color: '#fff',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        justifyContent: 'center',
+                        boxShadow: '0 4px 10px rgba(0,0,0,0.15)'
+                      }}>
+                        <h4 style={{ margin: 0, fontFamily: 'Unbounded, sans-serif', fontSize: '0.9rem' }}>{b.title}</h4>
+                        <p style={{ margin: '4px 0 0 0', fontSize: '0.78rem', opacity: 0.9 }}>{b.text}</p>
+                        {b.code && (
+                          <div style={{ display: 'inline-block', alignSelf: 'flex-start', background: 'rgba(255,255,255,0.2)', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 'bold', fontFamily: 'monospace', marginTop: '6px' }}>
+                            CODE: {b.code}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                        <span style={{ color: b.active ? 'var(--green)' : 'var(--muted)', fontWeight: 'bold' }}>
+                          {b.active ? '● Active' : '○ Disabled'}
+                        </span>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button className="blitz-admin-btn-outline" onClick={async () => {
+                            try {
+                              const r = await authPut(`${API_URL}/admin/banners/${b._id}`, { active: !b.active });
+                              if ((await r.json()).success) {
+                                loadBanners();
+                              }
+                            } catch (err) {
+                              console.error(err);
+                            }
+                          }} style={{ padding: '4px 8px', fontSize: '0.72rem', borderRadius: '6px', cursor: 'pointer', background: 'var(--card)', border: '1px solid var(--line)', color: 'var(--text)' }}>
+                            {b.active ? 'Disable' : 'Enable'}
+                          </button>
+                          <button className="blitz-admin-btn-outline" onClick={async () => {
+                            if (!window.confirm('Delete this banner?')) return;
+                            try {
+                              const r = await authDelete(`${API_URL}/admin/banners/${b._id}`);
+                              if ((await r.json()).success) {
+                                loadBanners();
+                              }
+                            } catch (err) {
+                              console.error(err);
+                            }
+                          }} style={{ padding: '4px 8px', fontSize: '0.72rem', borderRadius: '6px', cursor: 'pointer', background: 'rgba(255,45,45,0.1)', border: '1px solid var(--red)', color: 'var(--red)' }}>
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {safeTab === "loyalty" && (
         <div className="blitz-admin-body">
           <h2>🎁 Loyalty & Rewards</h2>
@@ -2008,6 +2225,50 @@ function Admin() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {showFlashSaleModal && flashSaleProduct && (
+        <div className="blitz-admin-modal-overlay" style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,backdropFilter:'blur(5px)'}}>
+          <div className="blitz-admin-modal-card" style={{background:'var(--card)',border:'1px solid var(--line)',padding:30,borderRadius:16,width:'100%',maxWidth:420}}>
+            <h3 style={{fontFamily:'Unbounded, sans-serif',color:'var(--orange)',marginBottom:6,display:'flex',alignItems:'center',gap:6}}>⚡ Configure Flash Sale</h3>
+            <p className="blitz-admin-muted" style={{fontSize:'.82rem',marginBottom:16}}>Set a temporary flash sale discount for <b>{flashSaleProduct.name}</b>. This overrides standard and happy hour pricing.</p>
+            
+            <form onSubmit={handleFlashSaleSubmit} style={{display:'flex',flexDirection:'column',gap:14}}>
+              <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:'.8rem'}}>
+                Discount Percentage (%):
+                <input 
+                  type="number" 
+                  min="1" 
+                  max="99" 
+                  value={flashSaleDiscountInput} 
+                  onChange={e => setFlashSaleDiscountInput(e.target.value)} 
+                  required
+                  style={{padding:10,borderRadius:8,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)',fontSize:'.95rem'}}
+                />
+              </label>
+
+              <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:'.8rem'}}>
+                Duration (Hours):
+                <input 
+                  type="number" 
+                  min="1" 
+                  value={flashSaleDurationInput} 
+                  onChange={e => setFlashSaleDurationInput(e.target.value)} 
+                  required
+                  style={{padding:10,borderRadius:8,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)',fontSize:'.95rem'}}
+                />
+              </label>
+
+              <div style={{display:'flex',flexDirection:'column',gap:8,marginTop:10}}>
+                <button className="blitz-admin-btn" type="submit" style={{padding:12,background:'var(--orange)',color:'#fff'}}>⚡ Start Flash Sale</button>
+                {flashSaleProduct.isFlashSale && (
+                  <button className="blitz-admin-btn" type="button" onClick={handleStopFlashSale} style={{padding:12,background:'none',border:'1px solid var(--red)',color:'var(--red)'}}>Stop Flash Sale</button>
+                )}
+                <button className="blitz-admin-btn" type="button" onClick={() => setShowFlashSaleModal(false)} style={{padding:12,background:'none',border:'1px solid var(--line)',color:'var(--text)'}}>Cancel</button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

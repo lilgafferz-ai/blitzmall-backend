@@ -79,7 +79,24 @@ client.connect().then(async () => {
   }
   console.log('✅ Connected to MongoDB');
   await seedRewards();
-}).catch(err => console.error('❌ MongoDB connection error:', err));
+  
+  // Warn if M-Pesa env vars are not set
+  if (!MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET || !MPESA_SHORTCODE || !MPESA_PASSKEY) {
+    console.warn('⚠️ M-Pesa environment variables (MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET, MPESA_SHORTCODE, MPESA_PASSKEY) are not fully configured. M-Pesa payments will fail.');
+  }
+  if (MPESA_CALLBACK_URL === 'https://your-deployed-url.com/api/mpesa/callback') {
+    console.warn('⚠️ CALLBACK_URL env var not set. M-Pesa callbacks will not reach your server.');
+  }
+
+  app.listen(PORT, () => {
+    console.log(`🚀 Shop backend running on http://localhost:${PORT}`);
+    console.log(`📦 MongoDB: my_shop database ready`);
+  });
+}).catch(err => {
+  console.error('❌ MongoDB connection error:', err);
+  // Give logs time to flush, then exit — server is useless without a database
+  setTimeout(() => process.exit(1), 500);
+});
 
 // ===== CUSTOMER =====
 app.get('/api/products', async (req, res) => {
@@ -1482,6 +1499,4 @@ app.post('/api/admin/receipt-delivery/log', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed' });
   }
 });
-
-const PORT = 5000;
-app.listen(PORT, () => { console.log(`🚀 Shop backend running on http://localhost:${PORT}`); console.log(`📦 Connected to MongoDB`); });
+const PORT = process.env.PORT || 5000;

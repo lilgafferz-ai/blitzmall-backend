@@ -2,7 +2,7 @@
   "name": "shop-frontend",
   "version": "0.1.0",
   "private": true,
-  "main": "build/electron.js",
+  "main": "main.js",
   "homepage": "./",
   "dependencies": {
     "@capacitor/android": "^8.4.0",
@@ -68,7 +68,10 @@
     },
     "win": {
       "target": "portable",
-      "icon": "build/app-icon.ico"
+      "icon": "public/app-icon.ico"
+    },
+    "mac": {
+      "icon": "public/app-icon.ico"
     }
   }
 }
