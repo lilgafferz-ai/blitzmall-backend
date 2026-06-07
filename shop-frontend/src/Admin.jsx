@@ -1346,7 +1346,7 @@ const loadStockTransfers = async () => {
               {recentSales.length === 0 ? <p className="blitz-admin-empty sm">No sales yet.</p> : recentSales.map(s => (
                 <div className="pos-recent-row" key={s._id}>
                   <div><b>{money(s.total)}</b><span className="blitz-admin-muted"> · {s.paymentMethod} · {s.staff||""} · {new Date(s.createdAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span></div>
-                  <button className="pos-void" onClick={() => voidSale(s._id)}>void</button>
+                  {!isCashier && <button className="pos-void" onClick={() => voidSale(s._id)}>void</button>}
                 </div>
               ))}
             </div>

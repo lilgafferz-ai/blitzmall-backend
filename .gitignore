@@ -1,3 +1,4 @@
 node_modules
 .env
 shop-frontend/node_modules
+local_db_fallback.json

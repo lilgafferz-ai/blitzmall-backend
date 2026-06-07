@@ -43,9 +43,158 @@ const branchFilter = (req) => {
   return req.user.branchId ? { branchId: req.user.branchId } : {};
 };
 
-client.connect().then(async () => {
-  db = client.db('my_shop');
-  db_ = db;
+async function connectDb() {
+  try {
+    console.log('Connecting to primary MongoDB Atlas...');
+    await client.connect();
+    db = client.db('my_shop');
+    db_ = db;
+    console.log('✅ Connected to MongoDB Atlas');
+  } catch (err) {
+    console.error('❌ MongoDB Atlas connection failed:', err.message);
+    console.log('Connecting to fallback Local MongoDB (mongodb://127.0.0.1:27017/my_shop)...');
+    try {
+      const localClient = new MongoClient('mongodb://127.0.0.1:27017/my_shop', { serverSelectionTimeoutMS: 2000 });
+      await localClient.connect();
+      db = localClient.db('my_shop');
+      db_ = db;
+      console.log('✅ Connected to Local MongoDB');
+    } catch (localErr) {
+      console.error('❌ Local MongoDB connection failed:', localErr.message);
+      console.log('⚠️ Entering Offline Mock Mode (Local File DB: local_db_fallback.json)...');
+      
+      const fs = require('fs');
+      const path = require('path');
+      const DB_FILE = path.join(__dirname, 'local_db_fallback.json');
+      
+      let localDbData = {};
+      try {
+        if (fs.existsSync(DB_FILE)) {
+          localDbData = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        }
+      } catch (e) {
+        console.error('Failed to load local DB file:', e);
+      }
+      
+      const saveLocalDb = () => {
+        try {
+          fs.writeFileSync(DB_FILE, JSON.stringify(localDbData, null, 2), 'utf8');
+        } catch (e) {
+          console.error('Failed to save local DB file:', e);
+        }
+      };
+
+      const matchFilter = (item, filter) => {
+        if (!filter || Object.keys(filter).length === 0) return true;
+        for (const [k, v] of Object.entries(filter)) {
+          if (k === '_id' && item._id) {
+            if (item._id.toString() !== v.toString()) return false;
+            continue;
+          }
+          if (item[k] !== v) return false;
+        }
+        return true;
+      };
+
+      class FileCollection {
+        constructor(name) {
+          this.name = name;
+        }
+        
+        find(filter = {}) {
+          const data = localDbData[this.name] || [];
+          let filtered = data.filter(item => matchFilter(item, filter));
+          const cursor = {
+            sort: () => cursor,
+            limit: () => cursor,
+            toArray: async () => filtered
+          };
+          return cursor;
+        }
+
+        async findOne(filter = {}) {
+          const data = localDbData[this.name] || [];
+          return data.find(item => matchFilter(item, filter)) || null;
+        }
+
+        async insertOne(doc) {
+          if (!localDbData[this.name]) localDbData[this.name] = [];
+          if (!doc._id) doc._id = new ObjectId().toString();
+          localDbData[this.name].push(doc);
+          saveLocalDb();
+          return { insertedId: doc._id, acknowledged: true };
+        }
+
+        async insertMany(docs) {
+          if (!localDbData[this.name]) localDbData[this.name] = [];
+          for (const doc of docs) {
+            if (!doc._id) doc._id = new ObjectId().toString();
+            localDbData[this.name].push(doc);
+          }
+          saveLocalDb();
+          return { acknowledged: true, insertedCount: docs.length };
+        }
+
+        async updateOne(filter, update) {
+          const list = localDbData[this.name] || [];
+          const item = list.find(item => matchFilter(item, filter));
+          if (item) {
+            if (update.$set) Object.assign(item, update.$set);
+            if (update.$inc) {
+              for (const [k, v] of Object.entries(update.$inc)) {
+                item[k] = (item[k] || 0) + v;
+              }
+            }
+            saveLocalDb();
+            return { matchedCount: 1, modifiedCount: 1 };
+          }
+          return { matchedCount: 0, modifiedCount: 0 };
+        }
+
+        async updateMany(filter, update) {
+          const list = localDbData[this.name] || [];
+          let modifiedCount = 0;
+          for (const item of list) {
+            if (matchFilter(item, filter)) {
+              if (update.$set) Object.assign(item, update.$set);
+              if (update.$inc) {
+                for (const [k, v] of Object.entries(update.$inc)) {
+                  item[k] = (item[k] || 0) + v;
+                }
+              }
+              modifiedCount++;
+            }
+          }
+          if (modifiedCount > 0) saveLocalDb();
+          return { matchedCount: modifiedCount, modifiedCount };
+        }
+
+        async deleteOne(filter) {
+          const list = localDbData[this.name] || [];
+          const idx = list.findIndex(item => matchFilter(item, filter));
+          if (idx !== -1) {
+            list.splice(idx, 1);
+            saveLocalDb();
+            return { deletedCount: 1 };
+          }
+          return { deletedCount: 0 };
+        }
+
+        async countDocuments(filter = {}) {
+          const data = localDbData[this.name] || [];
+          return data.filter(item => matchFilter(item, filter)).length;
+        }
+      }
+
+      // Re-map db connection calls to use local file mock collections
+      db = {
+        collection: (name) => new FileCollection(name)
+      };
+      db_ = db;
+    }
+  }
+  
+  // Set collections from db/mock db
   products_ = db.collection('products');
   orders_ = db.collection('orders');
   sales_ = db.collection('sales');
@@ -65,6 +214,7 @@ client.connect().then(async () => {
   redemptions_ = db.collection('redemptions');
   saved_baskets_ = db.collection('saved_baskets');
   banners_ = db.collection('banners');
+
   try {
     const bannerCount = await banners_.countDocuments();
     if (bannerCount === 0) {
@@ -77,9 +227,9 @@ client.connect().then(async () => {
   } catch (err) {
     console.error('Failed to seed banners:', err);
   }
-  console.log('✅ Connected to MongoDB');
+
   await seedRewards();
-  
+
   // Warn if M-Pesa env vars are not set
   if (!MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET || !MPESA_SHORTCODE || !MPESA_PASSKEY) {
     console.warn('⚠️ M-Pesa environment variables (MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET, MPESA_SHORTCODE, MPESA_PASSKEY) are not fully configured. M-Pesa payments will fail.');
@@ -90,11 +240,12 @@ client.connect().then(async () => {
 
   app.listen(PORT, () => {
     console.log(`🚀 Shop backend running on http://localhost:${PORT}`);
-    console.log(`📦 MongoDB: my_shop database ready`);
+    console.log(`📦 Database initialization complete`);
   });
-}).catch(err => {
-  console.error('❌ MongoDB connection error:', err);
-  // Give logs time to flush, then exit — server is useless without a database
+}
+
+connectDb().catch(err => {
+  console.error('Fatal database setup error:', err);
   setTimeout(() => process.exit(1), 500);
 });
 
@@ -308,7 +459,7 @@ app.delete('/api/admin/branches/:id', authenticate, authorize('owner'), async (r
 });
 
 // ===== PRODUCTS =====
-app.post('/api/admin/products', authenticate, async (req, res) => {
+app.post('/api/admin/products', authenticate, authorize('owner', 'manager'), async (req, res) => {
   const { name, category, barcode, buyingPrice, price, stock, description, image, expiryDate, branchId } = req.body;
   if (!name || price === undefined || price === '') return res.status(400).json({ error: 'Name and selling price required' });
   try {
@@ -324,7 +475,7 @@ app.post('/api/admin/products', authenticate, async (req, res) => {
     res.json({ success: true, productId: result.insertedId, message: 'Product added!' });
   } catch { res.status(500).json({ error: 'Failed to add product' }); }
 });
-app.put('/api/admin/products/:productId', authenticate, async (req, res) => {
+app.put('/api/admin/products/:productId', authenticate, authorize('owner', 'manager'), async (req, res) => {
   const { name, category, barcode, buyingPrice, price, stock, description, image, expiryDate } = req.body;
   try {
     const u = {};
@@ -342,7 +493,7 @@ app.put('/api/admin/products/:productId', authenticate, async (req, res) => {
     res.json({ success: true, message: 'Product updated!' });
   } catch { res.status(500).json({ error: 'Failed to update product' }); }
 });
-app.delete('/api/admin/products/:productId', authenticate, async (req, res) => {
+app.delete('/api/admin/products/:productId', authenticate, authorize('owner', 'manager'), async (req, res) => {
   try { const r = await products_.deleteOne({ _id: new ObjectId(req.params.productId) }); if (!r.deletedCount) return res.status(404).json({ error: 'Product not found' }); res.json({ success: true }); }
   catch { res.status(500).json({ error: 'Failed to delete product' }); }
 });
@@ -401,7 +552,7 @@ app.get('/api/admin/sales', authenticate, async (req, res) => {
   try { const l = parseInt(req.query.limit, 10) || 20; const filter = branchFilter(req); res.json(await sales_.find(filter).sort({ createdAt: -1 }).limit(l).toArray()); }
   catch { res.status(500).json({ error: 'Failed' }); }
 });
-app.delete('/api/admin/sales/:saleId', authenticate, async (req, res) => {
+app.delete('/api/admin/sales/:saleId', authenticate, authorize('owner', 'manager'), async (req, res) => {
   try {
     const sale = await sales_.findOne({ _id: new ObjectId(req.params.saleId) });
     if (!sale) return res.status(404).json({ error: 'Sale not found' });
@@ -419,7 +570,7 @@ app.post('/api/admin/expenses', authenticate, async (req, res) => {
   catch { res.status(500).json({ error: 'Failed to add expense' }); }
 });
 app.get('/api/admin/expenses', authenticate, async (req, res) => { try { const filter = branchFilter(req); res.json(await expenses_.find(filter).sort({ createdAt: -1 }).toArray()); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.delete('/api/admin/expenses/:id', authenticate, async (req, res) => { try { const r = await expenses_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.delete('/api/admin/expenses/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await expenses_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
 
 // ===== CREDIT =====
 app.post('/api/admin/credit', authenticate, async (req, res) => {
@@ -430,7 +581,7 @@ app.post('/api/admin/credit', authenticate, async (req, res) => {
 });
 app.get('/api/admin/credit', authenticate, async (req, res) => { try { const filter = branchFilter(req); res.json(await credit_.find(filter).sort({ createdAt: -1 }).toArray()); } catch { res.status(500).json({ error: 'Failed' }); } });
 app.put('/api/admin/credit/:id/pay', authenticate, async (req, res) => { try { const r = await credit_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { paid: true, paidAt: new Date() } }); if (!r.matchedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.delete('/api/admin/credit/:id', authenticate, async (req, res) => { try { const r = await credit_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.delete('/api/admin/credit/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await credit_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
 
 // ===== REVIEWS =====
 app.post('/api/reviews', async (req, res) => {
@@ -444,7 +595,7 @@ app.get('/api/reviews/summary', async (req, res) => {
   catch { res.status(500).json({ error: 'Failed' }); }
 });
 app.get('/api/admin/reviews', authenticate, async (req, res) => { try { res.json(await reviews_.find().sort({ createdAt: -1 }).toArray()); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.delete('/api/admin/reviews/:id', authenticate, async (req, res) => { try { const r = await reviews_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.delete('/api/admin/reviews/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await reviews_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
 
 // ===== STAFF =====
 app.post('/api/admin/staff', authenticate, authorize('owner', 'manager'), async (req, res) => {
@@ -710,7 +861,7 @@ app.post('/api/admin/loyalty/add-points', async (req, res) => {
 });
 
 // ===== COUPONS =====
-app.post('/api/admin/coupons', authenticate, async (req, res) => {
+app.post('/api/admin/coupons', authenticate, authorize('owner', 'manager'), async (req, res) => {
   const { code, type, value, minPurchase, expiresAt, maxUses } = req.body;
   if (!code || !type || value === undefined) return res.status(400).json({ error: 'Code, type and value required' });
   try {
@@ -725,8 +876,8 @@ app.post('/api/admin/coupons', authenticate, async (req, res) => {
   } catch { res.status(500).json({ error: 'Failed to create coupon' }); }
 });
 app.get('/api/admin/coupons', authenticate, async (req, res) => { try { res.json(await coupons_.find().sort({ createdAt: -1 }).toArray()); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.put('/api/admin/coupons/:id', authenticate, async (req, res) => { try { const r = await coupons_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { active: req.body.active } }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.delete('/api/admin/coupons/:id', authenticate, async (req, res) => { try { const r = await coupons_.deleteOne({ _id: new ObjectId(req.params.id) }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.put('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await coupons_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { active: req.body.active } }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.delete('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await coupons_.deleteOne({ _id: new ObjectId(req.params.id) }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
 app.post('/api/coupons/validate', async (req, res) => {
   const { code, total } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
@@ -885,7 +1036,7 @@ app.get('/api/admin/banners', authenticate, async (req, res) => {
 });
 
 // Banner POST (Create)
-app.post('/api/admin/banners', authenticate, async (req, res) => {
+app.post('/api/admin/banners', authenticate, authorize('owner', 'manager'), async (req, res) => {
   const { title, text, code, gradient } = req.body;
   if (!title) return res.status(400).json({ error: 'Title is required' });
   try {
@@ -905,7 +1056,7 @@ app.post('/api/admin/banners', authenticate, async (req, res) => {
 });
 
 // Banner PUT (Toggle active or edit)
-app.put('/api/admin/banners/:id', authenticate, async (req, res) => {
+app.put('/api/admin/banners/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
   const { title, text, code, gradient, active } = req.body;
   try {
     const { id } = req.params;
@@ -927,7 +1078,7 @@ app.put('/api/admin/banners/:id', authenticate, async (req, res) => {
 });
 
 // Banner DELETE
-app.delete('/api/admin/banners/:id', authenticate, async (req, res) => {
+app.delete('/api/admin/banners/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid banner ID' });
@@ -1501,7 +1652,8 @@ app.post('/api/admin/receipt-delivery/log', authenticate, async (req, res) => {
 });
 // ===== AI ASSISTANT ENGINE =====
 function normalizeAiText(text) {
-  return text.toLowerCase().replace(/['']/g, "'").replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return String(text).toLowerCase().replace(/['']/g, "'").replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function findMatchingProducts(query, products, limit = 5) {
