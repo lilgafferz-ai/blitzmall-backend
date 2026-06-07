@@ -105,6 +105,23 @@ function FlashSaleCountdown({ expires }) {
 function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [screen, setScreen] = useState('splash');
+  const [perfMode, setPerfMode] = useState(() => {
+    try {
+      return localStorage.getItem('blitz_perf_mode') === 'true';
+    } catch (e) {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      if (perfMode) {
+        document.body.classList.add('perf-mode');
+      } else {
+        document.body.classList.remove('perf-mode');
+      }
+    } catch (e) {}
+  }, [perfMode]);
 
   // Futuristic addictive features
   const [showSpinWheel, setShowSpinWheel] = useState(false);
@@ -1646,6 +1663,33 @@ function App() {
             </button>
           ))}
           <label className="avatar-upload">＋<input type="file" accept="image/*" onChange={onUpload} hidden /></label>
+        </div>
+
+        <h3 className="section-h">Preferences</h3>
+        <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <b style={{ fontSize: '.88rem', color: '#fff' }}>Performance Mode</b>
+            <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>Disable blurs & animations on low-end devices</div>
+          </div>
+          <button 
+            className="btn-neon" 
+            onClick={() => {
+              const newVal = !perfMode;
+              setPerfMode(newVal);
+              try { localStorage.setItem('blitz_perf_mode', String(newVal)); } catch (e) {}
+            }}
+            style={{
+              padding: '6px 12px', 
+              fontSize: '.75rem',
+              background: perfMode ? 'var(--green)' : 'var(--line)',
+              color: perfMode ? '#000' : 'var(--text)',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: 'pointer'
+            }}
+          >
+            {perfMode ? 'ON (Fast)' : 'OFF (Rich)'}
+          </button>
         </div>
 
         <h3 className="section-h">Account</h3>

@@ -11,3 +11,63 @@ code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
 }
+
+/* ==========================================================================
+   PERFORMANCE MODE (LOW-END DEVICE GRAPHICS OPTIMIZATION OVERRIDES)
+   ========================================================================== */
+body.perf-mode * {
+  /* Disable heavy transitions and keyframe animations */
+  transition: none !important;
+  animation: none !important;
+  /* Disable hardware-intensive backdrop-filter blurs */
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  /* Disable soft glows and heavy drop-shadows */
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+
+/* Opaque backgrounds for overlays when glassmorphism blur is disabled */
+body.perf-mode .ai-chat-drawer,
+body.perf-mode .blitz-admin-modal-overlay,
+body.perf-mode .futuristic-modal-overlay,
+body.perf-mode .blitz-admin-modal-card,
+body.perf-mode .futuristic-modal-card,
+body.perf-mode .confirm-card,
+body.perf-mode .info-card {
+  background: #0d0d10 !important;
+  backdrop-filter: none !important;
+  box-shadow: none !important;
+  border: 1px solid var(--line, #282830) !important;
+}
+
+/* Remove glows and simplify active panels */
+body.perf-mode .btn-neon,
+body.perf-mode .spin-action-btn,
+body.perf-mode .float-action-btn,
+body.perf-mode .loyalty-card-wrapper,
+body.perf-mode .scratch-card,
+body.perf-mode .prod-card:hover {
+  box-shadow: none !important;
+  text-shadow: none !important;
+  background: #141418 !important;
+  border: 1px solid var(--line, #282830) !important;
+}
+
+body.perf-mode .loyalty-card-wrapper {
+  background: linear-gradient(135deg, #444, #222) !important;
+  color: #fff !important;
+}
+
+/* Disable active shake or rotation animations */
+body.perf-mode .shake-animation,
+body.perf-mode .neon-wheel {
+  animation: none !important;
+}
+
+/* Disable moving courier animations */
+body.perf-mode .bike-emoji {
+  animation: none !important;
+  left: 50% !important;
+}
+

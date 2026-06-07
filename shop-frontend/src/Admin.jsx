@@ -23,6 +23,23 @@ const fmt = (d) => d ? new Date(d).toLocaleDateString() : '';
 function Admin() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [user, setUser] = useState(null); // { name, role, username }
+  const [adminPerfMode, setAdminPerfMode] = useState(() => {
+    try {
+      return localStorage.getItem('blitz_perf_mode') === 'true';
+    } catch (e) {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      if (adminPerfMode) {
+        document.body.classList.add('perf-mode');
+      } else {
+        document.body.classList.remove('perf-mode');
+      }
+    } catch (e) {}
+  }, [adminPerfMode]);
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -1117,6 +1134,31 @@ const loadStockTransfers = async () => {
             {muted ? "🔕" : "🔔"}{totalAlerts > 0 && <i className="blitz-admin-bell-dot">{totalAlerts}</i>}
           </button>
           {!isCashier && <span className="blitz-admin-muted" style={{fontSize:'.78rem'}}>{user?.name} · {user?.role}{user?.branchId ? ' · ' + (branches.find(b => b._id === user.branchId)?.name || 'Branch') : ''}</span>}
+          <button 
+            onClick={() => {
+              const newVal = !adminPerfMode;
+              setAdminPerfMode(newVal);
+              try { localStorage.setItem('blitz_perf_mode', String(newVal)); } catch (e) {}
+            }} 
+            style={{
+              background: adminPerfMode ? 'rgba(54, 211, 153, 0.12)' : 'var(--bg-2)',
+              border: '1px solid var(--line)',
+              color: adminPerfMode ? 'var(--green)' : 'var(--text)',
+              borderRadius: 8,
+              padding: '4px 10px',
+              fontSize: '0.72rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              fontFamily: 'inherit',
+              transition: 'all 0.15s ease',
+              marginRight: '6px'
+            }}
+            title="Toggle Performance / Graphics Mode"
+          >
+            🏎️ {adminPerfMode ? 'Fast' : 'Rich'}
+          </button>
           <button className="blitz-admin-exit" onClick={() => { 
             localStorage.removeItem('bm_token'); localStorage.removeItem('bm_user'); 
             sessionStorage.removeItem('bm_token'); sessionStorage.removeItem('bm_user'); 
