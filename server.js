@@ -12,7 +12,7 @@ const MONGO_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/my_shop'
 const client = new MongoClient(MONGO_URI);
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
-let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_;
+let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_;
 const JWT_SECRET = process.env.JWT_SECRET || 'blitzmall_jwt_secret_change_in_prod_2024'; // ⚠️ SET JWT_SECRET env var in production!
 const JWT_EXPIRES = '24h';
 const authenticate = (req, res, next) => {
@@ -64,6 +64,19 @@ client.connect().then(async () => {
   loyalty_rewards_ = db.collection('loyalty_rewards');
   redemptions_ = db.collection('redemptions');
   saved_baskets_ = db.collection('saved_baskets');
+  banners_ = db.collection('banners');
+  try {
+    const bannerCount = await banners_.countDocuments();
+    if (bannerCount === 0) {
+      await banners_.insertMany([
+        { title: "🚀 MEGA LAUNCH", text: "Free Delivery on Mall Area orders! Limited time.", code: "", gradient: "linear-gradient(135deg, #ff007f, #7f00ff)", active: true, createdAt: new Date() },
+        { title: "🎁 WEEKEND SPECIAL", text: "Get 10% discount on orders over KES 1000!", code: "BLITZ10", gradient: "linear-gradient(135deg, #00f2fe, #4facfe)", active: true, createdAt: new Date() },
+        { title: "💳 INSTANT PAY", text: "Scan & Pay with secure M-Pesa STK push!", code: "", gradient: "linear-gradient(135deg, #38ef7d, #11998e)", active: true, createdAt: new Date() }
+      ]);
+    }
+  } catch (err) {
+    console.error('Failed to seed banners:', err);
+  }
   console.log('✅ Connected to MongoDB');
   await seedRewards();
 }).catch(err => console.error('❌ MongoDB connection error:', err));
@@ -445,14 +458,30 @@ app.get('/api/admin/summary', authenticate, async (req, res) => {
     const calc = (start) => {
       let revenue = 0, profit = 0, cash = 0, mpesa = 0, count = 0;
       for (const s of sales) { if (!inP(s.createdAt, start)) continue; count++; revenue += s.total || 0; profit += s.profit || 0; if (s.paymentMethod === 'cash') cash += s.total || 0; else if (s.paymentMethod === 'mpesa') mpesa += s.total || 0; else if (s.paymentMethod === 'split') { cash += s.cashPart || 0; mpesa += s.mpesaPart || 0; } }
-      for (const o of orders) { if (!inP(o.createdAt, start)) continue; count++; revenue += o.totalPrice || 0; let op = 0; for (const it of (o.items || [])) { const q = it.quantity || it.qty || 0; op += ((it.price || 0) - (it.buyingPrice || 0)) * q; } profit += op; if (o.paymentMethod === 'mpesa') mpesa += o.totalPrice || 0; else cash += o.totalPrice || 0; }
+      for (const o of orders) { 
+        if (o.status === 'cancelled') continue;
+        if (!inP(o.createdAt, start)) continue; 
+        count++; 
+        revenue += o.totalPrice || 0; 
+        let op = 0; 
+        for (const it of (o.items || [])) { 
+          const q = it.quantity || it.qty || 0; 
+          op += ((it.price || 0) - (it.buyingPrice || 0)) * q; 
+        } 
+        profit += op; 
+        if (o.paymentMethod === 'mpesa') mpesa += o.totalPrice || 0; 
+        else cash += o.totalPrice || 0; 
+      }
       let exp = 0; for (const e of expenses) if (inP(e.createdAt, start)) exp += e.amount || 0;
       return { revenue, profit, expenses: exp, net: profit - exp, cash, mpesa, count };
     };
     const summary = {}; for (const k in periods) summary[k] = calc(periods[k]);
     const tally = {};
     for (const s of sales) for (const it of (s.items || [])) tally[it.name] = (tally[it.name] || 0) + (it.qty || 0);
-    for (const o of orders) for (const it of (o.items || [])) tally[it.name] = (tally[it.name] || 0) + (it.quantity || it.qty || 0);
+    for (const o of orders) {
+      if (o.status === 'cancelled') continue;
+      for (const it of (o.items || [])) tally[it.name] = (tally[it.name] || 0) + (it.quantity || it.qty || 0);
+    }
     const best = Object.entries(tally).map(([name, qty]) => ({ name, qty })).sort((a, b) => b.qty - a.qty).slice(0, 6);
     const low = products.filter(p => p.stock !== undefined && p.stock > 0 && p.stock < 2).map(p => ({ name: p.name, stock: p.stock }));
     const out = products.filter(p => p.stock !== undefined && p.stock <= 0).map(p => ({ name: p.name }));
@@ -734,6 +763,33 @@ app.post('/api/mpesa/stk-push', async (req, res) => {
   const { phone, amount, orderId, saleId } = req.body;
   if (!phone || !amount) return res.status(400).json({ error: 'Phone and amount required' });
   try {
+    // Double payment protection
+    if (orderId && ObjectId.isValid(orderId)) {
+      const order = await orders_.findOne({ _id: new ObjectId(orderId) });
+      if (order) {
+        if (order.paymentStatus === 'paid') {
+          return res.status(400).json({ success: false, error: 'This order has already been paid and confirmed!' });
+        }
+      }
+      
+      // Check if there is a confirmed request
+      const existingConfirmed = await db_.collection('mpesa_requests').findOne({ orderId: orderId.toString(), status: 'confirmed' });
+      if (existingConfirmed) {
+        return res.status(400).json({ success: false, error: 'Payment for this order has already been confirmed!' });
+      }
+
+      // Check if there is a pending request created within the last 2 minutes
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+      const existingPending = await db_.collection('mpesa_requests').findOne({
+        orderId: orderId.toString(),
+        status: 'pending',
+        createdAt: { $gte: twoMinutesAgo }
+      });
+      if (existingPending) {
+        return res.status(400).json({ success: false, error: 'A payment request has already been sent to your phone. Please wait a moment.' });
+      }
+    }
+
     const token = await getMpesaToken();
     const timestamp = mpesaTimestamp();
     const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
@@ -763,6 +819,133 @@ app.post('/api/mpesa/stk-push', async (req, res) => {
       res.status(400).json({ success: false, error: mpesaData.errorMessage || mpesaData.ResultDesc || 'M-Pesa request failed' });
     }
   } catch (err) { console.error('STK Push error:', err); res.status(500).json({ error: 'Failed to initiate M-Pesa payment' }); }
+});
+
+// Customer cancel order endpoint
+app.post('/api/customer-orders/:orderId/cancel', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { customerId } = req.body;
+    if (!ObjectId.isValid(orderId)) return res.status(400).json({ error: 'Invalid order ID' });
+
+    const order = await orders_.findOne({ _id: new ObjectId(orderId), customerId });
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (order.status !== 'pending') return res.status(400).json({ error: `Cannot cancel an order that is already ${order.status}` });
+
+    await orders_.updateOne({ _id: new ObjectId(orderId) }, { $set: { status: 'cancelled' } });
+    
+    // Restore stock
+    for (const it of order.items) {
+      const id = it._id || it.id;
+      if (id && ObjectId.isValid(id)) {
+        await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: Math.abs(it.quantity) } });
+      }
+    }
+    res.json({ success: true, message: 'Order cancelled successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to cancel order' });
+  }
+});
+
+// Banners GET (Customer view - only active ones)
+app.get('/api/banners', async (req, res) => {
+  try {
+    const list = await banners_.find({ active: true }).sort({ createdAt: 1 }).toArray();
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch banners' });
+  }
+});
+
+// Banners GET (Admin view - all)
+app.get('/api/admin/banners', authenticate, async (req, res) => {
+  try {
+    const list = await banners_.find().sort({ createdAt: -1 }).toArray();
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch banners' });
+  }
+});
+
+// Banner POST (Create)
+app.post('/api/admin/banners', authenticate, async (req, res) => {
+  const { title, text, code, gradient } = req.body;
+  if (!title) return res.status(400).json({ error: 'Title is required' });
+  try {
+    const banner = {
+      title,
+      text: text || '',
+      code: code || '',
+      gradient: gradient || 'linear-gradient(135deg, #ffd24a, #ff7a1a)',
+      active: true,
+      createdAt: new Date()
+    };
+    const r = await banners_.insertOne(banner);
+    res.json({ success: true, bannerId: r.insertedId });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create banner' });
+  }
+});
+
+// Banner PUT (Toggle active or edit)
+app.put('/api/admin/banners/:id', authenticate, async (req, res) => {
+  const { title, text, code, gradient, active } = req.body;
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid banner ID' });
+
+    let u = {};
+    if (title !== undefined) u.title = title;
+    if (text !== undefined) u.text = text;
+    if (code !== undefined) u.code = code;
+    if (gradient !== undefined) u.gradient = gradient;
+    if (active !== undefined) u.active = !!active;
+
+    const r = await banners_.updateOne({ _id: new ObjectId(id) }, { $set: u });
+    if (!r.matchedCount) return res.status(404).json({ error: 'Banner not found' });
+    res.json({ success: true, message: 'Banner updated successfully!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update banner' });
+  }
+});
+
+// Banner DELETE
+app.delete('/api/admin/banners/:id', authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid banner ID' });
+    const r = await banners_.deleteOne({ _id: new ObjectId(id) });
+    if (!r.deletedCount) return res.status(404).json({ error: 'Banner not found' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete banner' });
+  }
+});
+
+// Product Flash Sale Toggle/Set
+app.post('/api/admin/products/:productId/flash-sale', authenticate, async (req, res) => {
+  const { flashSale, flashSaleDiscount, durationHours } = req.body;
+  try {
+    const { productId } = req.params;
+    if (!ObjectId.isValid(productId)) return res.status(400).json({ error: 'Invalid product ID' });
+
+    let u = {};
+    if (flashSale !== undefined) u.flashSale = !!flashSale;
+    if (flashSaleDiscount !== undefined) u.flashSaleDiscount = parseFloat(flashSaleDiscount) || 0;
+    
+    if (flashSale) {
+      const duration = parseFloat(durationHours) || 24; // default 24 hours
+      u.flashSaleExpires = new Date(Date.now() + duration * 60 * 60 * 1000);
+    } else {
+      u.flashSaleExpires = null;
+    }
+
+    const r = await products_.updateOne({ _id: new ObjectId(productId) }, { $set: u });
+    if (!r.matchedCount) return res.status(404).json({ error: 'Product not found' });
+    res.json({ success: true, message: 'Flash sale updated!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update flash sale settings' });
+  }
 });
 
 app.post('/api/mpesa/callback', async (req, res) => {
@@ -857,7 +1040,6 @@ const applyPricingRules = async (prods) => {
   try {
     if (!pricing_rules_) return prods;
     const rules = await pricing_rules_.find({ active: true }).toArray();
-    if (!rules.length) return prods;
 
     const now = new Date();
     const currentHour = now.getHours();
@@ -868,32 +1050,72 @@ const applyPricingRules = async (prods) => {
       let finalPrice = p.price;
       let appliedRules = [];
 
-      for (const rule of rules) {
-        if (rule.type === 'happy_hour') {
-          if (rule.startHour && rule.endHour) {
-            if (currentTimeString >= rule.startHour && currentTimeString <= rule.endHour) {
+      // 1. Expiry Check (Auto Flash Sale for items expiring within 7 days)
+      let isFlashSale = false;
+      let flashSaleDiscount = 0;
+      let flashSaleExpires = null;
+      let flashSaleReason = '';
+      
+      if (p.expiryDate) {
+        const exp = new Date(p.expiryDate);
+        const diffTime = exp - now;
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        if (diffDays >= 0 && diffDays <= 7) {
+          isFlashSale = true;
+          flashSaleDiscount = 50; // 50% discount for expiring goods
+          flashSaleExpires = p.expiryDate;
+          flashSaleReason = `Expiring soon (${diffDays} days left)`;
+        }
+      }
+      
+      // 2. Manual Flash Sale
+      if (!isFlashSale && p.flashSale && p.flashSaleExpires) {
+        const expires = new Date(p.flashSaleExpires);
+        if (expires > now) {
+          isFlashSale = true;
+          flashSaleDiscount = parseFloat(p.flashSaleDiscount) || 0;
+          flashSaleExpires = p.flashSaleExpires;
+          flashSaleReason = 'Special Flash Sale!';
+        }
+      }
+
+      if (isFlashSale && flashSaleDiscount > 0) {
+        finalPrice = finalPrice * (1 - (flashSaleDiscount / 100));
+        appliedRules.push(`Flash Sale (${flashSaleDiscount}% Off)`);
+      } else if (rules.length) {
+        for (const rule of rules) {
+          if (rule.type === 'happy_hour') {
+            if (rule.startHour && rule.endHour) {
+              if (currentTimeString >= rule.startHour && currentTimeString <= rule.endHour) {
+                finalPrice = finalPrice * (1 - (rule.discountPercent / 100));
+                appliedRules.push(rule.name);
+              }
+            }
+          } else if (rule.type === 'expiry' && p.expiryDate) {
+            const exp = new Date(p.expiryDate);
+            const diffDays = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
+            if (diffDays >= 0 && diffDays <= rule.conditionValue) {
               finalPrice = finalPrice * (1 - (rule.discountPercent / 100));
               appliedRules.push(rule.name);
             }
           }
-        } else if (rule.type === 'expiry' && p.expiryDate) {
-          const exp = new Date(p.expiryDate);
-          const diffDays = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
-          if (diffDays >= 0 && diffDays <= rule.conditionValue) {
-            finalPrice = finalPrice * (1 - (rule.discountPercent / 100));
-            appliedRules.push(rule.name);
-          }
         }
       }
+
       return {
         ...p,
         originalPrice: p.price,
         price: Math.round(finalPrice),
         discountApplied: appliedRules.length > 0,
-        appliedRules
+        appliedRules,
+        isFlashSale,
+        flashSaleDiscount,
+        flashSaleExpires,
+        flashSaleReason
       };
     });
-  } catch {
+  } catch (err) {
+    console.error('Error in applyPricingRules:', err);
     return prods;
   }
 };
@@ -942,7 +1164,7 @@ app.post('/api/admin/shifts/end', authenticate, async (req, res) => {
     if (!active) return res.status(400).json({ error: 'No active shift found.' });
 
     const filter = {
-      cashier: active.cashierName,
+      cashierUserId: active.cashierId,
       createdAt: { $gte: active.startTime },
       ...(active.branchId ? { branchId: active.branchId } : {})
     };
