@@ -500,6 +500,14 @@ function App() {
   const total = cart.reduce((s, i) => s + i.price * i.quantity, 0);
   const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
 
+  const trending = React.useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    let shown = products;
+    if (activeCategory !== 'All') shown = shown.filter(p => categoryOf(p) === activeCategory);
+    if (term) shown = shown.filter(p => p.name.toLowerCase().includes(term) || (p.description || '').toLowerCase().includes(term) || categoryOf(p).toLowerCase().includes(term));
+    return [...shown].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  }, [products, activeCategory, searchTerm]);
+
   const ORDERS_CACHE_KEY_ORDERS = ORDERS_CACHE_KEY + '_' + (customer?.customerId || 'anon');
   const syncOfflineOrders = useCallback(async () => {
     try {
@@ -533,6 +541,17 @@ function App() {
       loadLoyaltyRewards();
     }
   }, [screen]);
+
+  const addToCart = useCallback((p, qty = 1) => {
+    const id = productId(p);
+    setCart(prev => {
+      const ex = prev.find(i => productId(i) === id);
+      if (ex) return prev.map(i => productId(i) === id ? { ...i, quantity: i.quantity + qty } : i);
+      return [...prev, { ...p, quantity: qty }];
+    });
+  }, []);
+
+  const openProduct = useCallback((p) => { setActiveProduct(p); setDetailQty(1); setScreen('product'); }, []);
 
   if (isAdmin) {
     return (
@@ -571,11 +590,6 @@ function App() {
     if (c.includes('milk') || c.includes('dairy')) return '🥛'; return '🛍️';
   };
 
-  const addToCart = (p, qty = 1) => {
-    const id = productId(p); const ex = cart.find(i => productId(i) === id);
-    if (ex) setCart(cart.map(i => productId(i) === id ? { ...i, quantity: i.quantity + qty } : i));
-    else setCart([...cart, { ...p, quantity: qty }]);
-  };
   const setQty = (id, q) => { if (q <= 0) setCart(cart.filter(i => productId(i) !== id)); else setCart(cart.map(i => productId(i) === id ? { ...i, quantity: q } : i)); };
 
   const validatePhone = (p) => {
@@ -922,7 +936,6 @@ We apologize for the inconvenience and will look into this immediately.`;
     }
   };
 
-  const openProduct = (p) => { setActiveProduct(p); setDetailQty(1); setScreen('product'); };
   const onUpload = (e) => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader();
     rd.onloadend = () => saveProfile({ ...(profile || {}), photo: rd.result }); rd.readAsDataURL(f); };
 
@@ -1007,10 +1020,6 @@ We apologize for the inconvenience and will look into this immediately.`;
   // HOME — left category rail + search + trending
   if (screen === 'home' || screen === 'category') {
     const term = searchTerm.trim().toLowerCase();
-    let shown = products;
-    if (activeCategory !== 'All') shown = shown.filter(p => categoryOf(p) === activeCategory);
-    if (term) shown = shown.filter(p => p.name.toLowerCase().includes(term) || (p.description || '').toLowerCase().includes(term) || categoryOf(p).toLowerCase().includes(term));
-    const trending = [...shown].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
 
     return (
       <div className="screen with-nav shop-scroll" onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>

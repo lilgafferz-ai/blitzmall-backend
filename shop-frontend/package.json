@@ -60,6 +60,7 @@
     "productName": "BlitzMall",
     "files": [
       "build/**/*",
+      "main.js",
       "package.json",
       "!node_modules/**/*"
     ],
