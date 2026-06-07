@@ -5,9 +5,17 @@ import ErrorBoundary from './ErrorBoundary';
 import { SplashScreen } from '@capacitor/splash-screen';
 const Admin = React.lazy(() => import('./Admin'));
 
-const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname === '' || window.location.protocol === 'file:')
-  ? 'http://localhost:5000/api'
-  : (process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api');
+const getDefaultApiUrl = () => {
+  try {
+    const saved = localStorage.getItem('blitz_api_url');
+    if (saved) return saved;
+  } catch (e) {}
+  
+  const isLocalWeb = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  return isLocalWeb ? 'http://localhost:5000/api' : 'https://blitzmall-backend.onrender.com/api';
+};
+
+const API_URL = getDefaultApiUrl();
 const PRODUCTS_CACHE_KEY = 'blitz_products_cache';
 const ORDERS_CACHE_KEY = 'blitz_orders_cache';
 const OFFLINE_ORDERS_KEY = 'blitz_offline_orders';

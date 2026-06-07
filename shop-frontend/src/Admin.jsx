@@ -6,9 +6,17 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 
-const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname === '' || window.location.protocol === 'file:')
-  ? 'http://localhost:5000/api'
-  : (process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api');
+const getDefaultApiUrl = () => {
+  try {
+    const saved = localStorage.getItem('blitz_api_url');
+    if (saved) return saved;
+  } catch (e) {}
+  
+  const isLocalWeb = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  return isLocalWeb ? 'http://localhost:5000/api' : 'https://blitzmall-backend.onrender.com/api';
+};
+
+const API_URL = getDefaultApiUrl();
 const BLANK = { name: '', category: '', barcode: '', buyingPrice: '', price: '', stock: '', description: '', image: null, expiryDate: '' };
 
 // JWT auth helper — adds Bearer token to every admin fetch
@@ -1076,6 +1084,32 @@ const loadStockTransfers = async () => {
           <input className="owner-field" type="text" placeholder="Username" value={loginUsername} onChange={e => setLoginUsername(e.target.value)} required />
           <input className="owner-field" type="password" placeholder="Password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required />
           {loginError && <p style={{color:'var(--red)',fontSize:'.85rem'}}>{loginError}</p>}
+          <div style={{ marginTop: '10px', marginBottom: '14px', textAlign: 'left' }}>
+            <label style={{ fontSize: '0.75rem', color: 'var(--muted)', display: 'block', marginBottom: '4px', fontWeight: 600 }}>Server Connection:</label>
+            <select 
+              value={API_URL} 
+              onChange={e => {
+                try {
+                  localStorage.setItem('blitz_api_url', e.target.value);
+                  window.location.reload();
+                } catch (err) {}
+              }}
+              style={{
+                width: '100%', 
+                padding: '8px 10px', 
+                borderRadius: '8px', 
+                background: 'var(--bg-2)', 
+                border: '1px solid var(--line)', 
+                color: 'var(--text)',
+                fontSize: '0.8rem',
+                fontFamily: 'inherit',
+                cursor: 'pointer'
+              }}
+            >
+              <option value="https://blitzmall-backend.onrender.com/api">Cloud (Live Online Database)</option>
+              <option value="http://localhost:5000/api">Local Server (Development)</option>
+            </select>
+          </div>
           <button className="blitz-admin-btn" type="submit">Sign In</button>
         </form>
       </div></div>
