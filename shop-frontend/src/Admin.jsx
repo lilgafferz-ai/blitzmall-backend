@@ -6,7 +6,9 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 
-const API_URL = 'https://blitzmall-backend.onrender.com/api';
+const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname === '' || window.location.protocol === 'file:')
+  ? 'http://localhost:5000/api'
+  : (process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api');
 const BLANK = { name: '', category: '', barcode: '', buyingPrice: '', price: '', stock: '', description: '', image: null, expiryDate: '' };
 
 // JWT auth helper — adds Bearer token to every admin fetch
@@ -126,6 +128,42 @@ function Admin() {
 
   // Stock transfers states
   const [stockTransfers, setStockTransfers] = useState([]);
+  // Admin AI Chat states
+  const [adminAiMessages, setAdminAiMessages] = useState([
+    { sender: 'bot', text: '🤖 Hi! I\'m your Blitz Mall AI Business Assistant. Ask me about sales, inventory, orders, profit, predictions, or anything about your store!' }
+  ]);
+  const [adminAiInput, setAdminAiInput] = useState('');
+  const [adminAiLoading, setAdminAiLoading] = useState(false);
+  const [showAdminAiBot, setShowAdminAiBot] = useState(false);
+  const adminAiMessagesEndRef = useRef(null);
+
+  useEffect(() => {
+    if (adminAiMessagesEndRef.current) {
+      adminAiMessagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [adminAiMessages, adminAiLoading]);
+
+  const adminAiQuickActions = [
+    { label: '📊 Sales today', text: 'How were sales today?' },
+    { label: '💰 Profit', text: "What's my profit this month?" },
+    { label: '📦 Out of stock', text: 'Any out of stock items?' },
+    { label: '🛒 Pending orders', text: 'Show pending orders' },
+    { label: '🏆 Best sellers', text: 'Best selling products' },
+    { label: '🔮 Predictions', text: 'Restock predictions' },
+  ];
+
+  const handleAdminAiQuickAction = async (text) => {
+    setAdminAiMessages(prev => [...prev, { sender: 'user', text }]);
+    setAdminAiLoading(true);
+    try {
+      const data = await (await authPost(API_URL + '/admin/ai/chat', { message: text })).json();
+      setAdminAiMessages(prev => [...prev, { sender: 'bot', text: data.response || 'Sorry, could not process that.' }]);
+    } catch (e) {
+      setAdminAiMessages(prev => [...prev, { sender: 'bot', text: '🤖 Sorry, I encountered an error.' }]);
+    } finally {
+      setAdminAiLoading(false);
+    }
+  };
   const [transferForm, setTransferForm] = useState({ fromBranchId: '', toBranchId: '', items: [] });
   const [transferSelectedProduct, setTransferSelectedProduct] = useState('');
   const [transferSelectedQty, setTransferSelectedQty] = useState('');
@@ -370,7 +408,26 @@ function Admin() {
     } catch (e) { console.error(e); }
   };
 
-  const loadStockTransfers = async () => {
+  const sendAdminAiMessage = async (e) => {
+    e.preventDefault();
+    const msg = adminAiInput.trim();
+    if (!msg) return;
+    setAdminAiMessages(prev => [...prev, { sender: 'user', text: msg }]);
+    setAdminAiInput('');
+    setAdminAiLoading(true);
+    try {
+      const r = await authPost(API_URL + '/admin/ai/chat', { message: msg });
+      const d = await r.json();
+      setAdminAiMessages(prev => [...prev, { sender: 'bot', text: d.response || 'Sorry, I could not process that.' }]);
+    } catch (e) {
+      console.error(e);
+      setAdminAiMessages(prev => [...prev, { sender: 'bot', text: '🤖 Sorry, I encountered an error. Please try again.' }]);
+    } finally {
+      setAdminAiLoading(false);
+    }
+  };
+
+const loadStockTransfers = async () => {
     try {
       const r = await authGet(API_URL + '/admin/transfers');
       setStockTransfers(asArray(await r.json()));
@@ -2228,7 +2285,50 @@ function Admin() {
         </div>
       )}
 
-      {showFlashSaleModal && flashSaleProduct && (
+      <button onClick={() => setShowAdminAiBot(v => !v)} style={{position:'fixed',bottom:24,right:24,width:56,height:56,borderRadius:'50%',background:'var(--grad)',color:'#000',border:'none',fontSize:'1.5rem',cursor:'pointer',zIndex:2999,boxShadow:'0 4px 20px rgba(255,122,26,0.4)',display:'flex',alignItems:'center',justifyContent:'center',transition:'transform 0.2s'}} title="AI Business Assistant" onMouseEnter={e => e.target.style.transform='scale(1.1)'} onMouseLeave={e => e.target.style.transform='scale(1)'}>🤖</button>
+        {showAdminAiBot && (
+          <div style={{position:'fixed',bottom:90,right:16,width:360,maxWidth:'calc(100vw - 32px)',height:480,background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,display:'flex',flexDirection:'column',zIndex:3000,boxShadow:'0 10px 40px rgba(0,0,0,0.6)',overflow:'hidden'}}>
+            <div style={{background:'var(--grad)',padding:'12px 16px',display:'flex',justifyContent:'space-between',alignItems:'center',color:'#000',fontWeight:700}}>
+              <span style={{fontSize:'.9rem'}}>🤖 Business AI Assistant</span>
+              <button onClick={() => setShowAdminAiBot(false)} style={{background:'none',border:'none',color:'#000',fontSize:'1.1rem',cursor:'pointer',fontWeight:700}}>✕</button>
+            </div>
+            <div style={{flex:1,overflowY:'auto',padding:12,display:'flex',flexDirection:'column',gap:8}}>
+              {adminAiMessages.map((msg, i) => (
+                <div key={i} style={{display:'flex',justifyContent:msg.sender==='user'?'flex-end':'flex-start'}}>
+                  <div style={{maxWidth:'85%',padding:'8px 12px',borderRadius:msg.sender==='user'?'12px 12px 2px 12px':'12px 12px 12px 2px',background:msg.sender==='user'?'var(--grad)':'var(--bg-2)',color:msg.sender==='user'?'#000':'var(--text)',fontSize:'.82rem',lineHeight:1.4,whiteSpace:'pre-wrap',border:msg.sender==='user'?'none':'1px solid var(--line)'}}>
+                    {msg.text.split('\n').map((line, idx) => <p key={idx} style={{margin:'2px 0',whiteSpace:'pre-wrap'}}>{line}</p>)}
+                  </div>
+                </div>
+              ))}
+              {adminAiLoading && (
+                <div style={{display:'flex',justifyContent:'flex-start'}}>
+                  <div style={{padding:'8px 12px',borderRadius:'12px 12px 12px 2px',background:'var(--bg-2)',border:'1px solid var(--line)',fontSize:'.82rem',color:'var(--muted)'}}>
+                    Thinking...
+                  </div>
+                </div>
+              )}
+                        </div>
+              <div ref={adminAiMessagesEndRef} />
+            </div>
+            {/* Quick action buttons */}
+            {adminAiMessages.length === 1 && adminAiMessages[0].sender === 'bot' && !adminAiLoading && (
+              <div style={{padding:'4px 12px 2px',display:'flex',flexDirection:'column',gap:4}}>
+                <p style={{fontSize:'.7rem',color:'var(--muted)',margin:0,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Quick actions</p>
+                <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                  {adminAiQuickActions.map((a, i) => (
+                    <button key={i} onClick={() => handleAdminAiQuickAction(a.text)} style={{background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)',borderRadius:20,padding:'4px 10px',fontSize:'.75rem',fontWeight:600,cursor:'pointer',transition:'all .2s',fontFamily:'inherit'}}>{a.label}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <form onSubmit={sendAdminAiMessage} style={{display:'flex',gap:8,padding:10,borderTop:'1px solid var(--line)',background:'var(--bg-2)'}}>
+              <input value={adminAiInput} onChange={e => setAdminAiInput(e.target.value)} placeholder="Ask about sales, inventory, orders..." disabled={adminAiLoading} style={{flex:1,padding:'8px 10px',borderRadius:8,background:'var(--bg)',border:'1px solid var(--line)',color:'var(--text)',fontSize:'.82rem'}} />
+              <button type="submit" disabled={adminAiLoading || !adminAiInput.trim()} className="blitz-admin-btn small" style={{padding:'8px 14px',fontSize:'.82rem'}}>Send</button>
+            </form>
+          </div>
+        )}
+        {headerEndMarker}
+        {showFlashSaleModal && flashSaleProduct && (
         <div className="blitz-admin-modal-overlay" style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,backdropFilter:'blur(5px)'}}>
           <div className="blitz-admin-modal-card" style={{background:'var(--card)',border:'1px solid var(--line)',padding:30,borderRadius:16,width:'100%',maxWidth:420}}>
             <h3 style={{fontFamily:'Unbounded, sans-serif',color:'var(--orange)',marginBottom:6,display:'flex',alignItems:'center',gap:6}}>⚡ Configure Flash Sale</h3>

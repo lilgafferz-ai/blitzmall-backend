@@ -913,6 +913,56 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
   font-size: 0.85rem;
 }
 
+/* Quick action buttons */
+.ai-quick-actions {
+  padding: 4px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ai-quick-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.ai-quick-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ai-quick-btn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 20px;
+  padding: 6px 12px;
+  font-size: 0.78rem;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.ai-quick-btn:hover {
+  border-color: var(--green);
+  background: rgba(54, 211, 153, 0.1);
+  color: var(--green);
+}
+
+/* Bold text in AI messages */
+.ai-message-bubble strong {
+  color: var(--gold);
+  font-weight: 700;
+}
+
+/* Bullet points */
+.ai-bullet {
+  color: var(--green);
+  margin-right: 4px;
+}
+
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }

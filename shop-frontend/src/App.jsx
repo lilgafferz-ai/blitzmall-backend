@@ -5,7 +5,9 @@ import ErrorBoundary from './ErrorBoundary';
 import { SplashScreen } from '@capacitor/splash-screen';
 const Admin = React.lazy(() => import('./Admin'));
 
-const API_URL = process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api';
+const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname === '' || window.location.protocol === 'file:')
+  ? 'http://localhost:5000/api'
+  : (process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api');
 const PRODUCTS_CACHE_KEY = 'blitz_products_cache';
 const ORDERS_CACHE_KEY = 'blitz_orders_cache';
 const OFFLINE_ORDERS_KEY = 'blitz_offline_orders';
@@ -119,6 +121,49 @@ function App() {
   ]);
   const [aiInput, setAiInput] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
+  const aiMessagesEndRef = useRef(null);
+  
+  const aiQuickActions = [
+    { label: '🛒 Add milk', text: 'add milk to cart' },
+    { label: '📦 Track order', text: 'track my order' },
+    { label: '🍳 Recipe ideas', text: 'recipe ideas' },
+    { label: '🏷️ Show deals', text: 'show me deals' },
+  ];
+
+  const handleAiQuickAction = (actionText) => {
+    setAiInput(actionText);
+    // Send the message directly after a brief delay for state update
+    setTimeout(async () => {
+      const userMsg = { sender: 'user', text: actionText };
+      setAiMessages(prev => [...prev, userMsg]);
+      setAiInput('');
+      setAiLoading(true);
+      try {
+        const aiRes = await fetch(`${API_URL}/ai/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: actionText, customerId: customer?.customerId })
+        });
+        const aiData = await aiRes.json();
+        if (aiData.action?.type === 'add_to_cart' && aiData.action.product) {
+          addToCart(aiData.action.product, aiData.action.quantity || 1);
+        }
+        const botResponse = aiData.response || 'Sorry, I could not process that.';
+        setAiMessages(prev => [...prev, { sender: 'bot', text: botResponse }]);
+      } catch (e) {
+        setAiMessages(prev => [...prev, { sender: 'bot', text: '🤖 Sorry, I encountered an error. Please try again later.' }]);
+      } finally {
+        setAiLoading(false);
+      }
+    }, 100);
+  };
+
+  // Auto-scroll chat to bottom when new messages arrive
+  useEffect(() => {
+    if (aiMessagesEndRef.current) {
+      aiMessagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [aiMessages, aiLoading]);
 
   const [banners, setBanners] = useState(DEFAULT_BANNERS);
   const [lastScratchDate, setLastScratchDate] = useState(() => {
@@ -737,100 +782,20 @@ function App() {
     if (!messageText) return;
     const userMsg = { sender: 'user', text: messageText };
     setAiMessages(prev => [...prev, userMsg]);
-    const text = messageText.toLowerCase();
     setAiInput('');
     setAiLoading(true);
 
     try {
-      let botResponse = '';
-      if (text.includes('recipe') || text.includes('cook') || text.includes('make')) {
-        botResponse = '🥞 *Recommended Recipe: Blitz Pancakes!*\nIngredients available in shop:\n• Wheat Flour\n• Milk\n• Sugar\n• Cooking Oil\n\nDirections:\n1. Mix flour, milk, and sugar to make a smooth batter.\n2. Heat a pan with a drop of oil.\n3. Pour batter and cook until golden brown on both sides. Serve hot!';
-      } else if (text.includes('loyalty') || text.includes('point') || text.includes('reward') || text.includes('cashback')) {
-        botResponse = '🎁 *BlitzMall Rewards Plan:*\n• Get 1 point for every KES 10 spent.\n• Redeem points for cashback (1 point = KES 0.5 cashback applied at checkout).\n• Unlock Silver tier at KES 5,000 spent, and Gold at KES 20,000 spent for extra perks!';
-      } else if (text.includes('delivery') || text.includes('shipping') || text.includes('fare')) {
-        botResponse = '🚚 *Delivery Options:*\n• Mall Delivery: FREE (KES 0) for standard orders.\n• Other Destinations: KES 150 standard delivery fee. We use coordinates pinned at checkout to navigate direct to your door!';
-      } else if (text.includes('discount') || text.includes('coupon') || text.includes('promo')) {
-        botResponse = '🏷️ *Active Store Coupons:*\n• Use code `BLITZ10` at checkout for 10% off orders above KES 1,000!\n• Or play the Daily Spin the Wheel on the home screen to win exclusive coupons.';
-      } else if (text.includes('add') || text.includes('buy') || text.includes('order')) {
-        let matchedProduct = null;
-        for (const p of products) {
-          if (text.includes(p.name.toLowerCase())) {
-            matchedProduct = p;
-            break;
-          }
-        }
-        if (matchedProduct) {
-          addToCart(matchedProduct, 1);
-          botResponse = `🛒 *Cart Updated:* Added 1x **${matchedProduct.name}** (KES ${matchedProduct.price}) to your cart! You can view it in the cart or checkout.`;
-        } else {
-          botResponse = '🛒 I couldn\'t find a matching product name in the store. Try saying something like: "add milk to cart" or "buy Bread".';
-        }
-      } else if (text.includes('track') || text.includes('status') || text.includes('where is') || text.includes('follow up')) {
-        if (!customer?.customerId) {
-          botResponse = '👤 Please log in first to track your orders.';
-        } else {
-          const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
-          const d = await r.json();
-          if (Array.isArray(d) && d.length) {
-            const latest = d[d.length - 1];
-            botResponse = `📦 *Latest Order Status:*
-- *Order ID:* \`#${latest._id.substring(latest._id.length - 6)}\`
-- *Status:* **${(latest.status || 'pending').toUpperCase()}**
-- *Total:* KES ${latest.totalPrice}
-- *Payment Method:* ${latest.paymentMethod.toUpperCase()}
-- *Date:* ${new Date(latest.createdAt).toLocaleString()}
-
-I can cancel this order if it is still pending.`;
-          } else {
-            botResponse = '🔍 You don\'t have any past orders. Start shopping today!';
-          }
-        }
-      } else if (text.includes('cancel')) {
-        if (!customer?.customerId) {
-          botResponse = '👤 Please log in first to manage your orders.';
-        } else {
-          const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
-          const d = await r.json();
-          const pending = Array.isArray(d) ? d.find(o => o.status === 'pending') : null;
-          if (pending) {
-            const cancelRes = await fetch(`${API_URL}/customer-orders/${pending._id}/cancel`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ customerId: customer.customerId })
-            });
-            const cancelData = await cancelRes.json();
-            if (cancelData.success) {
-              await loadMyOrders();
-              botResponse = `❌ *Order Cancelled:* Order \`#${pending._id.substring(pending._id.length - 6)}\` has been cancelled and its stock is returned.`;
-            } else {
-              botResponse = `⚠️ Failed to cancel order: ${cancelData.error || 'Unknown error'}`;
-            }
-          } else {
-            botResponse = '🔍 You don\'t have any active pending orders that can be cancelled.';
-          }
-        }
-      } else if (text.includes('complain') || text.includes('issue') || text.includes('bad') || text.includes('wrong') || text.includes('delay') || text.includes('complaint')) {
-        const rReview = await fetch(API_URL + '/reviews', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            customerId: customer?.customerId || 'guest',
-            customerName: customer?.name || 'Guest Customer',
-            rating: 1,
-            message: `[AI Complaint] ${messageText}`
-          })
-        });
-        const dReview = await rReview.json();
-        botResponse = `📝 *Complaint Filed:*
-Your complaint has been logged in our system.
-- *Ref ID:* \`${dReview.reviewId || 'COMP-' + Date.now().toString().slice(-4)}\`
-- *Details:* "${messageText}"
-
-We apologize for the inconvenience and will look into this immediately.`;
-      } else {
-        botResponse = '🤖 Jambo! I am your BlitzMall AI assistant. I can help you:\n- *Add products to cart* (e.g., "add milk to cart")\n- *Track your order* ("track order" or "order status")\n- *Cancel order* ("cancel order")\n- *File complaints* ("complain about delayed delivery")\n- *Answer questions* ("recipe", "rewards", "delivery", "discounts")';
+      const aiRes = await fetch(`${API_URL}/ai/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: messageText, customerId: customer?.customerId, conversationHistory: aiMessages.slice(-10) })
+      });
+      const aiData = await aiRes.json();
+      if (aiData.action?.type === 'add_to_cart' && aiData.action.product) {
+        addToCart(aiData.action.product, aiData.action.quantity || 1);
       }
-
+      const botResponse = aiData.response || 'Sorry, I could not process that.';
       setAiMessages(prev => [...prev, { sender: 'bot', text: botResponse }]);
     } catch (e) {
       console.error(e);
@@ -1295,12 +1260,28 @@ We apologize for the inconvenience and will look into this immediately.`;
             </div>
             
             <div className="ai-chat-messages">
+              {aiMessages.length === 1 && aiMessages[0].sender === 'bot' && aiQuickActions.length > 0 && (
+                <div className="ai-quick-actions">
+                  <p className="ai-quick-label">Try asking:</p>
+                  <div className="ai-quick-buttons">
+                    {aiQuickActions.map((action, i) => (
+                      <button key={i} className="ai-quick-btn" onClick={() => handleAiQuickAction(action.text)}>
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {aiMessages.map((msg, i) => (
                 <div className={`ai-message ${msg.sender}`} key={i}>
                   <div className="ai-message-bubble">
-                    {msg.text.split('\n').map((line, idx) => (
-                      <p key={idx} style={{ margin: '4px 0' }}>{line}</p>
-                    ))}
+                    {msg.text.split('\n').map((line, idx) => {
+                      // Format **bold** text and bullet points
+                      const formattedLine = line
+                        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                        .replace(/^• /gm, '<span class="ai-bullet">•</span> ');
+                      return <p key={idx} style={{ margin: '4px 0' }} dangerouslySetInnerHTML={{ __html: formattedLine }} />;
+                    })}
                   </div>
                 </div>
               ))}
@@ -1311,6 +1292,7 @@ We apologize for the inconvenience and will look into this immediately.`;
                   </div>
                 </div>
               )}
+              <div ref={aiMessagesEndRef} />
             </div>
 
             <form className="ai-chat-input-row" onSubmit={sendAiMessage}>

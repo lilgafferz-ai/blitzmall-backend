@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const MONGO_URI = process.env.MONGODB_URI || 'mongodb+srv://RedMan:21Savage.@cluster0.bbn0afu.mongodb.net/?appName=Cluster0';
+const MONGO_URI = process.env.MONGODB_URI || 'mongodb+srv://RedMan:21savagE@cluster0.bbn0afu.mongodb.net/?appName=Cluster0';
 const client = new MongoClient(MONGO_URI);
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
@@ -1499,4 +1499,376 @@ app.post('/api/admin/receipt-delivery/log', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed' });
   }
 });
+// ===== AI ASSISTANT ENGINE =====
+function normalizeAiText(text) {
+  return text.toLowerCase().replace(/['']/g, "'").replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function findMatchingProducts(query, products, limit = 5) {
+  const q = normalizeAiText(query);
+  const stopWords = new Set(['add','buy','get','order','put','place','grab','take','want','need','find','search','show','me','the','a','an','to','in','my','some','with','and','or','for','of','is','it','this','that','please','can','you','i','do','have','from','on','at','up','out','about','how','much','what','which','give','look']);
+  const words = q.split(' ').filter(w => w.length > 1 && !stopWords.has(w));
+  const scored = products.map(p => {
+    const name = normalizeAiText(p.name);
+    let score = 0;
+    if (name === q) score += 100;
+    if (name.includes(q)) score += 80;
+    if (q.includes(name) && name.length > 2) score += 70;
+    for (const sw of words) {
+      if (name.includes(sw)) score += 20;
+      for (const nw of name.split(' ')) {
+        if (nw.startsWith(sw) || sw.startsWith(nw)) score += 15;
+      }
+    }
+    return { product: p, score };
+  });
+  return scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit).map(s => s.product);
+}
+
+function detectAiIntent(text, products) {
+  const t = normalizeAiText(text);
+  if (/\b(add|buy|get|order|put|grab|take|want|need|give me|cart)\b/i.test(t)) {
+    const matched = findMatchingProducts(t, products, 1);
+    if (matched.length > 0) {
+      const qtyMatch = t.match(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/);
+      const wordToNum = { one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9, ten:10 };
+      const qty = qtyMatch ? (wordToNum[qtyMatch[1]] || parseInt(qtyMatch[1]) || 1) : 1;
+      return { type: 'add_to_cart', product: matched[0], quantity: qty };
+    }
+    return { type: 'add_to_cart_no_match' };
+  }
+  if (/\b(track|status|where|follow|locate|my order|my orders)\b/i.test(t)) return { type: 'order_status' };
+  if (/\b(cancel|stop|abort|void)\b/i.test(t)) {
+    if (/\b(yes|confirm|do it|go ahead|please|sure)\b/i.test(t)) return { type: 'confirm_cancel' };
+    return { type: 'cancel_order' };
+  }
+  if (/\b(complain|complaint|issue|problem|wrong|bad|terrible|awful|delay|late|missing|broken|damaged|refund)\b/i.test(t)) return { type: 'complaint' };
+  if (/\b(recipe|cook|make|prepare|bake|fry|dish|meal|how to make)\b/i.test(t)) return { type: 'recipe' };
+  if (/\b(loyalty|points|reward|cashback|balance|tier|redeem)\b/i.test(t)) return { type: 'loyalty' };
+  if (/\b(delivery|shipping|fare|deliver)\b/i.test(t)) return { type: 'delivery' };
+  if (/\b(discount|coupon|promo|code|offer|deal|save)\b/i.test(t)) return { type: 'discount' };
+  if (/\b(search|find|show|look|browse|list)\b/i.test(t)) {
+    const matched = findMatchingProducts(t, products, 5);
+    return matched.length > 0 ? { type: 'product_search', results: matched } : { type: 'product_search_no_results' };
+  }
+  if (/\b(recommend|suggest|popular|best|top|what should)\b/i.test(t)) return { type: 'recommend' };
+  if (/\b(hello|hi|hey|jambo|sup|yo|morning|afternoon|evening|how are|what's up)\b/i.test(t)) return { type: 'greeting' };
+  if (/\b(help|what can you|capabilities|features)\b/i.test(t)) return { type: 'help' };
+  if (/\b(price|cost|how much|expensive|cheap)\b/i.test(t)) {
+    const matched = findMatchingProducts(t, products, 5);
+    return matched.length > 0 ? { type: 'price_check', products: matched } : { type: 'price_general' };
+  }
+  if (/\b(stock|available|in stock|out of|left|remaining)\b/i.test(t)) {
+    const matched = findMatchingProducts(t, products, 5);
+    return matched.length > 0 ? { type: 'stock_check', products: matched } : { type: 'stock_general' };
+  }
+  const matched = findMatchingProducts(t, products, 3);
+  if (matched.length > 0) return { type: 'product_search', results: matched };
+  return { type: 'unknown' };
+}
+
+async function generateAiResponse(intent, text, context) {
+  const { customerId, products, orders, loyalty, message } = context;
+  switch (intent.type) {
+    case 'greeting':
+      return `Jambo! 👋 Welcome to BlitzMall AI.\n\nI can help you shop, track orders, find deals, and more!\n\nTry asking me:\n• "Add milk to cart"\n• "Track my order"\n• "Show me deals"`;
+    case 'add_to_cart': {
+      const p = intent.product;
+      return `🛒 **Added to cart:**\n• ${p.name} × ${intent.quantity} — KES ${(p.price * intent.quantity).toLocaleString()}\n\nView your cart or continue shopping!`;
+    }
+    case 'add_to_cart_no_match': {
+      const searchResults = findMatchingProducts(text, products, 3);
+      if (searchResults.length > 0) {
+        return `I couldn't find an exact match, but here are similar products:\n\n${searchResults.map(p => `• ${p.name} — KES ${p.price}`).join('\n')}\n\nSay "add [product name]" to add one to your cart!`;
+      }
+      return `I couldn't find a matching product. Try:\n• "add [product name]" — e.g., "add milk to cart"\n• "search [keyword]" — to browse products`;
+    }
+    case 'order_status': {
+      if (!customerId) return '👤 Please log in first so I can look up your orders.';
+      if (!orders.length) return '📦 You don\'t have any orders yet. Start shopping today!';
+      const latest = orders[0];
+      const emoji = { pending: '⏳', packed: '📦', on_the_way: '🛵', delivered: '✅', cancelled: '❌' };
+      return `${emoji[latest.status] || '📋'} **Your Latest Order:**\n\n• Order ID: #${latest._id.toString().slice(-6)}\n• Status: **${(latest.status || 'pending').toUpperCase()}**\n• Total: KES ${(latest.totalPrice || 0).toLocaleString()}\n• Items: ${latest.items.map(i => `${i.name} ×${i.quantity}`).join(', ')}\n• Payment: ${(latest.paymentMethod || 'delivery').toUpperCase()}\n• Date: ${new Date(latest.createdAt).toLocaleDateString()}\n\nSay "cancel order" if it's still pending.`;
+    }
+    case 'cancel_order': {
+      if (!customerId) return '👤 Please log in first to manage your orders.';
+      const pending = orders.find(o => o.status === 'pending');
+      if (!pending) return '🔍 You don\'t have any pending orders that can be cancelled.';
+      return `📋 Found pending order #${pending._id.toString().slice(-6)} (KES ${(pending.totalPrice || 0).toLocaleString()}).\n\nGo to **My Orders** in your profile to cancel it, or say "yes cancel it" and I'll cancel it for you now.`;
+    }
+    case 'confirm_cancel': {
+      if (!customerId) return '👤 Please log in first.';
+      const pending = orders.find(o => o.status === 'pending');
+      if (!pending) return '🔍 No pending orders to cancel.';
+      try {
+        await orders_.updateOne({ _id: new ObjectId(pending._id) }, { $set: { status: 'cancelled' } });
+        for (const it of pending.items) {
+          const id = it._id || it.id;
+          if (id && ObjectId.isValid(id)) {
+            await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: Math.abs(it.quantity) } });
+          }
+        }
+        return `❌ **Order Cancelled:**\n\nOrder #${pending._id.toString().slice(-6)} has been cancelled and stock restored.\n\nNeed anything else?`;
+      } catch (err) {
+        return '⚠️ Failed to cancel order. Please try from My Orders page.';
+      }
+    }
+    case 'complaint': {
+      if (customerId) {
+        try {
+          await reviews_.insertOne({ customerId, customerName: 'Customer', rating: 1, message: `[AI Complaint] ${message}`, createdAt: new Date() });
+        } catch {}
+      }
+      return `📝 I'm sorry to hear about this issue. Your complaint has been noted and logged.\n\nTo help us resolve it faster:\n• Which order is affected?\n• What specifically went wrong?\n\nOur team will look into this. You can also use **Profile → Rate us** for formal feedback.`;
+    }
+    case 'recipe': {
+      const available = products.filter(p => /milk|flour|sugar|oil|bread|egg/i.test(p.name)).slice(0, 6);
+      const prodList = available.length > 0 ? `\n\nAvailable in store:\n${available.map(p => `• ${p.name} — KES ${p.price}`).join('\n')}` : '';
+      return `🍳 **Recipe Ideas:**\n\n1. **Pancakes** — Mix flour, milk, sugar; fry in oil\n2. **French Toast** — Dip bread in egg+milk; fry golden\n3. **Stir Fry** — Vegetables + cooking oil\n4. **Milkshake** — Blend milk + sugar + ice${prodList}\n\nSay "add [ingredient]" to add to your cart!`;
+    }
+    case 'loyalty': {
+      if (!customerId) return '👤 Log in to check your loyalty points!';
+      if (!loyalty) return '🎁 Join our loyalty program! Earn 1 point per KES 100 spent.\n\nBronze → Silver (KES 25K) → Gold (KES 100K) → Platinum\nRedeem points for discounts at checkout!';
+      return `🎁 **Your Loyalty Card:**\n\n• Tier: **${loyalty.tier}**\n• Points: **${loyalty.points}** PTS\n• Total Spent: KES ${(loyalty.totalSpent || 0).toLocaleString()}\n• Est. Cashback: KES ${Math.round((loyalty.points || 0) * 5).toLocaleString()}`;
+    }
+    case 'delivery':
+      return `🚚 **Delivery Options:**\n\n• **Mall Area:** FREE delivery!\n• **Standard:** KES 150 flat fee\n• **Free Delivery:** Orders over KES 1,500!\n\n📍 GPS pinning available at checkout.`;
+    case 'discount': {
+      let couponInfo = '';
+      try {
+        const activeCoupons = await coupons_.find({ active: true }).toArray();
+        if (activeCoupons.length > 0) {
+          couponInfo = activeCoupons.map(c => {
+            const disc = c.type === 'percent' ? `${c.value}% off` : `KES ${c.value} off`;
+            const min = c.minPurchase ? ` (min KES ${c.minPurchase})` : '';
+            return `• \`${c.code}\` — ${disc}${min}`;
+          }).join('\n');
+        }
+      } catch {}
+      return `🏷️ **Active Deals:**\n\n${couponInfo || '• Use code \`BLITZ10\` for 10% off orders over KES 1,000!'}\n\n🎡 Try the **Spin the Wheel** on the home screen for exclusive coupons!`;
+    }
+    case 'product_search': {
+      if (!intent.results || intent.results.length === 0) return '🔍 No products found. Try different keywords!';
+      return `🔍 **Products found:**\n\n${intent.results.map(p => `• **${p.name}** — KES ${p.price}${p.stock > 0 ? ` (${p.stock} in stock)` : ' ❌ Out of stock'}`).join('\n')}\n\nSay "add [name]" to add to cart!`;
+    }
+    case 'product_search_no_results':
+      return '🔍 No products found. Try different keywords or browse categories on the home screen!';
+    case 'recommend': {
+      const popular = products.filter(p => p.stock > 0).sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).slice(0, 5);
+      if (!popular.length) return '🛍️ No products available right now.';
+      return `🌟 **Top Picks:**\n\n${popular.map(p => `• **${p.name}** — KES ${p.price}`).join('\n')}\n\nSay "add [name]" to add to cart!`;
+    }
+    case 'price_check': {
+      return `💰 **Prices:**\n\n${intent.products.map(p => `• **${p.name}** — KES ${p.price}${p.isFlashSale ? ' ⚡ FLASH' : ''}`).join('\n')}`;
+    }
+    case 'price_general':
+      return '💰 Search for a specific product to see its price, or browse categories!';
+    case 'stock_check': {
+      return `📦 **Stock Status:**\n\n${intent.products.map(p => `• **${p.name}** — ${p.stock > 10 ? '✅ In stock' : p.stock > 0 ? `⚠️ Low (${p.stock} left)` : '❌ Out of stock'}`).join('\n')}`;
+    }
+    case 'stock_general':
+      return '📦 Check product pages for real-time stock levels!';
+    case 'help':
+    default:
+      return `🤖 **BlitzMall AI Assistant**\n\n🛒 **Shopping:**\n• "Add [product] to cart"\n• "Search for [keyword]"\n• "Show me [category]"\n\n📦 **Orders:**\n• "Track my order"\n• "Cancel order"\n\n🎁 **Rewards:**\n• "My loyalty points"\n• "Show me deals"\n\n💡 **More:**\n• "Recipe ideas"\n• "Delivery info"\n• "How much is [product]"\n\nJust ask naturally! 😊`;
+  }
+}
+
+app.post('/api/ai/chat', async (req, res) => {
+  const { message, customerId, conversationHistory } = req.body;
+  if (!message || !message.trim()) return res.status(400).json({ error: 'Message required' });
+  try {
+    const text = message.trim();
+    const [products, customerOrders, loyaltyRecord] = await Promise.all([
+      products_.find({}).toArray(),
+      customerId ? orders_.find({ customerId }).sort({ createdAt: -1 }).toArray() : [],
+      customerId ? loyalty_.findOne({ phone: customerId }) : null
+    ]);
+    const intent = detectAiIntent(text, products);
+    const response = await generateAiResponse(intent, text, { customerId, products, orders: customerOrders, loyalty: loyaltyRecord, conversationHistory });
+    let action = null;
+    if (intent.type === 'add_to_cart') {
+      action = { type: 'add_to_cart', product: intent.product, quantity: intent.quantity };
+    }
+    res.json({ response, action });
+  } catch (err) {
+    console.error('AI chat error:', err);
+    res.json({ response: 'Sorry, I encountered an error. Please try again.', action: null });
+  }
+});
+
+
+// ===== ADMIN AI ASSISTANT ENGINE =====
+function detectAdminIntent(text) {
+  const t = text.toLowerCase().trim();
+  if (/\b(hello|hi|hey|help|what can you)\b/i.test(t)) return { type: 'greeting' };
+  if (/\b(sale|revenue|income|earn|sold|today|this week|this month|how much|performance)\b/i.test(t)) {
+    if (/\b(today|now|current)\b/i.test(t)) return { type: 'sales_today' };
+    if (/\b(week|weekly)\b/i.test(t)) return { type: 'sales_week' };
+    if (/\b(month|monthly)\b/i.test(t)) return { type: 'sales_month' };
+    if (/\b(year|yearly|annual)\b/i.test(t)) return { type: 'sales_year' };
+    if (/\b(best|top|popular|most|trending)\b/i.test(t)) return { type: 'best_sellers' };
+    return { type: 'sales_summary' };
+  }
+  if (/\b(profit|margin|net|loss)\b/i.test(t)) return { type: 'profit' };
+  if (/\b(expense|cost|spend|overhead|deduction)\b/i.test(t)) return { type: 'expenses' };
+  if (/\b(inventory|stock|product|item|goods|warehouse)\b/i.test(t)) {
+    if (/\b(out|empty|zero|depleted|none)\b/i.test(t)) return { type: 'out_of_stock' };
+    if (/\b(low|low stock|running out|critical)\b/i.test(t)) return { type: 'low_stock' };
+    if (/\b(expir|rotting|old|expire soon)\b/i.test(t)) return { type: 'expiring' };
+    if (/\b(count|total|how many|number|list|show)\b/i.test(t)) return { type: 'inventory_count' };
+    return { type: 'inventory_summary' };
+  }
+  if (/\b(order|delivery|customer order|pending order)\b/i.test(t)) {
+    if (/\b(pending|new|incoming|today)\b/i.test(t)) return { type: 'pending_orders' };
+    if (/\b(delivered|completed|done|fulfilled)\b/i.test(t)) return { type: 'delivered_orders' };
+    if (/\b(cancel)\b/i.test(t)) return { type: 'cancelled_orders' };
+    return { type: 'orders_summary' };
+  }
+  if (/\b(loyalty|points|reward|member|tier)\b/i.test(t)) return { type: 'loyalty_summary' };
+  if (/\b(staff|employee|cashier|worker|team)\b/i.test(t)) return { type: 'staff_summary' };
+  if (/\b(coupon|discount|promo|deal|offer)\b/i.test(t)) return { type: 'coupons_summary' };
+  if (/\b(predict|forecast|trend|expect|future|restock|slow)\b/i.test(t)) return { type: 'predictions' };
+  if (/\b(cash|cashier|drawer|balance|register)\b/i.test(t)) return { type: 'cash_summary' };
+  if (/\b(summary|overview|dashboard|snapshot|report)\b/i.test(t)) return { type: 'full_summary' };
+  return { type: 'general' };
+}
+
+async function generateAdminAiResponse(intent, text, branchId) {
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startWeek = new Date(startToday);
+  const dow = now.getDay(); startWeek.setDate(startToday.getDate() - (dow === 0 ? 6 : dow - 1));
+  const startMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const startYear = new Date(now.getFullYear(), 0, 1);
+  const inP = (d, s) => new Date(d) >= s;
+
+  const branchQ = branchId ? { branchId } : {};
+
+  const [allSales, allOrders, allExpenses, allProducts, allStaff, allLoyalty, allCoupons] = await Promise.all([
+    sales_.find(branchQ).toArray(),
+    orders_.find(branchQ).toArray(),
+    expenses_.find(branchQ).toArray(),
+    products_.find(branchQ).toArray(),
+    staff_.find(branchQ).toArray(),
+    loyalty_.find({}).toArray(),
+    coupons_.find({}).toArray()
+  ]);
+
+  const calc = (start) => {
+    let revenue = 0, profit = 0, cash = 0, mpesa = 0, count = 0;
+    for (const s of allSales) { if (!inP(s.createdAt, start)) continue; count++; revenue += s.total || 0; profit += s.profit || 0; if (s.paymentMethod === 'cash') cash += s.total || 0; else if (s.paymentMethod === 'mpesa') mpesa += s.total || 0; else if (s.paymentMethod === 'split') { cash += s.cashPart || 0; mpesa += s.mpesaPart || 0; } }
+    for (const o of allOrders) { if (o.status === 'cancelled' || !inP(o.createdAt, start)) continue; count++; revenue += o.totalPrice || 0; let op = 0; for (const it of (o.items || [])) { const q = it.quantity || it.qty || 0; op += ((it.price || 0) - (it.buyingPrice || 0)) * q; } profit += op; if (o.paymentMethod === 'mpesa') mpesa += o.totalPrice || 0; else cash += o.totalPrice || 0; }
+    let exp = 0; for (const e of allExpenses) if (inP(e.createdAt, start)) exp += e.amount || 0;
+    return { revenue, profit, expenses: exp, net: profit - exp, cash, mpesa, count };
+  };
+
+  const today = calc(startToday);
+  const week = calc(startWeek);
+  const month = calc(startMonth);
+  const year = calc(startYear);
+
+  const money = (n) => 'KES ' + Math.round(n || 0).toLocaleString();
+  const pct = (a, b) => b > 0 ? Math.round((a / b) * 100) : 0;
+
+  const tally = {};
+  for (const s of allSales) for (const it of (s.items || [])) tally[it.name] = (tally[it.name] || 0) + (it.qty || 0);
+  for (const o of allOrders) { if (o.status !== 'cancelled') for (const it of (o.items || [])) tally[it.name] = (tally[it.name] || 0) + (it.quantity || it.qty || 0); }
+  const best = Object.entries(tally).map(([name, qty]) => ({ name, qty })).sort((a, b) => b.qty - a.qty);
+  const outOfStock = allProducts.filter(p => (p.stock || 0) <= 0).map(p => p.name);
+  const lowStock = allProducts.filter(p => (p.stock || 0) > 0 && (p.stock || 0) < 2).map(p => p.name + ' (' + p.stock + ')');
+  const expiringSoon = allProducts.filter(p => { if (!p.expiryDate) return false; const diff = new Date(p.expiryDate) - now; return diff >= 0 && diff <= 7 * 86400000; }).map(p => p.name);
+  const pendingOrders = allOrders.filter(o => o.status === 'pending');
+  const deliveredOrders = allOrders.filter(o => o.status === 'delivered');
+  const cancelledOrders = allOrders.filter(o => o.status === 'cancelled');
+
+  switch (intent.type) {
+    case 'greeting':
+      return '\ud83e\udd16 **Blitz Mall AI Business Assistant**\n\nI have access to your full store data. Ask me about:\n\n\ud83d\udcca **Sales** \u2014 "How were sales today?"\n\ud83d\udcb0 **Profit** \u2014 "What\'s my profit this month?"\n\ud83d\udce6 **Inventory** \u2014 "Any out of stock items?"\n\ud83d\uded2 **Orders** \u2014 "Show pending orders"\n\ud83d\udcc8 **Predictions** \u2014 "Restock predictions"\n\ud83d\udc65 **Staff** \u2014 "Who are my staff?"\n\ud83c\udfaf **Best sellers** \u2014 "What sold best?"\n\ud83d\udcb3 **Payments** \u2014 "Cash vs M-Pesa today"\n\nJust ask naturally! \ud83d\ude0a';
+    case 'sales_today':
+      return '\ud83d\udcca **Today\'s Sales:**\n\n\u2022 **Transactions:** ' + today.count + '\n\u2022 **Revenue:** ' + money(today.revenue) + '\n\u2022 **Cash:** ' + money(today.cash) + '\n\u2022 **M-Pesa:** ' + money(today.mpesa) + '\n\u2022 **Profit:** ' + money(today.profit) + '\n\n' + (today.revenue > 0 ? '\ud83d\udca1 ' + (today.mpesa > today.cash ? 'M-Pesa is leading today!' : 'Cash is leading today!') : 'No sales recorded yet today.');
+    case 'sales_week':
+      return '\ud83d\udcca **This Week\'s Sales:**\n\n\u2022 **Transactions:** ' + week.count + '\n\u2022 **Revenue:** ' + money(week.revenue) + '\n\u2022 **Profit:** ' + money(week.profit) + '\n\u2022 **Expenses:** ' + money(week.expenses) + '\n\u2022 **Net:** ' + money(week.net) + '\n\n\ud83d\udcc8 Daily avg: ' + money(week.revenue / 7);
+    case 'sales_month':
+      return '\ud83d\udcca **This Month\'s Sales:**\n\n\u2022 **Transactions:** ' + month.count + '\n\u2022 **Revenue:** ' + money(month.revenue) + '\n\u2022 **Profit:** ' + money(month.profit) + '\n\u2022 **Expenses:** ' + money(month.expenses) + '\n\u2022 **Net:** ' + money(month.net) + '\n\n\ud83d\udcc8 Daily avg: ' + money(month.revenue / now.getDate());
+    case 'sales_year':
+      return '\ud83d\udcca **Year to Date:**\n\n\u2022 **Transactions:** ' + year.count + '\n\u2022 **Revenue:** ' + money(year.revenue) + '\n\u2022 **Profit:** ' + money(year.profit) + '\n\u2022 **Expenses:** ' + money(year.expenses) + '\n\u2022 **Net:** ' + money(year.net);
+    case 'best_sellers':
+      if (best.length === 0) return '\ud83d\udcca No sales data yet.';
+      return '\ud83c\udfc6 **Top 10 Best Sellers:**\n\n' + best.slice(0, 10).map((b, i) => (i + 1) + '. **' + b.name + '** \u2014 ' + b.qty + ' sold').join('\n') + '\n\nTotal unique products sold: ' + best.length;
+    case 'sales_summary':
+      return '\ud83d\udcca **Sales Overview:**\n\n\u2022 Today: ' + money(today.revenue) + ' (' + today.count + ' txns)\n\u2022 This Week: ' + money(week.revenue) + ' (' + week.count + ' txns)\n\u2022 This Month: ' + money(month.revenue) + ' (' + month.count + ' txns)\n\u2022 This Year: ' + money(year.revenue) + ' (' + year.count + ' txns)';
+    case 'profit':
+      return '\ud83d\udcb0 **Profit Breakdown:**\n\n\u2022 Today: ' + money(today.profit) + ' profit' + (today.expenses > 0 ? ' \u2013 ' + money(today.expenses) + ' expenses = **' + money(today.net) + ' net**' : '') + '\n\u2022 This Week: ' + money(week.profit) + ' profit' + (week.expenses > 0 ? ' \u2013 ' + money(week.expenses) + ' expenses = **' + money(week.net) + ' net**' : '') + '\n\u2022 This Month: ' + money(month.profit) + ' profit' + (month.expenses > 0 ? ' \u2013 ' + money(month.expenses) + ' expenses = **' + money(month.net) + ' net**' : '') + '\n\u2022 Year to Date: ' + money(year.profit) + ' profit';
+    case 'expenses': {
+      const todayExp = allExpenses.filter(e => inP(e.createdAt, startToday));
+      return '\ud83d\udcb8 **Expenses:**\n\n\u2022 Today: ' + money(today.expenses) + ' (' + todayExp.length + ' entries)\n\u2022 This Week: ' + money(week.expenses) + '\n\u2022 This Month: ' + money(month.expenses) + '\n\u2022 Year to Date: ' + money(year.expenses) + (todayExp.length > 0 ? '\n\n\ud83d\udccb Today\'s:\n' + todayExp.map(e => '\u2022 ' + e.description + ': ' + money(e.amount)).join('\n') : '');
+    }
+    case 'out_of_stock':
+      return outOfStock.length > 0 ? '\ud83d\udea8 **Out of Stock (' + outOfStock.length + '):**\n\n' + outOfStock.map(n => '\u2022 ' + n).join('\n') + '\n\n\u26a1 Go to Inventory to restock!' : '\u2705 All products are in stock!';
+    case 'low_stock':
+      return lowStock.length > 0 ? '\u26a0\ufe0f **Low Stock (' + lowStock.length + '):**\n\n' + lowStock.map(n => '\u2022 ' + n).join('\n') + '\n\nThese items need restocking soon.' : '\u2705 No items critically low.';
+    case 'expiring':
+      return expiringSoon.length > 0 ? '\u23f0 **Expiring Soon (' + expiringSoon.length + '):**\n\n' + expiringSoon.map(n => '\u2022 ' + n).join('\n') + '\n\nConsider a flash sale!' : '\u2705 No products expiring within 7 days.';
+    case 'inventory_count':
+      return '\ud83d\udce6 **Inventory:**\n\n\u2022 Products: ' + allProducts.length + '\n\u2022 Total stock: ' + allProducts.reduce((s, p) => s + (p.stock || 0), 0) + '\n\u2022 Categories: ' + [...new Set(allProducts.map(p => p.category || 'Other'))].length + '\n\u2022 Out of stock: ' + outOfStock.length + '\n\u2022 Low stock: ' + lowStock.length;
+    case 'inventory_summary': {
+      const totalValue = allProducts.reduce((s, p) => s + (p.price || 0) * (p.stock || 0), 0);
+      const totalCost = allProducts.reduce((s, p) => s + (p.buyingPrice || 0) * (p.stock || 0), 0);
+      return '\ud83d\udce6 **Inventory Summary:**\n\n\u2022 Products: ' + allProducts.length + '\n\u2022 Stock value (sell): ' + money(totalValue) + '\n\u2022 Stock value (cost): ' + money(totalCost) + '\n\u2022 Potential profit: ' + money(totalValue - totalCost) + '\n\u2022 Out of stock: ' + outOfStock.length;
+    }
+    case 'pending_orders':
+      if (pendingOrders.length === 0) return '\ud83d\uded2 No pending orders.';
+      return '\ud83d\uded2 **Pending Orders (' + pendingOrders.length + '):**\n\n' + pendingOrders.slice(0, 5).map(o => '\u2022 ' + (o.customerName || 'Customer') + ' \u2014 ' + money(o.totalPrice) + ' (' + (o.paymentMethod || 'delivery') + ')').join('\n') + (pendingOrders.length > 5 ? '\n... and ' + (pendingOrders.length - 5) + ' more' : '');
+    case 'delivered_orders':
+      return '\u2705 Delivered: ' + deliveredOrders.length + ' | \u274c Cancelled: ' + cancelledOrders.length + ' | Rate: ' + pct(deliveredOrders.length, deliveredOrders.length + cancelledOrders.length) + '%';
+    case 'cancelled_orders':
+      if (cancelledOrders.length === 0) return '\u2705 No cancelled orders.';
+      return '\u274c **Cancelled (' + cancelledOrders.length + '):**\n\n' + cancelledOrders.slice(0, 5).map(o => '\u2022 ' + (o.customerName || 'Customer') + ' \u2014 ' + money(o.totalPrice)).join('\n');
+    case 'orders_summary':
+      return '\ud83d\uded2 **Orders:**\n\n\u2022 Pending: ' + pendingOrders.length + '\n\u2022 Delivered: ' + deliveredOrders.length + '\n\u2022 Cancelled: ' + cancelledOrders.length + '\n\u2022 Total: ' + allOrders.length + '\n\u2022 Revenue: ' + money(allOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + (o.totalPrice || 0), 0));
+    case 'loyalty_summary':
+      return '\ud83c\udf81 **Loyalty:**\n\n\u2022 Members: ' + allLoyalty.length + '\n\u2022 Points issued: ' + allLoyalty.reduce((s, l) => s + (l.points || 0), 0) + '\n\u2022 Bronze: ' + allLoyalty.filter(l => l.tier === 'Bronze').length + ' | Silver: ' + allLoyalty.filter(l => l.tier === 'Silver').length + ' | Gold: ' + allLoyalty.filter(l => l.tier === 'Gold').length;
+    case 'staff_summary':
+      return '\ud83d\udc65 **Staff:**\n\n\u2022 Total: ' + allStaff.length + '\n\u2022 Names: ' + (allStaff.length > 0 ? allStaff.map(s => s.name).join(', ') : 'None registered');
+    case 'coupons_summary': {
+      const active = allCoupons.filter(c => c.active);
+      return '\ud83c\udff7\ufe0f **Coupons:**\n\n\u2022 Active: ' + active.length + ' / ' + allCoupons.length + (active.length > 0 ? '\n\n' + active.map(c => '\u2022 ' + c.code + ' \u2014 ' + (c.type === 'percent' ? c.value + '% off' : money(c.value) + ' off')).join('\n') : '');
+    }
+    case 'predictions': {
+      try {
+        const tallyPred = {};
+        for (const s of allSales) for (const it of (s.items || [])) tallyPred[it.name] = (tallyPred[it.name] || 0) + (it.qty || 0);
+        for (const o of allOrders) { if (o.status !== 'cancelled') for (const it of (o.items || [])) tallyPred[it.name] = (tallyPred[it.name] || 0) + (it.quantity || it.qty || 0); }
+        const preds = generatePredictions(allSales, allOrders, allProducts, tallyPred);
+        let msg = '\ud83e\udde0 **AI Predictions:**\n\n';
+        if (preds.forecast && preds.forecast.avgDaily > 0) msg += '\ud83d\udcc8 **7-Day Forecast:** ' + money(preds.forecast.next7Days) + ' (avg ' + money(preds.forecast.avgDaily) + '/day)\n\n';
+        if (preds.restock.length > 0) msg += '\ud83d\udd04 **Restock (' + preds.restock.length + '):**\n' + preds.restock.slice(0, 5).map(r => '\u2022 ' + r.name + ' \u2014 ' + r.daysLeft + ' days left').join('\n') + '\n\n';
+        if (preds.slowMoving.length > 0) msg += '\ud83d\udc22 **Slow Moving (' + preds.slowMoving.length + '):**\n' + preds.slowMoving.slice(0, 5).map(r => '\u2022 ' + r.name + ' \u2014 ' + r.monthlyRate + '/month').join('\n');
+        return msg || 'No prediction data available yet.';
+      } catch (e) { return '\u26a0\ufe0f Could not generate predictions: ' + e.message; }
+    }
+    case 'cash_summary':
+      return '\ud83d\udcb3 **Payments:**\n\n\u2022 Today: Cash ' + money(today.cash) + ' | M-Pesa ' + money(today.mpesa) + '\n\u2022 Week: Cash ' + money(week.cash) + ' | M-Pesa ' + money(week.mpesa) + '\n\u2022 Month: Cash ' + money(month.cash) + ' | M-Pesa ' + money(month.mpesa) + (today.revenue > 0 ? '\n\nSplit: ' + pct(today.cash, today.revenue) + '% / ' + pct(today.mpesa, today.revenue) + '%' : '');
+    case 'full_summary':
+      return '\ud83d\udcca **Business Snapshot:**\n\n\ud83d\udcb0 Revenue: ' + money(today.revenue) + ' today | ' + money(week.revenue) + ' week | ' + money(month.revenue) + ' month\n\ud83d\udcc8 Profit: ' + money(today.profit) + ' today | ' + money(week.profit) + ' week | ' + money(month.profit) + ' month\n\ud83d\udcb8 Expenses: ' + money(today.expenses) + ' today | ' + money(week.expenses) + ' week\n\ud83d\udce6 Products: ' + allProducts.length + ' (' + outOfStock.length + ' out)\n\ud83d\uded2 Orders: ' + allOrders.length + ' (' + pendingOrders.length + ' pending)\n\ud83d\udc65 Staff: ' + allStaff.length + ' | \ud83c\udf81 Loyalty: ' + allLoyalty.length;
+    default:
+      return '\ud83e\udd16 **I can help with your business data.**\n\nTry:\n\u2022 "How are sales today?"\n\u2022 "What\'s my profit this month?"\n\u2022 "Any out of stock items?"\n\u2022 "Show pending orders"\n\u2022 "Best selling products"\n\u2022 "Restock predictions"\n\u2022 "Cash vs M-Pesa today"\n\u2022 "Business overview"\n\nI have access to all your store data! \ud83d\udcca';
+  }
+}
+
+app.post('/api/admin/ai/chat', authenticate, async (req, res) => {
+  const { message } = req.body;
+  if (!message || !message.trim()) return res.status(400).json({ error: 'Message required' });
+  try {
+    const text = message.trim();
+    const intent = detectAdminIntent(text);
+    const response = await generateAdminAiResponse(intent, text, req.user.branchId || null);
+    res.json({ response });
+  } catch (err) {
+    console.error('Admin AI chat error:', err);
+    res.json({ response: 'Sorry, I encountered an error processing your request.' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;

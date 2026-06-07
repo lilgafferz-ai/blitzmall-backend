@@ -52,7 +52,9 @@ export const syncQueuedSales = async (authHeaders) => {
 
   let synced = 0;
   let failed = 0;
-  const API_URL = 'https://blitzmall-backend.onrender.com/api';
+  const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname === '' || window.location.protocol === 'file:')
+    ? 'http://localhost:5000/api'
+    : (process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api');
 
   for (const sale of queue) {
     try {
