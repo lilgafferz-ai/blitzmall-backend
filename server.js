@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
@@ -12,7 +13,7 @@ const MONGO_URI = process.env.MONGODB_URI || 'mongodb+srv://RedMan:21savagE@clus
 const client = new MongoClient(MONGO_URI);
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
-let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_;
+let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_, categories_;
 const JWT_SECRET = process.env.JWT_SECRET || 'blitzmall_jwt_secret_change_in_prod_2024'; // ⚠️ SET JWT_SECRET env var in production!
 const JWT_EXPIRES = '24h';
 const authenticate = (req, res, next) => {
@@ -214,6 +215,7 @@ async function connectDb() {
   redemptions_ = db.collection('redemptions');
   saved_baskets_ = db.collection('saved_baskets');
   banners_ = db.collection('banners');
+  categories_ = db.collection('categories');
 
   try {
     const bannerCount = await banners_.countDocuments();
@@ -229,6 +231,23 @@ async function connectDb() {
   }
 
   await seedRewards();
+
+  // Seed categories if empty
+  try {
+    const catCount = await categories_.countDocuments();
+    if (catCount === 0) {
+      const allProducts = await products_.find().toArray();
+      let uniqueProductCats = [...new Set(allProducts.map(p => (p.category || '').trim()).filter(Boolean))];
+      if (uniqueProductCats.length === 0) {
+        uniqueProductCats = ['Cooking', 'Drinks', 'Snacks', 'Bakery', 'Other'];
+      }
+      const seedDocs = uniqueProductCats.map(name => ({ name, createdAt: new Date() }));
+      await categories_.insertMany(seedDocs);
+      console.log(`🌱 Seeded ${seedDocs.length} initial categories`);
+    }
+  } catch (err) {
+    console.error('Failed to seed categories:', err);
+  }
 
   // Warn if M-Pesa env vars are not set
   if (!MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET || !MPESA_SHORTCODE || !MPESA_PASSKEY) {
@@ -496,6 +515,47 @@ app.put('/api/admin/products/:productId', authenticate, authorize('owner', 'mana
 app.delete('/api/admin/products/:productId', authenticate, authorize('owner', 'manager'), async (req, res) => {
   try { const r = await products_.deleteOne({ _id: new ObjectId(req.params.productId) }); if (!r.deletedCount) return res.status(404).json({ error: 'Product not found' }); res.json({ success: true }); }
   catch { res.status(500).json({ error: 'Failed to delete product' }); }
+});
+
+// ===== CATEGORIES =====
+app.get('/api/admin/categories', authenticate, async (req, res) => {
+  try {
+    const list = await categories_.find().sort({ name: 1 }).toArray();
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch categories' });
+  }
+});
+
+app.post('/api/admin/categories', authenticate, authorize('owner', 'manager'), async (req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Category name required' });
+  const trimmedName = name.trim();
+  try {
+    // Database-agnostic case-insensitive duplicate check to support FileCollection
+    const allCats = await categories_.find().toArray();
+    const exists = allCats.some(c => c.name.toLowerCase() === trimmedName.toLowerCase());
+    if (exists) return res.status(400).json({ error: 'Category already exists' });
+    
+    const category = {
+      name: trimmedName,
+      createdAt: new Date()
+    };
+    const result = await categories_.insertOne(category);
+    res.json({ success: true, category: { _id: result.insertedId, name: trimmedName } });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add category' });
+  }
+});
+
+app.delete('/api/admin/categories/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+  try {
+    const r = await categories_.deleteOne({ _id: new ObjectId(req.params.id) });
+    if (!r.deletedCount) return res.status(404).json({ error: 'Category not found' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete category' });
+  }
 });
 
 // ===== ORDERS =====
