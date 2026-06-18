@@ -1018,24 +1018,34 @@ const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET || '';
 const MPESA_SHORTCODE = process.env.MPESA_SHORTCODE || '';
 const MPESA_PASSKEY = process.env.MPESA_PASSKEY || '';
 const getMpesaCallbackUrl = () => process.env.CALLBACK_URL || 'https://your-deployed-url.com/api/mpesa/callback'; // ⚠️ SET CALLBACK_URL env var!
-const { spawnSync } = require('child_process');
 
-// Helper: make Safaricom API calls via curl to bypass Incapsula WAF
-function safaricomCurl(url, options = {}) {
-  const curlCmd = process.platform === 'win32' ? 'curl.exe' : 'curl';
-  const args = ['-s', '-S', '--max-time', '25'];
-  if (options.method === 'POST') args.push('-X', 'POST');
-  if (options.headers) {
-    for (const [k, v] of Object.entries(options.headers)) {
-      args.push('-H', `${k}: ${v}`);
+// Helper: make Safaricom API calls via native fetch (bypasses curl dependency)
+async function safaricomCurl(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
+  try {
+    const response = await fetch(url, {
+      method: options.method || 'GET',
+      headers: {
+        'User-Agent': 'curl/8.4.0',
+        ...(options.headers || {})
+      },
+      body: options.body || undefined,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${text}`);
     }
+    return JSON.parse(text);
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error('Request timed out after 25 seconds');
+    }
+    throw err;
   }
-  if (options.body) args.push('-d', options.body);
-  args.push(url);
-  const result = spawnSync(curlCmd, args, { encoding: 'utf8', timeout: 30000 });
-  if (result.error) throw new Error(`curl failed: ${result.error.message}`);
-  if (result.status !== 0) throw new Error(`curl exited with code ${result.status}: ${result.stderr}`);
-  return JSON.parse(result.stdout);
 }
 
 // Token cache (valid for ~55 minutes out of 60)
@@ -1047,7 +1057,7 @@ async function getMpesaToken() {
   }
   const auth = Buffer.from(`${MPESA_CONSUMER_KEY}:${MPESA_CONSUMER_SECRET}`).toString('base64');
   try {
-    const data = safaricomCurl(`${MPESA_BASE}/oauth/v1/generate?grant_type=client_credentials`, {
+    const data = await safaricomCurl(`${MPESA_BASE}/oauth/v1/generate?grant_type=client_credentials`, {
       headers: { 'Authorization': `Basic ${auth}` }
     });
     if (!data.access_token) {
@@ -1140,7 +1150,7 @@ app.post('/api/mpesa/stk-push', async (req, res) => {
           PartyA: formattedPhone, PartyB: MPESA_SHORTCODE, PhoneNumber: formattedPhone,
           CallBackURL: getMpesaCallbackUrl(), AccountReference: 'Brilliant', TransactionDesc: 'Payment for goods',
         };
-        const mpesaData = safaricomCurl(`${MPESA_BASE}/mpesa/stkpush/v1/processrequest`, {
+        const mpesaData = await safaricomCurl(`${MPESA_BASE}/mpesa/stkpush/v1/processrequest`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -1371,7 +1381,7 @@ app.get('/api/mpesa/status/:checkoutRequestId', async (req, res) => {
         const token = await getMpesaToken();
         const timestamp = mpesaTimestamp();
         const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
-        const data = safaricomCurl(`${MPESA_BASE}/mpesa/stkpushquery/v1/query`, {
+        const data = await safaricomCurl(`${MPESA_BASE}/mpesa/stkpushquery/v1/query`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ BusinessShortCode: MPESA_SHORTCODE, Password: password, Timestamp: timestamp, CheckoutRequestID: req.params.checkoutRequestId }),
@@ -1422,7 +1432,7 @@ app.post('/api/mpesa/query', async (req, res) => {
     const token = await getMpesaToken();
     const timestamp = mpesaTimestamp();
     const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
-    const data = safaricomCurl(`${MPESA_BASE}/mpesa/stkpushquery/v1/query`, {
+    const data = await safaricomCurl(`${MPESA_BASE}/mpesa/stkpushquery/v1/query`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ BusinessShortCode: MPESA_SHORTCODE, Password: password, Timestamp: timestamp, CheckoutRequestID: checkoutRequestId }),
