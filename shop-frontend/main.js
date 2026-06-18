@@ -1,4 +1,5 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 
@@ -41,6 +42,21 @@ function createWindow() {
 
 app.whenReady().then(() => {
   createWindow();
+
+  autoUpdater.checkForUpdatesAndNotify();
+
+  autoUpdater.on('update-downloaded', (info) => {
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Update Ready',
+      message: 'A new version of BlitzMall has been downloaded. Restart the app to apply the updates.',
+      buttons: ['Restart Now', 'Later']
+    }).then((result) => {
+      if (result.response === 0) {
+        autoUpdater.quitAndInstall();
+      }
+    });
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

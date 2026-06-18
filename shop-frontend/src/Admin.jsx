@@ -12,8 +12,15 @@ const getDefaultApiUrl = () => {
     if (saved) return saved;
   } catch (e) {}
   
-  const isLocalWeb = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-  return isLocalWeb ? 'http://localhost:5000/api' : 'https://blitzmall-backend.onrender.com/api';
+  const isLocal = window.location.hostname === 'localhost' || 
+                  window.location.hostname === '127.0.0.1' || 
+                  window.location.hostname.startsWith('192.168.') || 
+                  window.location.hostname.startsWith('10.') || 
+                  window.location.hostname.startsWith('172.') || 
+                  window.location.hostname.endsWith('.local') ||
+                  window.location.hostname === '' || 
+                  window.location.protocol === 'file:';
+  return isLocal ? `http://${window.location.hostname || 'localhost'}:5000/api` : 'https://blitzmall-backend.onrender.com/api';
 };
 
 const API_URL = getDefaultApiUrl();
@@ -24,9 +31,9 @@ const authHeaders = () => {
   const token = sessionStorage.getItem('bm_token');
   return token ? { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
 };
-const money = (n) => 'KES ' + (Math.round((n || 0) * 100) / 100).toLocaleString();
+const money = (n) => 'KES ' + (Math.round((n || 0) * 100) / 100).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' });
 const stars = (n) => '★'.repeat(Math.max(0,n)) + '☆'.repeat(Math.max(0,5-n));
-const fmt = (d) => d ? new Date(d).toLocaleDateString() : '';
+const fmt = (d) => d ? new Date(d).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) : '';
 
 function Admin() {
   const [loggedIn, setLoggedIn] = useState(false);
@@ -89,6 +96,7 @@ function Admin() {
   const [stkStatus, setStkStatus] = useState('idle'); // idle | waiting | confirmed | failed
   const [stkError, setStkError] = useState('');
   const [cameraScan, setCameraScan] = useState(false);
+  const cameraScanRef = useRef(false);
   const scanRef = useRef(null);
   const cameraRef = useRef(null);
   const barcodeLoopRef = useRef(null);
@@ -153,6 +161,12 @@ function Admin() {
 
   // Stock transfers states
   const [stockTransfers, setStockTransfers] = useState([]);
+
+  // Category management states
+  const [categories, setCategories] = useState([]);
+  const [showCategoriesModal, setShowCategoriesModal] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [categoryError, setCategoryError] = useState('');
   // Admin AI Chat states
   const [adminAiMessages, setAdminAiMessages] = useState([
     { sender: 'bot', text: '🤖 Hi! I\'m your Blitz Mall AI Business Assistant. Ask me about sales, inventory, orders, profit, predictions, or anything about your store!' }
@@ -201,6 +215,14 @@ function Admin() {
   const mutedRef = useRef(false);
 
   useEffect(() => { mutedRef.current = muted; }, [muted]);
+
+  const filtered = React.useMemo(() => {
+    const list = Array.isArray(products) ? products : [];
+    const term = search.trim().toLowerCase();
+    return list.filter(p => !term || p.name.toLowerCase().includes(term) || (p.barcode||'').includes(search) || (p.category||'').toLowerCase().includes(term));
+  }, [products, search]);
+
+
 
   // Online/offline listeners
   useEffect(() => {
@@ -273,6 +295,17 @@ function Admin() {
       const cached = getCachedProducts();
       if (cached.length > 0) setProducts(cached);
       else setProducts([]);
+    }
+  };
+  const loadCategories = async () => {
+    try {
+      const r = await authGet(API_URL + '/admin/categories');
+      if (r.ok) {
+        const data = await r.json();
+        setCategories(asArray(data));
+      }
+    } catch (e) {
+      console.error('Failed to load categories', e);
     }
   };
   const loadOrders = async () => { try { const r = await authGet(withBranch(API_URL + '/admin/orders')); setOrders(asArray(await r.json())); } catch (e) { console.error(e); setOrders([]); } };
@@ -659,7 +692,7 @@ const loadStockTransfers = async () => {
     const id = setInterval(() => {
       checkAlerts();
       loadOrders();
-    }, 25000);
+    }, 15000);
     const kaId = setInterval(keepAlive, 240000); // ping every 4 min to keep Render awake
     return () => { clearInterval(id); clearInterval(kaId); };
   }, [loggedIn]);
@@ -674,7 +707,7 @@ const loadStockTransfers = async () => {
     else if (tab === 'staff') { loadStaff(); if (user?.role === 'owner') { loadUsers(); loadBranches(); loadShiftsList(); loadAuditLogs(); } }
     else if (tab === 'loyalty') { loadLoyaltyMembers(); loadCoupons(); }
     else if (tab === 'branches' && (!user || user.role === 'owner')) loadBranches();
-    else if (tab === 'inventory') { loadProducts(); loadPricingRules(); loadStockTransfers(); }
+    else if (tab === 'inventory') { loadProducts(); loadCategories(); loadPricingRules(); loadStockTransfers(); }
   }, [tab, loggedIn]);
 
   // Reload data when branch filter changes
@@ -689,24 +722,111 @@ const loadStockTransfers = async () => {
   // Poll M-Pesa STK status after sending push
   useEffect(() => {
     if (!stkCheckoutId || stkStatus !== 'waiting') return;
-    const interval = setInterval(async () => {
+    let stopped = false;
+    const poll = async () => {
+      if (stopped) return;
       try {
         const r = await fetch(API_URL + '/mpesa/status/' + stkCheckoutId);
         const d = await r.json();
         if (d.status === 'confirmed') {
-          clearInterval(interval);
+          stopped = true;
           setStkStatus('confirmed');
+          setStkError('');
           completeSaleRecord();
         } else if (d.status === 'failed') {
-          clearInterval(interval);
+          stopped = true;
           setStkStatus('failed');
-          setStkError(d.resultDesc || 'Payment cancelled or failed.');
+          setStkError(d.resultDesc || '❌ Payment Declined — Wrong PIN or Cancelled');
         }
       } catch (e) { console.error(e); }
-    }, 3000);
-    const timeout = setTimeout(() => { clearInterval(interval); if (stkStatus === 'waiting') { setStkStatus('failed'); setStkError('Timed out waiting for PIN. Try again.'); } }, 90000);
-    return () => { clearInterval(interval); clearTimeout(timeout); };
+    };
+    // Poll every 2 seconds for fast response
+    const interval = setInterval(poll, 2000);
+    poll(); // also poll immediately
+    // Timeout after 60 seconds
+    const timeout = setTimeout(() => { if (!stopped) { stopped = true; clearInterval(interval); setStkStatus('failed'); setStkError('⏱️ Timed out waiting for payment response. Try again.'); } }, 60000);
+    return () => { stopped = true; clearInterval(interval); clearTimeout(timeout); };
   }, [stkCheckoutId, stkStatus]);
+
+  // Camera barcode scanning
+  const stopCamera = React.useCallback(() => {
+    setCameraScan(false);
+    cameraScanRef.current = false;
+    if (barcodeLoopRef.current) { clearTimeout(barcodeLoopRef.current); barcodeLoopRef.current = null; }
+    if (cameraRef.current) {
+      const stream = cameraRef.current.srcObject;
+      if (stream) { stream.getTracks().forEach(t => t.stop()); }
+      cameraRef.current.srcObject = null;
+    }
+  }, []);
+
+  const startCamera = React.useCallback(async () => {
+    try {
+      setCameraScan(true);
+      cameraScanRef.current = true;
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: 640, height: 480 } });
+      if (cameraRef.current) cameraRef.current.srcObject = stream;
+
+      // Wait for video to play, then start detection
+      const video = cameraRef.current;
+      if (!video) return;
+      video.onloadedmetadata = () => { video.play(); };
+
+      let detector = null;
+      if (window.BarcodeDetector) {
+        try {
+          const supported = await window.BarcodeDetector.getSupportedFormats();
+          const wanted = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_39', 'code_128', 'qr_code'];
+          const formats = wanted.filter(f => supported.includes(f));
+          if (formats.length > 0) {
+            detector = new window.BarcodeDetector({ formats });
+          }
+        } catch (err) {
+          console.error('Failed to initialize BarcodeDetector:', err);
+        }
+      }
+
+      const detect = async () => {
+        if (!cameraScanRef.current || !document.body.contains(video)) return;
+        if (detector) {
+          try {
+            const barcodes = await detector.detect(video);
+            if (barcodes.length > 0) {
+              const code = barcodes[0].rawValue;
+              stopCamera();
+              setScan(code);
+              // Try to find and add the product immediately
+              const byCode = products.find(p => p.barcode && p.barcode === code);
+              if (byCode) addToSale(byCode);
+              else { if (scanRef.current) scanRef.current.focus(); }
+              return;
+            }
+          } catch (e) { /* detection error, keep trying */ }
+        }
+        barcodeLoopRef.current = setTimeout(detect, 200);
+      };
+      barcodeLoopRef.current = setTimeout(detect, 200);
+    } catch (e) {
+      console.error('Camera error:', e);
+      setCameraScan(false);
+      cameraScanRef.current = false;
+      alert('Could not access camera. Check permissions.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [products, stopCamera]);
+
+  // Close camera if user navigates away from Sell tab or if component unmounts
+  useEffect(() => {
+    if (tab !== 'sales') {
+      stopCamera();
+    }
+  }, [tab, stopCamera]);
+
+  useEffect(() => {
+    return () => {
+      stopCamera();
+    };
+  }, [stopCamera]);
 
   const completeSaleRecord = async () => {
     const saleData = { items: saleCart.length ? saleCart : window._pendingSaleCart, paymentMethod: payMethod, amountGiven, cashPart, mpesaPart, cashier, custPhone, branchId: activeBranchId || undefined };
@@ -844,55 +964,42 @@ const loadStockTransfers = async () => {
   const delProduct = async (id) => { if (!window.confirm('Delete this item?')) return; try { const r = await authDelete(API_URL + '/admin/products/' + id); if ((await r.json()).success) loadProducts(); } catch (e) { console.error(e); } };
   const updateOrder = async (id, payload) => { try { const r = await authPut(API_URL + '/admin/orders/' + id, payload); if ((await r.json()).success) loadOrders(); } catch (e) { console.error(e); } };
 
-  // Camera barcode scanning
-  const startCamera = async () => {
+  const handleAddCategory = async (e) => {
+    if (e) e.preventDefault();
+    if (!newCategoryName.trim()) return;
+    setCategoryError('');
     try {
-      setCameraScan(true);
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: 640, height: 480 } });
-      if (cameraRef.current) cameraRef.current.srcObject = stream;
-
-      // Wait for video to play, then start detection
-      const video = cameraRef.current;
-      if (!video) return;
-      video.onloadedmetadata = () => { video.play(); };
-
-      const detect = async () => {
-        if (!cameraScan || !document.body.contains(video)) return;
-        try {
-          if (window.BarcodeDetector) {
-            const detector = new window.BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_39', 'code_128', 'qr_code'] });
-            const barcodes = await detector.detect(video);
-            if (barcodes.length > 0) {
-              const code = barcodes[0].rawValue;
-              stopCamera();
-              setScan(code);
-              // Try to find and add the product immediately
-              const byCode = products.find(p => p.barcode && p.barcode === code);
-              if (byCode) addToSale(byCode);
-              else { scanRef.current?.focus(); }
-              return;
-            }
-          }
-        } catch (e) { /* detection error, keep trying */ }
-        barcodeLoopRef.current = requestAnimationFrame(detect);
-      };
-      barcodeLoopRef.current = requestAnimationFrame(detect);
-    } catch (e) {
-      console.error('Camera error:', e);
-      setCameraScan(false);
-      alert('Could not access camera. Check permissions.');
+      const r = await authPost(API_URL + '/admin/categories', { name: newCategoryName.trim() });
+      const d = await r.json();
+      if (r.ok && d.success) {
+        setNewCategoryName('');
+        loadCategories();
+      } else {
+        setCategoryError(d.error || 'Failed to add category');
+      }
+    } catch (err) {
+      console.error(err);
+      setCategoryError('Server error. Failed to add category.');
     }
   };
 
-  const stopCamera = () => {
-    setCameraScan(false);
-    if (barcodeLoopRef.current) { cancelAnimationFrame(barcodeLoopRef.current); barcodeLoopRef.current = null; }
-    if (cameraRef.current) {
-      const stream = cameraRef.current.srcObject;
-      if (stream) { stream.getTracks().forEach(t => t.stop()); }
-      cameraRef.current.srcObject = null;
+  const handleDeleteCategory = async (id, name) => {
+    if (!window.confirm(`Are you sure you want to delete the category "${name}"?`)) return;
+    try {
+      const r = await authDelete(API_URL + '/admin/categories/' + id);
+      const d = await r.json();
+      if (r.ok && d.success) {
+        loadCategories();
+      } else {
+        alert(d.error || 'Failed to delete category');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Server error. Failed to delete category.');
     }
   };
+
+
 
   const stockTag = (s) => { if (s === undefined || s === null) return null; if (s <= 0) return React.createElement('span', {className:'tag out'}, 'Out'); if (s < 2) return React.createElement('span', {className:'tag low'}, 'Low: ' + s); return React.createElement('span', {className:'tag ok'}, s + ' left'); };
   const expiryTag = (d) => {
@@ -907,7 +1014,10 @@ const loadStockTransfers = async () => {
   const stockOf = (id) => { const p = products.find(x => pid(x) === id); return p ? (p.stock ?? null) : null; };
   const addToSale = (p) => { const id = pid(p); setSaleCart(c => { const ex = c.find(i => i.productId === id); if (ex) return c.map(i => i.productId === id ? { ...i, qty: i.qty+1 } : i); return [...c, { productId: id, name: p.name, price: p.price||0, buyingPrice: p.buyingPrice||0, qty: 1 }]; }); setScan(''); setLastChange(null); if (scanRef.current) scanRef.current.focus(); };
   const handleScanSubmit = (e) => { e.preventDefault(); const t = scan.trim(); if (!t) return; const byCode = products.find(p => p.barcode && p.barcode === t); if (byCode) { addToSale(byCode); return; } const byName = products.filter(p => p.name.toLowerCase().includes(t.toLowerCase())); if (byName.length === 1) addToSale(byName[0]); };
-  const scanMatches = scan.trim() ? products.filter(p => p.name.toLowerCase().includes(scan.toLowerCase()) || (p.barcode||'').includes(scan)).slice(0,6) : [];
+  const scanMatches = React.useMemo(() => {
+    const term = scan.trim().toLowerCase();
+    return term ? products.filter(p => p.name.toLowerCase().includes(term) || (p.barcode||'').includes(scan)).slice(0,6) : [];
+  }, [products, scan]);
   const setSaleQty = (id, q) => { if (q <= 0) setSaleCart(c => c.filter(i => i.productId !== id)); else setSaleCart(c => c.map(i => i.productId === id ? { ...i, qty: q } : i)); };
   const saleTotal = saleCart.reduce((s, i) => s + i.price * i.qty, 0);
   const saleProfit = saleCart.reduce((s, i) => s + (i.price - i.buyingPrice) * i.qty, 0);
@@ -960,7 +1070,7 @@ const loadStockTransfers = async () => {
       doc.text('Blitz Mall', 14, 18);
       doc.setTextColor(244, 244, 246);
       doc.setFontSize(10);
-      doc.text('Sales Report - ' + periodLabel[period] + ' - ' + new Date().toLocaleDateString(), 14, 27);
+      doc.text('Sales Report - ' + periodLabel[period] + ' - ' + new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }), 14, 27);
       // Summary cards
       const yy = 42;
       doc.setFillColor(22, 22, 27);
@@ -971,13 +1081,13 @@ const loadStockTransfers = async () => {
       doc.text('Revenue', 22, yy+10);
       doc.setTextColor(244, 244, 246);
       doc.setFontSize(16);
-      doc.text('KES ' + (Math.round(P.revenue*100)/100).toLocaleString(), 22, yy+23);
+      doc.text('KES ' + (Math.round(P.revenue*100)/100).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }), 22, yy+23);
       doc.setTextColor(54, 211, 153);
       doc.setFontSize(11);
       doc.text('Profit', 22+(pageW-28-8)/2+8+8, yy+10);
       doc.setTextColor(244, 244, 246);
       doc.setFontSize(16);
-      doc.text('KES ' + (Math.round(P.profit*100)/100).toLocaleString(), 22+(pageW-28-8)/2+8+8, yy+23);
+      doc.text('KES ' + (Math.round(P.profit*100)/100).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }), 22+(pageW-28-8)/2+8+8, yy+23);
       // Second row
       const yy2 = yy + 34;
       doc.setFillColor(22, 22, 27);
@@ -988,14 +1098,14 @@ const loadStockTransfers = async () => {
       doc.text('Expenses', 22, yy2+10);
       doc.setTextColor(244, 244, 246);
       doc.setFontSize(16);
-      doc.text('KES ' + (Math.round(P.expenses*100)/100).toLocaleString(), 22, yy2+23);
+      doc.text('KES ' + (Math.round(P.expenses*100)/100).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }), 22, yy2+23);
       const netColor = P.net >= 0 ? '#36d399' : '#ff2d2d';
       doc.setTextColor(netColor === '#36d399' ? 54 : 255, netColor === '#36d399' ? 211 : 45, netColor === '#36d399' ? 153 : 45);
       doc.setFontSize(11);
       doc.text('Net Profit', 22+(pageW-28-8)/2+8+8, yy2+10);
       doc.setTextColor(244, 244, 246);
       doc.setFontSize(16);
-      doc.text('KES ' + (Math.round(P.net*100)/100).toLocaleString(), 22+(pageW-28-8)/2+8+8, yy2+23);
+      doc.text('KES ' + (Math.round(P.net*100)/100).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }), 22+(pageW-28-8)/2+8+8, yy2+23);
       // Best sellers table
       const bestTable = (summary.best||[]).slice(0, 10).map(b => [b.name, b.qty || 0, 'KES ' + Math.round((b.revenue||0)*100)/100]);
       autoTable(doc, {
@@ -1015,13 +1125,13 @@ const loadStockTransfers = async () => {
       doc.roundedRect(14, finalY, pageW-28, 20, 3, 3, 'F');
       doc.setTextColor(244, 244, 246);
       doc.setFontSize(10);
-      doc.text('Cash: KES ' + (Math.round(P.cash*100)/100).toLocaleString() + '    M-Pesa: KES ' + (Math.round(P.mpesa*100)/100).toLocaleString(), 22, finalY+13);
+      doc.text('Cash: KES ' + (Math.round(P.cash*100)/100).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) + '    M-Pesa: KES ' + (Math.round(P.mpesa*100)/100).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }), 22, finalY+13);
       // Footer
       doc.setFillColor(10, 10, 12);
       doc.rect(0, doc.internal.pageSize.getHeight()-15, pageW, 15, 'F');
       doc.setTextColor(138, 138, 150);
       doc.setFontSize(8);
-      doc.text('Generated by Blitz Mall HQ on ' + new Date().toLocaleString(), pageW/2, doc.internal.pageSize.getHeight()-6, { align: 'center' });
+      doc.text('Generated by Blitz Mall HQ on ' + new Date().toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }), pageW/2, doc.internal.pageSize.getHeight()-6, { align: 'center' });
       // Save
       doc.save('blitz-sales-report-' + new Date().toISOString().slice(0,10) + '.pdf');
     } catch (e) { console.error('PDF export error:', e); alert('Failed to generate PDF'); }
@@ -1036,7 +1146,7 @@ const loadStockTransfers = async () => {
         'Buying Price': p.buyingPrice || 0,
         'Selling Price': p.price || 0,
         Stock: p.stock ?? 0,
-        'Expiry Date': p.expiryDate ? new Date(p.expiryDate).toLocaleDateString() : '',
+        'Expiry Date': p.expiryDate ? new Date(p.expiryDate).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) : '',
         'Margin KES': Math.round(((p.price||0)-(p.buyingPrice||0))*100)/100,
       }));
       const ws = XLSX.utils.json_to_sheet(rows);
@@ -1053,7 +1163,7 @@ const loadStockTransfers = async () => {
       const rows = (expenses||[]).map(e => ({
         Description: e.description,
         Amount: e.amount || 0,
-        Date: e.createdAt ? new Date(e.createdAt).toLocaleDateString() : '',
+        Date: e.createdAt ? new Date(e.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) : '',
       }));
       const ws = XLSX.utils.json_to_sheet(rows);
       ws['!cols'] = [{ wch: 40 }, { wch: 14 }, { wch: 15 }];
@@ -1107,7 +1217,7 @@ const loadStockTransfers = async () => {
               }}
             >
               <option value="https://blitzmall-backend.onrender.com/api">Cloud (Live Online Database)</option>
-              <option value="http://localhost:5000/api">Local Server (Development)</option>
+              <option value={`http://${window.location.hostname || 'localhost'}:5000/api`}>Local Server (Development)</option>
             </select>
           </div>
           <button className="blitz-admin-btn" type="submit">Sign In</button>
@@ -1138,15 +1248,32 @@ const loadStockTransfers = async () => {
   const isTabVisible = visibleTabs.some(t => t.id === tab);
   const safeTab = isTabVisible ? tab : (visibleTabs[0]?.id || 'sales');
 
-  const productList = Array.isArray(products) ? products : [];
-  const filtered = productList.filter(p => !search.trim() || p.name.toLowerCase().includes(search.toLowerCase()) || (p.barcode||'').includes(search) || (p.category||'').toLowerCase().includes(search.toLowerCase()));
   const P = summary?.summary?.[period] ?? { revenue:0, profit:0, expenses:0, net:0, cash:0, mpesa:0, count:0 };
   const periodLabel = { today: 'Today', week: 'This week', month: 'This month', year: 'This year', all: 'All time' };
   const totalAlerts = alerts.out.length + alerts.low.length + (alerts.expired||[]).length;
   const formatReceiptMsg = (r) => {
-    const line = '━'.repeat(20);
-    const items = r.items.map(i => `• ${i.name} x${i.qty}  KES ${(i.price*i.qty).toLocaleString()}`).join('\n');
-    return `⚡️ *BLITZ MALL - OFFICIAL RECEIPT* ⚡️\n${line}\n📅 ${r.date.toLocaleString()}\n👤 Cashier: ${r.cashier}\n💳 ${r.paymentMethod}\n${line}\n${items}\n${line}\n*💰 TOTAL: KES ${r.total.toLocaleString()}*${r.change > 0 ? '\n💵 Change: KES ' + r.change.toLocaleString() : ''}\n${line}\n🏪 Brilliant Shop\n📞 07XX XXX XXX\n✅ Thank you for shopping with us!\n⭐ Rate us on the app!`;
+    const line = '━━━━━━━━━━━━━━━━━━━━━━';
+    const items = r.items.map(i => `\u{1F538} *${i.name}* \n    ${i.qty} x KES ${i.price.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}  =  KES ${(i.price*i.qty).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}`).join('\n');
+    return `\u{1F6CD} *BLITZ MALL - OFFICIAL RECEIPT* \u{1F6CD}
+${line}
+
+\u{1F4C5} *Date:* ${r.date.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}
+\u{1F464} *Served by:* ${r.cashier}
+\u{1F4B3} *Method:* ${r.paymentMethod.toUpperCase()}
+
+\u{1F6D2} *YOUR ITEMS:*
+${items}
+
+${line}
+\u{1F4B0} *TOTAL PAID: KES ${r.total.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}*
+${r.change > 0 ? `\u{1F4B5} *Change:* KES ${r.change.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}\n` : ''}${line}
+
+\u{1F3EA} *Brilliant Shop*
+\u{1F4DE} 07XX XXX XXX
+\u{1F4CD} Location: [Your Location Here]
+
+\u{2728} *Thank you for shopping with us!* \u{2728}
+\u{2B50} We'd love to hear your feedback on our app!`;
   };
   const receiptWALink = receipt && receipt.phone ? waLink(receipt.phone, formatReceiptMsg(receipt)) : null;
 
@@ -1155,8 +1282,25 @@ const loadStockTransfers = async () => {
       <header className="blitz-admin-header">
         <div className="blitz-admin-brand"><span className="blitz-admin-logo sm">⚡</span> Blitz Mall <b>HQ</b></div>
         <div className="blitz-admin-head-right">
-          {offline && <span className="blitz-admin-muted" style={{fontSize:'.75rem',color:'var(--orange)'}}>📡 Offline</span>}
-          {pendingSync > 0 && <span className="blitz-admin-muted" style={{fontSize:'.75rem',color:'var(--gold)'}}>⏳ {pendingSync}</span>}
+          {offline && (
+            <span className="blitz-admin-muted" style={{display: 'flex', alignItems: 'center', gap: '4px', fontSize:'.75rem',color:'var(--orange)'}}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22.61 16.95A5 5 0 0 0 18 10h-1.26a8 8 0 0 0-7.05-6M5 5a8 8 0 0 0 4 15h9a5 5 0 0 0 1.7-.3"></path>
+                <line x1="1" y1="1" x2="23" y2="23"></line>
+              </svg>
+              Offline
+            </span>
+          )}
+          {pendingSync > 0 && (
+            <span className="blitz-admin-muted" style={{display: 'flex', alignItems: 'center', gap: '4px', fontSize:'.75rem',color:'var(--gold)'}}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+              {pendingSync} Queued
+            </span>
+          )}
           {user?.role === 'owner' && branches.length > 0 && (
             <select value={activeBranchId||''} onChange={e => setActiveBranchId(e.target.value||null)}
               style={{background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:8,padding:'4px 8px',fontSize:'.75rem',fontFamily:'inherit'}}>
@@ -1224,13 +1368,47 @@ const loadStockTransfers = async () => {
           <div className="shift-lock-card" style={{background:'var(--card)',border:'1px solid var(--line)',padding:'40px',borderRadius:20,maxWidth:400,boxShadow:'0 10px 30px rgba(0,0,0,0.5)',margin:'0 auto'}}>
             <span style={{fontSize:'3.5rem'}}>🔒</span>
             <h2 style={{fontFamily:'Unbounded, sans-serif',margin:'15px 0 10px 0',color:'var(--gold)'}}>POS Register Locked</h2>
-            <p className="blitz-admin-muted" style={{fontSize:'.9rem',marginBottom:24}}>A cashier shift must be opened before you can scan products or record sales transactions.</p>
+            <p className="blitz-admin-muted" style={{fontSize:'.9rem',marginBottom:16}}>A cashier shift must be opened before you can scan products or record sales transactions.</p>
+            
+            <div style={{ marginBottom: '20px', textAlign: 'left' }}>
+              <label style={{ fontSize: '0.75rem', color: 'var(--muted)', display: 'block', marginBottom: '4px', fontWeight: 600 }}>Database Connection:</label>
+              <select 
+                value={API_URL} 
+                onChange={e => {
+                  try {
+                    localStorage.setItem('blitz_api_url', e.target.value);
+                    window.location.reload();
+                  } catch (err) {}
+                }}
+                style={{
+                  width: '100%', 
+                  padding: '10px 12px', 
+                  borderRadius: '10px', 
+                  background: 'var(--bg-2)', 
+                  border: '1px solid var(--line)', 
+                  color: 'var(--text)',
+                  fontSize: '0.85rem',
+                  fontFamily: 'inherit',
+                  cursor: 'pointer'
+                }}
+              >
+                <option value="https://blitzmall-backend.onrender.com/api">Cloud (Live Online Database)</option>
+                <option value={`http://${window.location.hostname || 'localhost'}:5000/api`}>Local Server (Development)</option>
+              </select>
+            </div>
+
             <form onSubmit={handleOpenShiftSubmit} style={{display:'flex',flexDirection:'column',gap:12}}>
               <input 
-                type="number" 
+                type="text" 
+                inputMode="decimal"
                 placeholder="Enter starting cash balance (KES)" 
                 value={startingCashInput} 
-                onChange={e => setStartingCashInput(e.target.value)} 
+                onChange={e => {
+                  const val = e.target.value;
+                  if (val === '' || /^\d*\.?\d*$/.test(val)) {
+                    setStartingCashInput(val);
+                  }
+                }} 
                 required 
                 style={{textAlign:'center',padding:12,borderRadius:10,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)',fontSize:'1rem',width:'100%',boxSizing:'border-box'}}
               />
@@ -1247,7 +1425,7 @@ const loadStockTransfers = async () => {
               <h2>Sell</h2>
               <div style={{display:'flex',alignItems:'center',gap:12}}>
                 <div style={{background:'rgba(54, 211, 153, 0.1)',color:'var(--green)',padding:'6px 12px',borderRadius:8,fontSize:'.8rem',border:'1px solid rgba(54,211,153,0.2)',fontWeight:600}}>
-                  🟢 Shift Active: <b>{activeShift.cashierName}</b> (Started: {new Date(activeShift.startTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})})
+                  🟢 Shift Active: <b>{activeShift.cashierName}</b> (Started: {new Date(activeShift.startTime).toLocaleTimeString('en-KE', {hour: '2-digit', minute:'2-digit'})})
                 </div>
                 <button className="pos-void" onClick={() => {
                   setClosingCashInput('');
@@ -1302,7 +1480,7 @@ const loadStockTransfers = async () => {
                 <div className="receipt-header">
                   <h3>⚡ BLITZ MALL</h3>
                   <p>Brilliant Shop</p>
-                  <small>{receipt.date.toLocaleString()}</small>
+                  <small>{receipt.date.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</small>
                   <small>Cashier: {receipt.cashier}</small>
                 </div>
                 <div className="receipt-items">
@@ -1327,16 +1505,16 @@ const loadStockTransfers = async () => {
                   <button className={payMethod==="split"?"on":""} onClick={() => setPayMethod("split")}>🔀 Split</button>
                 <button className={payMethod==="airtel"?"on":""} onClick={() => setPayMethod("airtel")}>📲 Airtel</button>
                 </div>
-                {payMethod === "cash" && <div className="pos-cash"><label>Amount given<input type="number" value={amountGiven} onChange={e => setAmountGiven(e.target.value)} placeholder="e.g. 500" /></label><div className={"pos-change" + (change > 0 ? " show" : "")}>Change to give: <b>{money(change)}</b></div></div>}
+                {payMethod === "cash" && <div className="pos-cash"><label>Amount given<input type="text" inputMode="decimal" value={amountGiven} onChange={e => { const val = e.target.value; if (val === '' || /^\d*\.?\d*$/.test(val)) setAmountGiven(val); }} placeholder="e.g. 500" /></label><div className={"pos-change" + (change > 0 ? " show" : "")}>Change to give: <b>{money(change)}</b></div></div>}
                 {payMethod === "mpesa" && (
                   <div className="pos-cash">
                     <label>Customer phone *<input type="tel" value={custPhone} onChange={e => setCustPhone(e.target.value)} placeholder="07xx xxx xxx" /></label>
-                    {stkStatus === "waiting" && <div className="stk-waiting">📱 STK Push sent! Waiting for customer to enter PIN...</div>}
+                    {stkStatus === "waiting" && <div className="stk-waiting">📱 STK Push sent! Waiting for customer to enter PIN...<button onClick={() => { setStkStatus("idle"); setStkError(""); }} style={{marginLeft:8,cursor:"pointer",background:"none",border:"none",color:"var(--orange)",textDecoration:"underline"}}>Cancel</button></div>}
                     {stkStatus === "confirmed" && <div className="stk-ok">✅ Payment confirmed!</div>}
                     {stkStatus === "failed" && <div className="stk-fail">❌ {stkError || "Payment failed. Try again."}<button onClick={() => { setStkStatus("idle"); setStkError(""); }} style={{marginLeft:8,cursor:"pointer",background:"none",border:"none",color:"var(--orange)"}}>Retry</button></div>}
                   </div>
                 )}
-                {payMethod === "split" && <div className="pos-cash"><label>Cash part<input type="number" value={cashPart} onChange={e => setCashPart(e.target.value)} placeholder="KES" /></label><label>M-Pesa part<input type="number" value={mpesaPart} onChange={e => setMpesaPart(e.target.value)} placeholder="KES" /></label><div className="pos-change show">Covered: {money(splitCovered)} / {money(saleTotal)}</div></div>}
+                {payMethod === "split" && <div className="pos-cash"><label>Cash part<input type="text" inputMode="decimal" value={cashPart} onChange={e => { const val = e.target.value; if (val === '' || /^\d*\.?\d*$/.test(val)) setCashPart(val); }} placeholder="KES" /></label><label>M-Pesa part<input type="text" inputMode="decimal" value={mpesaPart} onChange={e => { const val = e.target.value; if (val === '' || /^\d*\.?\d*$/.test(val)) setMpesaPart(val); }} placeholder="KES" /></label><div className="pos-change show">Covered: {money(splitCovered)} / {money(saleTotal)}</div></div>}
                 {payMethod === "airtel" && <div className="pos-cash"><p style={{color:"var(--muted)",fontSize:".85rem"}}>Customer sends Airtel Money manually to your number. Confirm after you see it on your phone.</p></div>}
                 <button className="blitz-admin-btn pos-complete" disabled={!saleCart.length} onClick={completeSale}>Complete sale</button>
               </>
@@ -1345,7 +1523,7 @@ const loadStockTransfers = async () => {
               <h3>Recent sales</h3>
               {recentSales.length === 0 ? <p className="blitz-admin-empty sm">No sales yet.</p> : recentSales.map(s => (
                 <div className="pos-recent-row" key={s._id}>
-                  <div><b>{money(s.total)}</b><span className="blitz-admin-muted"> · {s.paymentMethod} · {s.staff||""} · {new Date(s.createdAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span></div>
+                  <div><b>{money(s.total)}</b><span className="blitz-admin-muted"> · {s.paymentMethod} · {s.staff||""} · {new Date(s.createdAt).toLocaleTimeString('en-KE',{hour:"2-digit",minute:"2-digit"})}</span></div>
                   {!isCashier && <button className="pos-void" onClick={() => voidSale(s._id)}>void</button>}
                 </div>
               ))}
@@ -1362,10 +1540,16 @@ const loadStockTransfers = async () => {
             <p className="blitz-admin-muted" style={{fontSize:'.85rem',marginBottom:20}}>Count the cash in your drawer and enter the total balance below to reconcile sales.</p>
             <form onSubmit={handleCloseShiftSubmit} style={{display:'flex',flexDirection:'column',gap:12}}>
               <input 
-                type="number" 
+                type="text" 
+                inputMode="decimal"
                 placeholder="Enter actual closing cash balance (KES)" 
                 value={closingCashInput} 
-                onChange={e => setClosingCashInput(e.target.value)} 
+                onChange={e => {
+                  const val = e.target.value;
+                  if (val === '' || /^\d*\.?\d*$/.test(val)) {
+                    setClosingCashInput(val);
+                  }
+                }} 
                 required 
                 style={{textAlign:'center',padding:12,borderRadius:10,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)',fontSize:'1rem',width:'100%',boxSizing:'border-box'}}
               />
@@ -1386,14 +1570,14 @@ const loadStockTransfers = async () => {
             <p className="blitz-admin-muted" style={{fontSize:'.8rem',textAlign:'center',marginBottom:20}}>Shift completed successfully. Summary details of sales records:</p>
             
             <div style={{display:'flex',flexDirection:'column',gap:10,background:'var(--bg-2)',padding:16,borderRadius:12,border:'1px solid var(--line)',fontSize:'.9rem',marginBottom:20}}>
-              <div style={{display:'flex',justifyContent:'space-between'}}><span>Starting Cash:</span><b>KES {shiftSummary.startingCash.toLocaleString()}</b></div>
-              <div style={{display:'flex',justifyContent:'space-between'}}><span>Cash Sales:</span><b>KES {shiftSummary.cashSales.toLocaleString()}</b></div>
-              <div style={{display:'flex',justifyContent:'space-between'}}><span>M-Pesa Sales:</span><b>KES {shiftSummary.mpesaSales.toLocaleString()}</b></div>
-              <div style={{display:'flex',justifyContent:'space-between',borderTop:'1px solid var(--line)',paddingTop:6}}><span>Expected Drawer Cash:</span><b>KES {shiftSummary.expectedCash.toLocaleString()}</b></div>
-              <div style={{display:'flex',justifyContent:'space-between'}}><span>Actual Drawer Cash:</span><b>KES {shiftSummary.closingCash.toLocaleString()}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between'}}><span>Starting Cash:</span><b>KES {shiftSummary.startingCash.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between'}}><span>Cash Sales:</span><b>KES {shiftSummary.cashSales.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between'}}><span>M-Pesa Sales:</span><b>KES {shiftSummary.mpesaSales.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between',borderTop:'1px solid var(--line)',paddingTop:6}}><span>Expected Drawer Cash:</span><b>KES {shiftSummary.expectedCash.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</b></div>
+              <div style={{display:'flex',justifyContent:'space-between'}}><span>Actual Drawer Cash:</span><b>KES {shiftSummary.closingCash.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</b></div>
               <div style={{display:'flex',justifyContent:'space-between',color:shiftSummary.difference >= 0 ? 'var(--green)' : 'var(--red)',fontWeight:'bold'}}>
                 <span>Difference:</span>
-                <span>{shiftSummary.difference >= 0 ? '+' : ''}KES {shiftSummary.difference.toLocaleString()}</span>
+                <span>{shiftSummary.difference >= 0 ? '+' : ''}KES {shiftSummary.difference.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</span>
               </div>
               <div style={{display:'flex',justifyContent:'space-between'}}><span>Total Sales Processed:</span><b>{shiftSummary.salesCount} sales</b></div>
             </div>
@@ -1406,13 +1590,37 @@ const loadStockTransfers = async () => {
 
       {safeTab === "inventory" && (
         <div className="blitz-admin-body">
-          <div className="blitz-admin-row-between"><h2>Inventory</h2><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="blitz-admin-btn small" onClick={exportInventoryExcel}>📊 Excel</button><button className="blitz-admin-btn small" onClick={() => { showForm ? resetForm() : setShowForm(true); }}>{showForm ? "✕ Cancel" : "➕ Add stock"}</button></div></div>
+          <div className="blitz-admin-row-between"><h2>Inventory</h2><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="blitz-admin-btn small" onClick={exportInventoryExcel}>📊 Excel</button><button className="blitz-admin-btn small" onClick={() => setShowCategoriesModal(true)}>📂 Manage Categories</button><button className="blitz-admin-btn small" onClick={() => { showForm ? resetForm() : setShowForm(true); }}>{showForm ? "✕ Cancel" : "➕ Add stock"}</button></div></div>
           {showForm && (
             <form className="blitz-admin-form" onSubmit={submitProduct}>
               <h3>{editingId ? "Edit item" : "Add new stock"}</h3>
               <div className="blitz-admin-grid">
                 <label>Product name *<input value={form.name} onChange={e => setForm(s=>({...s,name:e.target.value}))} placeholder="e.g. Cooking Oil 1L" required /></label>
-                <label>Category<input value={form.category} onChange={e => setForm(s=>({...s,category:e.target.value}))} placeholder="e.g. Cooking, Drinks" list="cats" /><datalist id="cats">{[...new Set(products.map(p=>p.category).filter(Boolean))].map(c=><option key={c} value={c}/>)}</datalist></label>
+                <label>Category *
+                  <select 
+                    value={form.category} 
+                    onChange={e => setForm(s=>({...s,category:e.target.value}))} 
+                    required 
+                    style={{
+                      background: 'var(--bg-2)', 
+                      border: '1px solid var(--line)', 
+                      borderRadius: '10px', 
+                      padding: '12px 14px', 
+                      color: 'var(--text)', 
+                      fontSize: '1rem', 
+                      fontFamily: 'inherit',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="">Select a category...</option>
+                    {form.category && !categories.some(c => c.name === form.category) && (
+                      <option value={form.category}>{form.category} (Not in list)</option>
+                    )}
+                    {categories.map(c => (
+                      <option key={c._id || c.name} value={c.name}>{c.name}</option>
+                    ))}
+                  </select>
+                </label>
                 <label>Barcode<input value={form.barcode} onChange={e => setForm(s=>({...s,barcode:e.target.value}))} placeholder="Scan or type" /></label>
                 <label>Qty in stock<input type="number" value={form.stock} onChange={e => setForm(s=>({...s,stock:e.target.value}))} placeholder="e.g. 50" /></label>
                 <label>Buying price (KES)<input type="number" step="0.01" value={form.buyingPrice} onChange={e => setForm(s=>({...s,buyingPrice:e.target.value}))} placeholder="What you paid" /></label>
@@ -1601,7 +1809,22 @@ const loadStockTransfers = async () => {
       {safeTab === "orders" && (
         <div className="blitz-admin-body"><h2>Orders</h2>
           {orders.length === 0 ? <p className="blitz-admin-empty">No orders yet</p> : (
-            <div className="blitz-admin-list">{orders.map(o => (
+            <div className="blitz-admin-list">{orders.map(o => {
+              // Calculate delivery progress for tracking animation
+              let adminProgress = 0;
+              if (o.status === 'on_the_way' && o.dispatchedAt) {
+                const elapsed = (Date.now() - new Date(o.dispatchedAt).getTime()) / 1000;
+                const estTime = 20 * 60; // 20 min
+                adminProgress = Math.min(95, Math.round((elapsed / estTime) * 100));
+              } else if (o.status === 'delivered') {
+                adminProgress = 100;
+              }
+              const adminBikeLeft = `calc(65px + ${(adminProgress / 100)} * (100% - 130px))`;
+              const adminProgressWidth = `calc(${(adminProgress / 100)} * (100% - 130px))`;
+              const adminEta = o.status === 'on_the_way' && o.dispatchedAt
+                ? Math.max(0, 20 - Math.round((Date.now() - new Date(o.dispatchedAt).getTime()) / 60000))
+                : null;
+              return (
               <div className="blitz-admin-order" key={o._id}>
                 <div className="blitz-admin-order-top"><b>{o.customerName}</b><span className="blitz-admin-phone">{o.customerId}</span></div>
                 <div className="blitz-admin-order-items">{o.items.map((it,k) => <p key={k}>{it.name} ×{it.quantity} — {money(it.price*it.quantity)}</p>)}</div>
@@ -1622,18 +1845,50 @@ const loadStockTransfers = async () => {
                     </div>
                   )}
                   {o.gpsCoords && o.gpsCoords.lat && (
-                    <div>
-                      🗺️ <b>GPS Route:</b> <a href={`https://www.google.com/maps/search/?api=1&query=${o.gpsCoords.lat},${o.gpsCoords.lng}`} target="_blank" rel="noreferrer" style={{color: 'var(--gold)', textDecoration: 'underline', fontWeight: 'bold'}}>Google Maps Routing</a>
-                    </div>
+                    <>
+                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between'}}>
+                        <span>🗺️ <b>GPS:</b> {o.gpsCoords.lat.toFixed(5)}, {o.gpsCoords.lng.toFixed(5)}</span>
+                        {o.gpsAccuracy && <span style={{fontSize: '.7rem', color: o.gpsAccuracy <= 10 ? 'var(--green)' : o.gpsAccuracy <= 30 ? 'var(--gold)' : 'var(--red)'}}>±{o.gpsAccuracy}m</span>}
+                      </div>
+                      <div style={{display: 'flex', gap: 8, alignItems: 'center'}}>
+                        <a href={`https://www.google.com/maps/search/?api=1&query=${o.gpsCoords.lat},${o.gpsCoords.lng}`} target="_blank" rel="noreferrer" style={{color: 'var(--gold)', textDecoration: 'underline', fontWeight: 'bold', fontSize: '.78rem'}}>📍 Open in Maps</a>
+                        <a href={`https://www.google.com/maps/dir/?api=1&origin=0.8273,35.1207&destination=${o.gpsCoords.lat},${o.gpsCoords.lng}&travelmode=driving`} target="_blank" rel="noreferrer" style={{color: 'var(--orange)', textDecoration: 'underline', fontWeight: 'bold', fontSize: '.78rem'}}>🧭 Get Directions</a>
+                      </div>
+                      <div className="admin-map-thumb">
+                        <a href={`https://www.google.com/maps/search/?api=1&query=${o.gpsCoords.lat},${o.gpsCoords.lng}`} target="_blank" rel="noreferrer">
+                          <img src={`https://staticmap.openstreetmap.de/staticmap.php?center=${o.gpsCoords.lat},${o.gpsCoords.lng}&zoom=15&size=320x100&markers=${o.gpsCoords.lat},${o.gpsCoords.lng},red-pushpin`} alt="Customer location" />
+                        </a>
+                      </div>
+                    </>
                   )}
                 </div>
+
+                {/* Delivery tracking animation */}
+                {o.status === 'on_the_way' && (
+                  <>
+                    <div className="admin-bike-container">
+                      <span className="admin-bike-node start">🏪 Shop</span>
+                      <div className="admin-bike-track" />
+                      <div className="admin-bike-track-progress" style={{ width: adminProgressWidth }} />
+                      <span className="admin-bike-emoji" style={{ left: adminBikeLeft }}>🛵</span>
+                      <span className="admin-bike-node end">📍 Dest</span>
+                    </div>
+                    {adminEta !== null && (
+                      <div className="admin-delivery-eta">🕐 ETA: <b>{adminEta > 0 ? `~${adminEta} min` : 'Arriving now!'}</b></div>
+                    )}
+                  </>
+                )}
+
+                {o.status === 'delivered' && (
+                  <div className="admin-delivered-badge">✅ Delivered{o.deliveredAt ? ` at ${new Date(o.deliveredAt).toLocaleTimeString('en-KE', { timeZone: 'Africa/Nairobi' })}` : ''}</div>
+                )}
 
                 <div className="blitz-admin-order-foot">
                   <div>
                     {o.discount > 0 && <small style={{color:'var(--green)',display:'block'}}>Discount: -{money(o.discount)}</small>}
                     <b>Total: {money(o.totalPrice)}</b>
                   </div>
-                  <span className="blitz-admin-muted">{new Date(o.createdAt).toLocaleString()}</span>
+                  <span className="blitz-admin-muted">{new Date(o.createdAt).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</span>
                 </div>
                 <div style={{display:'flex',gap:6,alignItems:'center',marginTop:6}}>
                   <select value={o.status} onChange={e => updateOrder(o._id, { status: e.target.value })} style={{flex:1}}>
@@ -1644,11 +1899,11 @@ const loadStockTransfers = async () => {
                       '⚡️ *BLITZ MALL - DELIVERY CONFIRMED* ⚡️\n' +
                       '━'.repeat(20) + '\n' +
                       '✅ Your order has been *delivered*!\n' +
-                      '📅 ' + new Date().toLocaleString() + '\n' +
+                      '📅 ' + new Date().toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) + '\n' +
                       '━'.repeat(20) + '\n' +
-                      (o.items||[]).map(it => '• ' + it.name + ' x' + (it.quantity||it.qty||1) + ' — KES ' + ((it.price||0)*(it.quantity||it.qty||1)).toLocaleString()).join('\n') + '\n' +
+                      (o.items||[]).map(it => '• ' + it.name + ' x' + (it.quantity||it.qty||1) + ' — KES ' + ((it.price||0)*(it.quantity||it.qty||1)).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })).join('\n') + '\n' +
                       '━'.repeat(20) + '\n' +
-                      '*💰 TOTAL: KES ' + (o.totalPrice||0).toLocaleString() + '*\n' +
+                      '*💰 TOTAL: KES ' + (o.totalPrice||0).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) + '*\n' +
                       '━'.repeat(20) + '\n' +
                       '🏪 Brilliant Shop\n' +
                       '🙏 Thank you for ordering with Blitz Mall!\n' +
@@ -1657,7 +1912,8 @@ const loadStockTransfers = async () => {
                   )}
                 </div>
               </div>
-            ))}</div>
+              );
+            })}</div>
           )}
         </div>
       )}
@@ -1710,7 +1966,7 @@ const loadStockTransfers = async () => {
                         <BarChart data={periodData}>
                           <XAxis dataKey="name" tick={{fill:'#8a8a96',fontSize:11}} axisLine={{stroke:'#26262e'}} tickLine={false} />
                           <YAxis tick={{fill:'#8a8a96',fontSize:11}} axisLine={false} tickLine={false} />
-                          <Tooltip contentStyle={tooltipStyle} formatter={(v) => 'KES ' + v.toLocaleString()} />
+                          <Tooltip contentStyle={tooltipStyle} formatter={(v) => 'KES ' + v.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })} />
                           <Bar dataKey="Revenue" fill="#ffd24a" radius={[4,4,0,0]} maxBarSize={40} />
                           <Bar dataKey="Profit" fill="#36d399" radius={[4,4,0,0]} maxBarSize={40} />
                         </BarChart>
@@ -1728,7 +1984,7 @@ const loadStockTransfers = async () => {
                               <Pie data={payData} cx="50%" cy="50%" innerRadius={40} outerRadius={70} paddingAngle={4} dataKey="value">
                                 {payData.map((e, i) => <Cell key={e.name} fill={PAY_COLORS[i]} />)}
                               </Pie>
-                              <Tooltip contentStyle={tooltipStyle} formatter={(v) => 'KES ' + (Math.round(v*100)/100).toLocaleString()} />
+                              <Tooltip contentStyle={tooltipStyle} formatter={(v) => 'KES ' + (Math.round(v*100)/100).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })} />
                             </PieChart>
                           </ResponsiveContainer>
                         ) : <p className="blitz-admin-empty sm">No data</p>}
@@ -1877,7 +2133,7 @@ const loadStockTransfers = async () => {
         <div className="blitz-admin-body"><div className="blitz-admin-row-between"><h2>Expenses</h2><button className="blitz-admin-btn small" onClick={exportExpensesExcel}>📊 Excel</button></div>
           {summary?.summary?.today && <div className="exp-summary">Today: <b className="red">{money(summary.summary.today.expenses)}</b> · This month: <b className="red">{money(summary.summary.month?.expenses || 0)}</b></div>}
           <form className="exp-form" onSubmit={addExpense}><input value={expDesc} onChange={e => setExpDesc(e.target.value)} placeholder="What for? e.g. Transport, Rent" required /><input type="number" step="0.01" value={expAmount} onChange={e => setExpAmount(e.target.value)} placeholder="Amount KES" required /><button className="blitz-admin-btn small" type="submit">Add</button></form>
-          {expenses.length === 0 ? <p className="blitz-admin-empty">No expenses yet.</p> : <div className="blitz-admin-list">{expenses.map(x => <div className="exp-row" key={x._id}><div><b>{x.description}</b><span className="blitz-admin-muted"> · {new Date(x.createdAt).toLocaleDateString()}</span></div><div className="exp-right"><b className="red">{money(x.amount)}</b><button className="pos-void" onClick={() => delExpense(x._id)}>delete</button></div></div>)}</div>}
+          {expenses.length === 0 ? <p className="blitz-admin-empty">No expenses yet.</p> : <div className="blitz-admin-list">{expenses.map(x => <div className="exp-row" key={x._id}><div><b>{x.description}</b><span className="blitz-admin-muted"> · {new Date(x.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}</span></div><div className="exp-right"><b className="red">{money(x.amount)}</b><button className="pos-void" onClick={() => delExpense(x._id)}>delete</button></div></div>)}</div>}
         </div>
       )}
 
@@ -1894,8 +2150,8 @@ const loadStockTransfers = async () => {
               <input value={crNote} onChange={e => setCrNote(e.target.value)} placeholder="For what? (optional)" />
               <button className="blitz-admin-btn small" type="submit">Add debt</button>
             </form>
-            {unpaid.length === 0 ? <p className="blitz-admin-empty">No one owes you. 🎉</p> : <div className="blitz-admin-list">{unpaid.map(c => <div className="cr-row" key={c._id}><div className="cr-info"><b>{c.customerName}</b>{c.note && <span className="blitz-admin-muted">{c.note}</span>}<span className="cr-date">since {new Date(c.createdAt).toLocaleDateString()}{c.phone ? " · " + c.phone : ""}</span></div><div className="cr-amt">{money(c.amount)}</div><div className="cr-actions">{c.phone && <a className="cr-remind" href={waLink(c.phone,"Hi " + c.customerName + ", friendly reminder you have a balance of " + money(c.amount) + " at Brilliant. Asante!")} target="_blank" rel="noreferrer">Remind</a>}<button className="cr-paid" onClick={() => payCredit(c._id)}>Mark paid</button><button className="pos-void" onClick={() => delCredit(c._id)}>delete</button></div></div>)}</div>}
-            {paid.length > 0 && <div className="cr-paidwrap"><button className="cr-toggle" onClick={() => setCrShowPaid(s=>!s)}>{crShowPaid?"Hide":"Show"} cleared ({paid.length})</button>{crShowPaid && <div className="blitz-admin-list">{paid.map(c => <div className="cr-row cleared" key={c._id}><div className="cr-info"><b>{c.customerName}</b><span className="cr-date">paid {c.paidAt ? new Date(c.paidAt).toLocaleDateString() : ""}</span></div><div className="cr-amt">{money(c.amount)}</div><div className="cr-actions"><button className="pos-void" onClick={() => delCredit(c._id)}>delete</button></div></div>)}</div>}</div>}
+            {unpaid.length === 0 ? <p className="blitz-admin-empty">No one owes you. 🎉</p> : <div className="blitz-admin-list">{unpaid.map(c => <div className="cr-row" key={c._id}><div className="cr-info"><b>{c.customerName}</b>{c.note && <span className="blitz-admin-muted">{c.note}</span>}<span className="cr-date">since {new Date(c.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}{c.phone ? " · " + c.phone : ""}</span></div><div className="cr-amt">{money(c.amount)}</div><div className="cr-actions">{c.phone && <a className="cr-remind" href={waLink(c.phone,"Hi " + c.customerName + ", friendly reminder you have a balance of " + money(c.amount) + " at Brilliant. Asante!")} target="_blank" rel="noreferrer">Remind</a>}<button className="cr-paid" onClick={() => payCredit(c._id)}>Mark paid</button><button className="pos-void" onClick={() => delCredit(c._id)}>delete</button></div></div>)}</div>}
+            {paid.length > 0 && <div className="cr-paidwrap"><button className="cr-toggle" onClick={() => setCrShowPaid(s=>!s)}>{crShowPaid?"Hide":"Show"} cleared ({paid.length})</button>{crShowPaid && <div className="blitz-admin-list">{paid.map(c => <div className="cr-row cleared" key={c._id}><div className="cr-info"><b>{c.customerName}</b><span className="cr-date">paid {c.paidAt ? new Date(c.paidAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) : ""}</span></div><div className="cr-amt">{money(c.amount)}</div><div className="cr-actions"><button className="pos-void" onClick={() => delCredit(c._id)}>delete</button></div></div>)}</div>}</div>}
           </div>
         );
       })()}
@@ -1905,7 +2161,7 @@ const loadStockTransfers = async () => {
         return (
           <div className="blitz-admin-body"><h2>Reviews</h2>
             <div className="rv-head"><div className="rv-avg"><b>{avg.toFixed(1)}</b><span className="rv-stars">{stars(Math.round(avg))}</span><small>{count} review{count!==1?"s":""}</small></div>{complaints > 0 && <div className="rv-complaints">⚠ {complaints} complaint{complaints!==1?"s":""} (1–2 stars)</div>}</div>
-            {count === 0 ? <p className="blitz-admin-empty">No reviews yet.</p> : <div className="blitz-admin-list">{reviews.map(r => <div className={"rv-row" + (r.rating<=2?" bad":"")} key={r._id}><div className="rv-info"><div className="rv-top"><span className="rv-stars">{stars(r.rating)}</span><b>{r.customerName}</b></div>{r.message && <p className="rv-msg">{r.message}</p>}<span className="cr-date">{new Date(r.createdAt).toLocaleDateString()}</span></div><button className="pos-void" onClick={() => delReview(r._id)}>delete</button></div>)}</div>}
+            {count === 0 ? <p className="blitz-admin-empty">No reviews yet.</p> : <div className="blitz-admin-list">{reviews.map(r => <div className={"rv-row" + (r.rating<=2?" bad":"")} key={r._id}><div className="rv-info"><div className="rv-top"><span className="rv-stars">{stars(r.rating)}</span><b>{r.customerName}</b></div>{r.message && <p className="rv-msg">{r.message}</p>}<span className="cr-date">{new Date(r.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}</span></div><button className="pos-void" onClick={() => delReview(r._id)}>delete</button></div>)}</div>}
           </div>
         );
       })()}
@@ -2209,7 +2465,7 @@ const loadStockTransfers = async () => {
             <h3 style={{fontSize:'.95rem',marginBottom:10}}>👤 Cashier Names (POS Selector)</h3>
             <p className="blitz-admin-muted" style={{marginBottom:10,fontSize:'.8rem'}}>Add cashier names here for the Sell tab cashier dropdown. No login needed.</p>
             <form className="exp-form" onSubmit={addStaff} style={{marginBottom:12}}><input value={newStaffName} onChange={e => setNewStaffName(e.target.value)} placeholder="Staff name e.g. Jane" required /><button className="blitz-admin-btn small" type="submit">Add</button></form>
-            {staffList.length === 0 ? <p className="blitz-admin-empty">No cashier names added.</p> : <div className="blitz-admin-list">{staffList.map(s => <div className="exp-row" key={s._id}><div><b>{s.name}</b><span className="blitz-admin-muted"> · {s.role||"Cashier"} · Added {new Date(s.createdAt).toLocaleDateString()}</span></div><button className="pos-void" onClick={() => delStaff(s._id)}>remove</button></div>)}</div>}
+            {staffList.length === 0 ? <p className="blitz-admin-empty">No cashier names added.</p> : <div className="blitz-admin-list">{staffList.map(s => <div className="exp-row" key={s._id}><div><b>{s.name}</b><span className="blitz-admin-muted"> · {s.role||"Cashier"} · Added {new Date(s.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}</span></div><button className="pos-void" onClick={() => delStaff(s._id)}>remove</button></div>)}</div>}
           </div>
 
           {/* Secure login accounts (owner only) */}
@@ -2279,7 +2535,7 @@ const loadStockTransfers = async () => {
                         <div style={{display:'flex',flexDirection:'column',gap:2}}>
                           <div>
                             <b>{u.name || u.username}</b>
-                            <span className="blitz-admin-muted"> · @{u.username} · {u.role}{branchName ? ' · ' + branchName : ''} · Created {new Date(u.createdAt).toLocaleDateString()}</span>
+                            <span className="blitz-admin-muted"> · @{u.username} · {u.role}{branchName ? ' · ' + branchName : ''} · Created {new Date(u.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}</span>
                           </div>
                           <div style={{fontSize: '.72rem', color: 'var(--muted)', marginTop: 2}}>
                             🔑 Allowed Tabs: {u.permissions && u.permissions.length ? u.permissions.map(p => allTabs.find(t => t.id === p)?.label || p).join(', ') : 'None'}
@@ -2313,7 +2569,7 @@ const loadStockTransfers = async () => {
                             </span>
                           </div>
                           <div className="blitz-admin-muted" style={{fontSize:'.75rem'}}>
-                            🕒 Start: {new Date(s.startTime).toLocaleString()} {s.endTime ? `| End: ${new Date(s.endTime).toLocaleString()}` : ''}
+                            🕒 Start: {new Date(s.startTime).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })} {s.endTime ? `| End: ${new Date(s.endTime).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}` : ''}
                           </div>
                           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(100px, 1fr))',gap:8,marginTop:4}}>
                             <div><span className="blitz-admin-muted">Start Cash:</span> <br/><b>{money(s.startingCash)}</b></div>
@@ -2348,7 +2604,7 @@ const loadStockTransfers = async () => {
                       <div className="exp-row" key={l._id} style={{fontSize:'.8rem',display:'flex',flexDirection:'column',gap:2,padding:'8px 12px'}}>
                         <div style={{display:'flex',justifyContent:'space-between'}}>
                           <span><b>@{l.username}</b> · <span className="blitz-admin-muted">{l.action}</span></span>
-                          <span className="blitz-admin-muted" style={{fontSize:'.7rem'}}>{new Date(l.timestamp).toLocaleString()}</span>
+                          <span className="blitz-admin-muted" style={{fontSize:'.7rem'}}>{new Date(l.timestamp).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</span>
                         </div>
                         <div style={{color:'var(--text)',fontSize:'.82rem'}}>{l.details}</div>
                       </div>
@@ -2442,6 +2698,54 @@ const loadStockTransfers = async () => {
                 <button className="blitz-admin-btn" type="button" onClick={() => setShowFlashSaleModal(false)} style={{padding:12,background:'none',border:'1px solid var(--line)',color:'var(--text)'}}>Cancel</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      
+      {showCategoriesModal && (
+        <div className="blitz-admin-modal-overlay" style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,backdropFilter:'blur(5px)'}}>
+          <div className="blitz-admin-modal-card" style={{background:'var(--card)',border:'1px solid var(--line)',padding:30,borderRadius:16,width:'100%',maxWidth:450,display:'flex',flexDirection:'column',gap:16}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:'1px solid var(--line)',paddingBottom:10}}>
+              <h3 style={{fontFamily:'Unbounded, sans-serif',color:'var(--gold)',margin:0}}>📂 Manage Categories</h3>
+              <button type="button" onClick={() => setShowCategoriesModal(false)} style={{background:'none',border:'none',color:'var(--muted)',fontSize:'1.2rem',cursor:'pointer'}}>✕</button>
+            </div>
+            
+            <form onSubmit={handleAddCategory} style={{display:'flex',gap:10,margin:0,background:'none',border:'none',padding:0}}>
+              <input 
+                type="text" 
+                placeholder="New category name (e.g. Snacks)" 
+                value={newCategoryName} 
+                onChange={e => setNewCategoryName(e.target.value)} 
+                required 
+                style={{flex:1,padding:10,borderRadius:8,background:'var(--bg-2)',border:'1px solid var(--line)',color:'var(--text)',fontSize:'.9rem'}}
+              />
+              <button className="blitz-admin-btn small" type="submit" style={{margin:0,padding:'10px 16px'}}>Add</button>
+            </form>
+            {categoryError && <p style={{color:'var(--red)',fontSize:'.8rem',margin:0}}>{categoryError}</p>}
+            
+            <div style={{maxHeight:'250px',overflowY:'auto',display:'flex',flexDirection:'column',gap:8,marginTop:10,paddingRight:5}}>
+              {categories.length === 0 ? (
+                <p className="blitz-admin-empty sm" style={{margin:0,padding:'10px 0'}}>No categories yet.</p>
+              ) : (
+                categories.map(c => (
+                  <div key={c._id || c.name} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 12px',background:'var(--bg-2)',border:'1px solid var(--line)',borderRadius:8,fontSize:'.9rem'}}>
+                    <span>{c.name}</span>
+                    <button 
+                      type="button" 
+                      onClick={() => handleDeleteCategory(c._id, c.name)}
+                      style={{background:'none',border:'none',color:'var(--red)',cursor:'pointer',fontSize:'1rem',padding:2}}
+                      title="Delete category"
+                    >
+                      🗑️
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+            
+            <div style={{display:'flex',justifyContent:'flex-end',marginTop:10}}>
+              <button className="blitz-admin-btn small" type="button" onClick={() => setShowCategoriesModal(false)} style={{background:'none',border:'1px solid var(--line)',color:'var(--text)',width:'100%',margin:0,padding:'10px'}}>Close</button>
+            </div>
           </div>
         </div>
       )}

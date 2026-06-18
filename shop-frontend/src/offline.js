@@ -52,9 +52,33 @@ export const syncQueuedSales = async (authHeaders) => {
 
   let synced = 0;
   let failed = 0;
-  const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname === '' || window.location.protocol === 'file:')
-    ? 'http://localhost:5000/api'
-    : (process.env.REACT_APP_API_URL || 'https://blitzmall-backend.onrender.com/api');
+  let API_URL = 'https://blitzmall-backend.onrender.com/api';
+  try {
+    const saved = localStorage.getItem('blitz_api_url');
+    if (saved) {
+      API_URL = saved;
+    } else {
+      const isLocal = window.location.hostname === 'localhost' || 
+                      window.location.hostname === '127.0.0.1' || 
+                      window.location.hostname.startsWith('192.168.') || 
+                      window.location.hostname.startsWith('10.') || 
+                      window.location.hostname.startsWith('172.') || 
+                      window.location.hostname.endsWith('.local') ||
+                      window.location.hostname === '' || 
+                      window.location.protocol === 'file:';
+      if (isLocal) API_URL = `http://${window.location.hostname || 'localhost'}:5000/api`;
+    }
+  } catch (e) {
+    const isLocal = window.location.hostname === 'localhost' || 
+                    window.location.hostname === '127.0.0.1' || 
+                    window.location.hostname.startsWith('192.168.') || 
+                    window.location.hostname.startsWith('10.') || 
+                    window.location.hostname.startsWith('172.') || 
+                    window.location.hostname.endsWith('.local') ||
+                    window.location.hostname === '' || 
+                    window.location.protocol === 'file:';
+    if (isLocal) API_URL = `http://${window.location.hostname || 'localhost'}:5000/api`;
+  }
 
   for (const sale of queue) {
     try {

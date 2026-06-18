@@ -1,0 +1,39 @@
+name: Deploy BlitzMall Updates
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-and-deploy:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install Dependencies
+        working-directory: ./shop-frontend
+        run: npm ci
+
+      - name: Build React App
+        working-directory: ./shop-frontend
+        run: npm run build
+
+      - name: Publish Desktop Update (Electron)
+        working-directory: ./shop-frontend
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run electron:build -- -p always
+
+      - name: Publish Android Update (Capgo OTA)
+        working-directory: ./shop-frontend
+        env:
+          CAPGO_TOKEN: ${{ secrets.CAPGO_TOKEN }}
+        run: npx @capgo/cli@latest bundle upload --token ${{ secrets.CAPGO_TOKEN }}

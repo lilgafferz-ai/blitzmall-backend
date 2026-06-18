@@ -4,6 +4,7 @@ import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
 import ErrorBoundary from './ErrorBoundary';
+import { CapacitorUpdater } from '@capgo/capacitor-updater';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
@@ -13,6 +14,8 @@ root.render(
     </ErrorBoundary>
   </React.StrictMode>
 );
+
+CapacitorUpdater.notifyAppReady();
 
 const isNativeApp = typeof window !== 'undefined' && window.Capacitor?.isNativePlatform?.();
 if ('serviceWorker' in navigator && !isNativeApp) {
