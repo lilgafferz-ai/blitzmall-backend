@@ -1023,7 +1023,7 @@ const { spawnSync } = require('child_process');
 // Helper: make Safaricom API calls via curl to bypass Incapsula WAF
 function safaricomCurl(url, options = {}) {
   const curlCmd = process.platform === 'win32' ? 'curl.exe' : 'curl';
-  const args = ['-s', '-S', '--max-time', '4'];
+  const args = ['-s', '-S', '--max-time', '25'];
   if (options.method === 'POST') args.push('-X', 'POST');
   if (options.headers) {
     for (const [k, v] of Object.entries(options.headers)) {
@@ -1032,7 +1032,7 @@ function safaricomCurl(url, options = {}) {
   }
   if (options.body) args.push('-d', options.body);
   args.push(url);
-  const result = spawnSync(curlCmd, args, { encoding: 'utf8', timeout: 5000 });
+  const result = spawnSync(curlCmd, args, { encoding: 'utf8', timeout: 30000 });
   if (result.error) throw new Error(`curl failed: ${result.error.message}`);
   if (result.status !== 0) throw new Error(`curl exited with code ${result.status}: ${result.stderr}`);
   return JSON.parse(result.stdout);
