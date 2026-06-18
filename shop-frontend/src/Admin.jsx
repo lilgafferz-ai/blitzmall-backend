@@ -1037,7 +1037,7 @@ const loadStockTransfers = async () => {
         const r = await fetch(API_URL + '/mpesa/stk-push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: custPhone, amount: saleTotal }) });
         const d = await r.json();
         if (d.success) { setStkCheckoutId(d.checkoutRequestId); }
-        else { setStkStatus('failed'); setStkError(d.error || 'M-Pesa request failed'); }
+        else { setStkStatus('failed'); setStkError(d.error + (d.details ? ': ' + d.details : '')); }
       } catch (e) { setStkStatus('failed'); setStkError('Network error sending M-Pesa request'); }
       return;
     }
