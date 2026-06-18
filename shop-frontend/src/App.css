@@ -403,48 +403,122 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
 /* ===== DELIVERY BIKE TRACKING ANIMATION ===== */
 .bike-anim-container {
   position: relative;
-  height: 38px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 10px;
+  height: 52px;
+  background: linear-gradient(135deg, rgba(255,122,26,0.06), rgba(255,210,74,0.04));
+  border-radius: 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 12px;
-  margin: 12px 0;
-  border: 1px dashed var(--line);
+  padding: 0 14px;
+  margin: 14px 0;
+  border: 1px dashed rgba(255,122,26,0.3);
   overflow: hidden;
 }
 .bike-track {
   position: absolute;
-  left: 60px;
-  right: 60px;
-  height: 2px;
-  background: repeating-linear-gradient(to right, transparent, transparent 4px, var(--muted) 4px, var(--muted) 8px);
+  left: 70px;
+  right: 70px;
+  height: 3px;
+  background: var(--line);
   z-index: 0;
+  border-radius: 2px;
+}
+.bike-track-progress {
+  position: absolute;
+  left: 70px;
+  height: 3px;
+  background: var(--grad);
+  z-index: 0;
+  border-radius: 2px;
+  transition: width 1s ease;
+  box-shadow: 0 0 8px rgba(255,122,26,0.4);
 }
 .bike-emoji {
   position: absolute;
-  left: 60px;
-  font-size: 1.3rem;
+  font-size: 1.5rem;
   z-index: 1;
-  animation: drive-bike 7s linear infinite;
+  transition: left 1s ease;
+  filter: drop-shadow(0 2px 6px rgba(255,122,26,0.5));
 }
 .bike-node {
-  font-size: 0.78rem;
-  font-weight: bold;
+  font-size: 0.75rem;
+  font-weight: 700;
   z-index: 2;
   background: var(--card);
-  padding: 2px 8px;
-  border-radius: 6px;
+  padding: 3px 10px;
+  border-radius: 8px;
   border: 1px solid var(--line);
   color: var(--text);
+  white-space: nowrap;
 }
-@keyframes drive-bike {
-  0% { left: 60px; transform: scaleX(1); }
-  47% { left: calc(100% - 95px); transform: scaleX(1); }
-  50% { transform: scaleX(-1); }
-  97% { left: 60px; transform: scaleX(-1); }
-  100% { left: 60px; transform: scaleX(1); }
+.bike-node.start { border-color: var(--orange); color: var(--orange); }
+.bike-node.end { border-color: var(--green); color: var(--green); }
+.bike-delivered-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: rgba(54,211,153,0.12);
+  border: 1px solid rgba(54,211,153,0.35);
+  border-radius: 10px;
+  color: var(--green);
+  font-weight: 700;
+  font-size: 0.88rem;
+  margin: 8px 0;
+  animation: delivered-pop 0.5s ease;
+}
+@keyframes delivered-pop {
+  0% { transform: scale(0.8); opacity: 0; }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* GPS accuracy & mini-map styles */
+.gps-accuracy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  padding: 4px 0;
+}
+.gps-accuracy .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.gps-accuracy .dot.good { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.gps-accuracy .dot.ok { background: var(--gold); box-shadow: 0 0 6px var(--gold); }
+.gps-accuracy .dot.poor { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.gps-minimap {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  margin-top: 8px;
+}
+.gps-minimap img {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  display: block;
+}
+.gps-address {
+  font-size: 0.8rem;
+  color: var(--muted);
+  padding: 4px 0;
+  font-style: italic;
+}
+.delivery-eta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 4px 0;
+}
+.delivery-eta b {
+  color: var(--orange);
 }
 
 /* ===== FLASH SALE CARD ===== */
@@ -538,6 +612,7 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding-bottom: 32px;
 }
 .flash-item-name {
   font-size: 0.8rem;
@@ -712,11 +787,14 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
   position: absolute;
   width: 50%;
   height: 50%;
+  top: 0;
+  left: 0;
   transform-origin: 100% 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
+  clip-path: polygon(100% 100%, 0 0, 0 100%);
 }
 .wheel-sector span {
   font-size: 0.56rem;
@@ -728,23 +806,19 @@ body{font-family:'Manrope',sans-serif;background:var(--bg);color:var(--text);-we
 }
 .sec-1 {
   background: #ff007f;
-  top: 0; left: 0;
-  transform: rotate(0deg) skewY(0deg);
+  transform: rotate(0deg);
 }
 .sec-2 {
   background: #00f2fe;
-  top: 0; left: 0;
-  transform: rotate(90deg) skewY(0deg);
+  transform: rotate(90deg);
 }
 .sec-3 {
   background: #38ef7d;
-  top: 0; left: 0;
-  transform: rotate(180deg) skewY(0deg);
+  transform: rotate(180deg);
 }
 .sec-4 {
   background: #a0a0a0;
-  top: 0; left: 0;
-  transform: rotate(270deg) skewY(0deg);
+  transform: rotate(270deg);
 }
 .wheel-center-hub {
   position: absolute;

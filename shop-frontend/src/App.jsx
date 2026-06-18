@@ -11,8 +11,15 @@ const getDefaultApiUrl = () => {
     if (saved) return saved;
   } catch (e) {}
   
-  const isLocalWeb = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-  return isLocalWeb ? 'http://localhost:5000/api' : 'https://blitzmall-backend.onrender.com/api';
+  const isLocal = window.location.hostname === 'localhost' || 
+                  window.location.hostname === '127.0.0.1' || 
+                  window.location.hostname.startsWith('192.168.') || 
+                  window.location.hostname.startsWith('10.') || 
+                  window.location.hostname.startsWith('172.') || 
+                  window.location.hostname.endsWith('.local') ||
+                  window.location.hostname === '' || 
+                  window.location.protocol === 'file:';
+  return isLocal ? `http://${window.location.hostname || 'localhost'}:5000/api` : 'https://blitzmall-backend.onrender.com/api';
 };
 
 const API_URL = getDefaultApiUrl();
@@ -226,12 +233,14 @@ function App() {
   const [deliveryLocation, setDeliveryLocation] = useState('');
   const [gpsCoords, setGpsCoords] = useState(null);
   const [gpsLoading, setGpsLoading] = useState(false);
+  const [gpsAddress, setGpsAddress] = useState('');
+  const [orderTrackingProgress, setOrderTrackingProgress] = useState({});
   const [bannerIndex, setBannerIndex] = useState(0);
   const [savedBaskets, setSavedBaskets] = useState([]);
   const [basketNameInput, setBasketNameInput] = useState('');
   const [showBasketSaveForm, setShowBasketSaveForm] = useState(false);
   const [loyaltyRewards, setLoyaltyRewards] = useState([]);
-  const scratchRevealed = lastScratchDate === new Date().toLocaleDateString();
+  const scratchRevealed = lastScratchDate === new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' });
   const [scratchRevealing, setScratchRevealing] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [custLoyalty, setCustLoyalty] = useState(null);
@@ -359,27 +368,28 @@ function App() {
   // M-Pesa STK polling — must be before any conditional returns
   useEffect(() => {
     if (!stkCheckoutId || stkStatus !== 'waiting') return;
-    const interval = setInterval(async () => {
+    let stopped = false;
+    const poll = async () => {
+      if (stopped) return;
       try {
         const r = await fetch(`${API_URL}/mpesa/status/${stkCheckoutId}`);
         const d = await r.json();
         if (d.status === 'confirmed') {
-          clearInterval(interval);
+          stopped = true;
           setStkStatus('confirmed');
           setCart([]); setScreen('confirmation');
           triggerSimulatedNotifications();
         } else if (d.status === 'failed') {
-          clearInterval(interval);
+          stopped = true;
           setStkStatus('failed');
-          setStkError(d.resultDesc || 'Payment failed or cancelled.');
+          setStkError(d.resultDesc || '❌ Payment Declined — Wrong PIN or Cancelled');
         }
       } catch (e) { console.error(e); }
-    }, 3000);
-    const timeout = setTimeout(() => {
-      clearInterval(interval);
-      if (stkStatus === 'waiting') { setStkStatus('failed'); setStkError('Timed out. Try again.'); }
-    }, 90000);
-    return () => { clearInterval(interval); clearTimeout(timeout); };
+    };
+    const interval = setInterval(poll, 2000);
+    poll();
+    const timeout = setTimeout(() => { if (!stopped) { stopped = true; clearInterval(interval); setStkStatus('failed'); setStkError('⏱️ Timed out waiting for payment. Try again.'); } }, 60000);
+    return () => { stopped = true; clearInterval(interval); clearTimeout(timeout); };
   }, [stkCheckoutId, stkStatus]);
 
   const loadSavedBaskets = async () => {
@@ -475,7 +485,7 @@ function App() {
   const scratchCoupon = () => {
     if (scratchRevealed || scratchRevealing) return;
     setScratchRevealing(true);
-    const todayStr = new Date().toLocaleDateString();
+    const todayStr = new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' });
     
     // Choose result: 80% lose, 10% lucky30, 7% lucky50, 3% free delivery
     const rand = Math.random();
@@ -565,7 +575,9 @@ function App() {
   );
 
   const categoryOf = (p) => (p.category && p.category.trim()) ? p.category.trim() : 'Other';
-  const categories = ['All', ...[...new Set(products.map(categoryOf))].sort()];
+  const categories = React.useMemo(() => {
+    return ['All', ...[...new Set(products.map(categoryOf))].sort()];
+  }, [products]);
   const productId = (p) => p._id || p.id;
   const total = cart.reduce((s, i) => s + i.price * i.quantity, 0);
   const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
@@ -590,7 +602,7 @@ function App() {
             body: JSON.stringify({ customerId: order.customerId, customerName: order.customerName, items: order.items, paymentMethod: order.paymentMethod }) });
           const d = await r.json();
           if (!d.success) synced.push(order);
-        } catch { synced.push(order); }
+        } catch (e) { console.error('Failed to sync offline order:', e); synced.push(order); }
       }
       localStorage.setItem(OFFLINE_ORDERS_KEY, JSON.stringify(synced));
     } catch (e) { console.warn('Failed to sync offline orders:', e); }
@@ -611,6 +623,46 @@ function App() {
       loadLoyaltyRewards();
     }
   }, [screen]);
+
+  const loadMyOrders = async () => {
+    try {
+      const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
+      const d = await r.json();
+      if (Array.isArray(d) && d.length) {
+        setMyOrders(d.reverse());
+        localStorage.setItem(ORDERS_CACHE_KEY_ORDERS, JSON.stringify(d));
+        // Update tracking progress for active deliveries
+        const progressMap = {};
+        for (const o of d) {
+          if (o.status === 'on_the_way' && o.dispatchedAt) {
+            const elapsed = (Date.now() - new Date(o.dispatchedAt).getTime()) / 1000;
+            const estTime = 20 * 60; // 20 min
+            progressMap[o._id] = Math.min(95, Math.round((elapsed / estTime) * 100));
+          } else if (o.status === 'delivered') {
+            progressMap[o._id] = 100;
+          } else {
+            progressMap[o._id] = 0;
+          }
+        }
+        setOrderTrackingProgress(progressMap);
+      }
+    } catch (e) {
+      console.warn('Offline: using cached orders');
+      try {
+        const cached = JSON.parse(localStorage.getItem(ORDERS_CACHE_KEY_ORDERS));
+        if (Array.isArray(cached)) setMyOrders(cached);
+      } catch {}
+    }
+  };
+
+  // Auto-refresh orders and tracking progress
+  useEffect(() => {
+    if (screen !== 'orders' || !customer?.customerId) return;
+    const interval = setInterval(() => {
+      loadMyOrders();
+    }, 15000); // refresh every 15 seconds
+    return () => clearInterval(interval);
+  }, [screen, customer?.customerId]);
 
   const addToCart = useCallback((p, qty = 1) => {
     const id = productId(p);
@@ -722,18 +774,46 @@ function App() {
       return;
     }
     setGpsLoading(true);
-    navigator.geolocation.getCurrentPosition(
+    setGpsAddress('');
+    let bestPos = null;
+    let bestAccuracy = Infinity;
+    // Use watchPosition to get the most accurate fix within 6 seconds
+    const watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        setGpsCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-        setGpsLoading(false);
+        if (pos.coords.accuracy < bestAccuracy) {
+          bestAccuracy = pos.coords.accuracy;
+          bestPos = pos;
+          setGpsCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy) });
+        }
       },
       (err) => {
         console.warn('Geolocation error:', err);
-        alert('Could not pin location. Please enable GPS/location permissions on your device.');
-        setGpsLoading(false);
+        if (!bestPos) {
+          alert('Could not pin location. Please enable GPS/location permissions on your device.');
+          setGpsLoading(false);
+        }
       },
-      { enableHighAccuracy: true, timeout: 10000 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
+    // After 6 seconds, stop watching and use best result
+    setTimeout(() => {
+      navigator.geolocation.clearWatch(watchId);
+      setGpsLoading(false);
+      if (bestPos) {
+        const lat = bestPos.coords.latitude;
+        const lng = bestPos.coords.longitude;
+        // Reverse geocode for address
+        fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`)
+          .then(r => r.json())
+          .then(data => {
+            if (data.display_name) {
+              setGpsAddress(data.display_name.split(',').slice(0, 3).join(','));
+              if (!deliveryLocation) setDeliveryLocation(data.display_name.split(',').slice(0, 2).join(', ').trim());
+            }
+          })
+          .catch(() => {});
+      }
+    }, 6000);
   };
 
   const reOrderPastOrder = (order) => {
@@ -784,7 +864,7 @@ function App() {
     setTimeout(async () => {
       setWheelSpinning(false);
       setWheelPrize(selected);
-      const today = new Date().toLocaleDateString();
+      const today = new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' });
       setLastSpinDate(today);
       try { localStorage.setItem('last_spin_date', today); } catch {}
       
@@ -884,6 +964,7 @@ function App() {
           setCouponInput('');
           setDeliveryLocation('');
           setGpsCoords(null);
+          setGpsAddress('');
           setScreen('confirmation');
           triggerSimulatedNotifications();
         }
@@ -901,6 +982,7 @@ function App() {
         setCouponInput('');
         setDeliveryLocation('');
         setGpsCoords(null);
+        setGpsAddress('');
         setScreen('confirmation');
         triggerSimulatedNotifications();
       } catch (err) { console.error('Failed to queue order:', err); }
@@ -909,22 +991,6 @@ function App() {
     }
   };
 
-  const loadMyOrders = async () => {
-    try {
-      const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
-      const d = await r.json();
-      if (Array.isArray(d) && d.length) {
-        setMyOrders(d.reverse());
-        localStorage.setItem(ORDERS_CACHE_KEY_ORDERS, JSON.stringify(d));
-      }
-    } catch (e) {
-      console.warn('Offline: using cached orders');
-      try {
-        const cached = JSON.parse(localStorage.getItem(ORDERS_CACHE_KEY_ORDERS));
-        if (Array.isArray(cached)) setMyOrders(cached);
-      } catch {}
-    }
-  };
 
   const onUpload = (e) => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader();
     rd.onloadend = () => saveProfile({ ...(profile || {}), photo: rd.result }); rd.readAsDataURL(f); };
@@ -1262,9 +1328,9 @@ function App() {
               <button 
                 className="btn-neon spin-action-btn" 
                 onClick={spinTheWheel} 
-                disabled={wheelSpinning || lastSpinDate === new Date().toLocaleDateString()}
+                disabled={wheelSpinning || lastSpinDate === new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}
               >
-                {wheelSpinning ? '🌀 Spinning...' : lastSpinDate === new Date().toLocaleDateString() ? '🔒 Come Back Tomorrow' : '🔥 Spin Now!'}
+                {wheelSpinning ? '🌀 Spinning...' : lastSpinDate === new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) ? '🔒 Come Back Tomorrow' : '🔥 Spin Now!'}
               </button>
             </div>
           </div>
@@ -1471,6 +1537,7 @@ function App() {
             setCouponInput('');
             setDeliveryLocation('');
             setGpsCoords(null);
+            setGpsAddress('');
             setScreen('cart');
           }}>‹</button>
           <h2 className="topbar-title">Checkout</h2>
@@ -1497,13 +1564,27 @@ function App() {
               <input className="field" placeholder="e.g. Apartment, House No, Landmark" value={deliveryLocation} onChange={e => setDeliveryLocation(e.target.value)} style={{ padding: '8px', borderRadius: '8px' }} required />
             </label>
 
-            <button type="button" className="btn-ghost" onClick={pinGpsLocation} style={{ width: '100%', padding: '8px', fontSize: '0.85rem' }} disabled={gpsLoading}>
-              {gpsLoading ? '⏳ Fetching Location...' : gpsCoords ? '✅ GPS Location Pinned' : '📍 Pin Location (Get GPS)'}
+            <button type="button" className="btn-ghost" onClick={pinGpsLocation} style={{ width: '100%', padding: '10px', fontSize: '0.85rem', borderRadius: '10px', border: '1px dashed var(--orange)', background: 'rgba(255,122,26,0.06)' }} disabled={gpsLoading}>
+              {gpsLoading ? '⏳ Getting precise location...' : gpsCoords ? '✅ GPS Location Pinned' : '📍 Pin My Location (GPS)'}
             </button>
             {gpsCoords && (
-              <small style={{ color: 'var(--green)', fontSize: '0.75rem', textAlign: 'center' }}>
-                Coordinates: {gpsCoords.lat.toFixed(5)}, {gpsCoords.lng.toFixed(5)}
-              </small>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <div className="gps-accuracy">
+                  <span className={`dot ${gpsCoords.accuracy <= 10 ? 'good' : gpsCoords.accuracy <= 30 ? 'ok' : 'poor'}`} />
+                  <span style={{ color: gpsCoords.accuracy <= 10 ? 'var(--green)' : gpsCoords.accuracy <= 30 ? 'var(--gold)' : 'var(--red)' }}>
+                    Accuracy: ±{gpsCoords.accuracy || '?'}m {gpsCoords.accuracy <= 10 ? '(Excellent)' : gpsCoords.accuracy <= 30 ? '(Good)' : '(Fair)'}
+                  </span>
+                </div>
+                <small style={{ color: 'var(--muted)', fontSize: '0.72rem', textAlign: 'center' }}>
+                  📌 {gpsCoords.lat.toFixed(6)}, {gpsCoords.lng.toFixed(6)}
+                </small>
+                {gpsAddress && <div className="gps-address">📫 {gpsAddress}</div>}
+                <div className="gps-minimap">
+                  <a href={`https://www.google.com/maps/search/?api=1&query=${gpsCoords.lat},${gpsCoords.lng}`} target="_blank" rel="noreferrer">
+                    <img src={`https://staticmap.openstreetmap.de/staticmap.php?center=${gpsCoords.lat},${gpsCoords.lng}&zoom=16&size=320x140&markers=${gpsCoords.lat},${gpsCoords.lng},red-pushpin`} alt="Your location" />
+                  </a>
+                </div>
+              </div>
             )}
           </div>
 
@@ -1619,7 +1700,7 @@ function App() {
               </div>
               <div style={{ textAlign: 'right' }}>
                 <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Est. Cashback</span>
-                <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {Math.round(custLoyalty.points * 5).toLocaleString()}</div>
+                <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {Math.round(custLoyalty.points * 5).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</div>
               </div>
             </div>
             <small style={{ display: 'block', marginTop: '10px', fontSize: '0.65rem', opacity: 0.7, borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: '6px' }}>
@@ -1721,18 +1802,35 @@ function App() {
           <div className="empty-cart"><span>📦</span><p>No orders yet</p><button className="btn-ghost" onClick={() => setScreen('home')}>Start shopping</button></div>
         ) : myOrders.map(o => {
           const idx = steps.indexOf(o.status);
+          const progress = orderTrackingProgress[o._id] || 0;
+          const trackWidth = 'calc(100% - 140px)'; // total track width
+          const bikeLeft = `calc(70px + ${(progress / 100)} * (100% - 140px))`;
+          const progressWidth = `calc(${(progress / 100)} * (100% - 140px))`;
+          const etaMinutes = o.status === 'on_the_way' && o.dispatchedAt
+            ? Math.max(0, 20 - Math.round((Date.now() - new Date(o.dispatchedAt).getTime()) / 60000))
+            : null;
           return (
             <div className="order-card" key={o._id}>
-              <div className="order-top"><b>KES {o.totalPrice}</b><span className="muted">{new Date(o.createdAt).toLocaleDateString()}</span></div>
+              <div className="order-top"><b>KES {o.totalPrice}</b><span className="muted">{new Date(o.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}</span></div>
               <div className="order-items">{o.items.map((it, k) => <span key={k}>{it.name} ×{it.quantity}</span>)}</div>
               
               {o.status === 'on_the_way' && (
-                <div className="bike-anim-container">
-                  <span className="bike-node">🏪 Mall</span>
-                  <div className="bike-track" />
-                  <span className="bike-emoji">🛵</span>
-                  <span className="bike-node">📍 Dest</span>
-                </div>
+                <>
+                  <div className="bike-anim-container">
+                    <span className="bike-node start">🏪 Shop</span>
+                    <div className="bike-track" />
+                    <div className="bike-track-progress" style={{ width: progressWidth }} />
+                    <span className="bike-emoji" style={{ left: bikeLeft }}>🛵</span>
+                    <span className="bike-node end">📍 You</span>
+                  </div>
+                  {etaMinutes !== null && (
+                    <div className="delivery-eta">🕐 Estimated arrival: <b>{etaMinutes > 0 ? `~${etaMinutes} min` : 'Any moment now!'}</b></div>
+                  )}
+                </>
+              )}
+
+              {o.status === 'delivered' && (
+                <div className="bike-delivered-badge">✅ Delivered successfully!</div>
               )}
 
               <div className="tracker">{steps.map((s, i) => (

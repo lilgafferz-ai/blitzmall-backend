@@ -9,13 +9,16 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const MONGO_URI = process.env.MONGODB_URI || 'mongodb+srv://RedMan:21savagE@cluster0.bbn0afu.mongodb.net/?appName=Cluster0';
-const client = new MongoClient(MONGO_URI);
+const MONGO_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/my_shop';
+const client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
 let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_, categories_;
-const JWT_SECRET = process.env.JWT_SECRET || 'blitzmall_jwt_secret_change_in_prod_2024'; // ⚠️ SET JWT_SECRET env var in production!
+const JWT_SECRET = process.env.JWT_SECRET || 'dev_jwt_secret_replace_in_prod'; // ⚠️ SET JWT_SECRET env var in production!
 const JWT_EXPIRES = '24h';
+
+// Shop GPS coordinates (Point A for delivery tracking)
+const SHOP_COORDS = { lat: 0.8273, lng: 35.1207 }; // Matunda, Kakamega - Blitz Mall location
 const authenticate = (req, res, next) => {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
@@ -253,7 +256,7 @@ async function connectDb() {
   if (!MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET || !MPESA_SHORTCODE || !MPESA_PASSKEY) {
     console.warn('⚠️ M-Pesa environment variables (MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET, MPESA_SHORTCODE, MPESA_PASSKEY) are not fully configured. M-Pesa payments will fail.');
   }
-  if (MPESA_CALLBACK_URL === 'https://your-deployed-url.com/api/mpesa/callback') {
+  if (getMpesaCallbackUrl() === 'https://your-deployed-url.com/api/mpesa/callback') {
     console.warn('⚠️ CALLBACK_URL env var not set. M-Pesa callbacks will not reach your server.');
   }
 
@@ -273,7 +276,8 @@ app.get('/api/products', async (req, res) => {
   try {
     const list = await products_.find().toArray();
     res.json(await applyPricingRules(list));
-  } catch {
+  } catch (e) {
+    console.error('Failed to fetch products:', e);
     res.status(500).json({ error: 'Failed to fetch products' });
   }
 });
@@ -282,7 +286,8 @@ app.get('/api/admin/products', authenticate, async (req, res) => {
     const filter = branchFilter(req);
     const list = await products_.find(filter).toArray();
     res.json(await applyPricingRules(list));
-  } catch {
+  } catch (e) {
+    console.error('Failed to fetch products:', e);
     res.status(500).json({ error: 'Failed to fetch products' });
   }
 });
@@ -309,17 +314,22 @@ app.post('/api/orders', async (req, res) => {
       deliveryLocation: deliveryLocation || '',
       deliveryFee: fee,
       gpsCoords: gpsCoords || null,
+      gpsAccuracy: (gpsCoords && gpsCoords.accuracy) ? gpsCoords.accuracy : null,
+      shopCoords: SHOP_COORDS,
       couponCode: couponCode || null,
-      discount: discountAmt
+      discount: discountAmt,
+      deliveryProgress: 0,
+      dispatchedAt: null,
+      deliveredAt: null
     };
     const result = await orders_.insertOne(order);
     for (const it of items) { const id = it._id || it.id; if (id && ObjectId.isValid(id)) await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: -Math.abs(it.quantity) } }); }
     console.log('🔔 NEW ORDER:', order.customerName, 'KES', order.totalPrice);
     res.json({ success: true, orderId: result.insertedId, message: 'Order placed! Pay on delivery.' });
-  } catch { res.status(500).json({ error: 'Failed to place order' }); }
+  } catch (e) { console.error('Failed to place order:', e); res.status(500).json({ error: 'Failed to place order' }); }
 });
 app.get('/api/customer-orders/:customerId', async (req, res) => {
-  try { res.json(await orders_.find({ customerId: req.params.customerId }).toArray()); } catch { res.status(500).json({ error: 'Failed to fetch orders' }); }
+  try { res.json(await orders_.find({ customerId: req.params.customerId }).toArray()); } catch (e) { console.error('Failed to fetch orders:', e); res.status(500).json({ error: 'Failed to fetch orders' }); }
 });
 
 // ===== JWT AUTH MIDDLEWARE =====
@@ -431,7 +441,7 @@ app.get('/api/admin/users', authenticate, authorize('owner'), async (req, res) =
   try {
     const users = await users_.find({}, { projection: { password: 0 } }).sort({ createdAt: 1 }).toArray();
     res.json(users);
-  } catch { res.status(500).json({ error: 'Failed to fetch users' }); }
+  } catch (e) { console.error('Failed to fetch users:', e); res.status(500).json({ error: 'Failed to fetch users' }); }
 });
 
 // Delete a user
@@ -440,7 +450,7 @@ app.delete('/api/admin/users/:userId', authenticate, authorize('owner'), async (
     const r = await users_.deleteOne({ _id: new ObjectId(req.params.userId) });
     if (!r.deletedCount) return res.status(404).json({ error: 'User not found' });
     res.json({ success: true });
-  } catch { res.status(500).json({ error: 'Failed to delete user' }); }
+  } catch (e) { console.error('Failed to delete user:', e); res.status(500).json({ error: 'Failed to delete user' }); }
 });
 
 // ===== BRANCHES (owner only) =====
@@ -450,7 +460,7 @@ app.post('/api/admin/branches', authenticate, authorize('owner'), async (req, re
   try {
     const r = await branches_.insertOne({ name: name.trim(), location: location || '', phone: phone || '', email: email || '', active: true, createdAt: new Date() });
     res.json({ success: true, branchId: r.insertedId });
-  } catch { res.status(500).json({ error: 'Failed to create branch' }); }
+  } catch (e) { console.error('Failed to create branch:', e); res.status(500).json({ error: 'Failed to create branch' }); }
 });
 
 app.get('/api/admin/branches', authenticate, async (req, res) => {
@@ -469,7 +479,7 @@ app.put('/api/admin/branches/:id', authenticate, authorize('owner'), async (req,
     if (active !== undefined) u.active = active;
     await branches_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: u });
     res.json({ success: true });
-  } catch { res.status(500).json({ error: 'Failed' }); }
+  } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); }
 });
 
 app.delete('/api/admin/branches/:id', authenticate, authorize('owner'), async (req, res) => {
@@ -492,7 +502,7 @@ app.post('/api/admin/products', authenticate, authorize('owner', 'manager'), asy
     };
     const result = await products_.insertOne(product);
     res.json({ success: true, productId: result.insertedId, message: 'Product added!' });
-  } catch { res.status(500).json({ error: 'Failed to add product' }); }
+  } catch (e) { console.error('Failed to add product:', e); res.status(500).json({ error: 'Failed to add product' }); }
 });
 app.put('/api/admin/products/:productId', authenticate, authorize('owner', 'manager'), async (req, res) => {
   const { name, category, barcode, buyingPrice, price, stock, description, image, expiryDate } = req.body;
@@ -510,11 +520,10 @@ app.put('/api/admin/products/:productId', authenticate, authorize('owner', 'mana
     const r = await products_.updateOne({ _id: new ObjectId(req.params.productId) }, { $set: u });
     if (!r.matchedCount) return res.status(404).json({ error: 'Product not found' });
     res.json({ success: true, message: 'Product updated!' });
-  } catch { res.status(500).json({ error: 'Failed to update product' }); }
+  } catch (e) { console.error('Failed to update product:', e); res.status(500).json({ error: 'Failed to update product' }); }
 });
 app.delete('/api/admin/products/:productId', authenticate, authorize('owner', 'manager'), async (req, res) => {
-  try { const r = await products_.deleteOne({ _id: new ObjectId(req.params.productId) }); if (!r.deletedCount) return res.status(404).json({ error: 'Product not found' }); res.json({ success: true }); }
-  catch { res.status(500).json({ error: 'Failed to delete product' }); }
+  try { const r = await products_.deleteOne({ _id: new ObjectId(req.params.productId) }); if (!r.deletedCount) return res.status(404).json({ error: 'Product not found' }); res.json({ success: true });} catch (e) { console.error('Failed to delete product:', e); res.status(500).json({ error: 'Failed to delete product' }); }
 });
 
 // ===== CATEGORIES =====
@@ -565,9 +574,25 @@ app.get('/api/admin/orders', authenticate, async (req, res) => {
 });
 app.put('/api/admin/orders/:orderId', authenticate, async (req, res) => {
   try {
-    const { status, deliveryFee } = req.body;
+    const { status, deliveryFee, deliveryProgress } = req.body;
     const update = {};
-    if (status !== undefined) update.status = status;
+    if (status !== undefined) {
+      update.status = status;
+      // Set dispatch timestamp when order goes out for delivery
+      if (status === 'on_the_way') {
+        const existing = await orders_.findOne({ _id: new ObjectId(req.params.orderId) });
+        if (existing && !existing.dispatchedAt) {
+          update.dispatchedAt = new Date();
+          update.deliveryProgress = 0;
+        }
+      }
+      // Set delivered timestamp and progress to 100 when delivered
+      if (status === 'delivered') {
+        update.deliveredAt = new Date();
+        update.deliveryProgress = 100;
+      }
+    }
+    if (deliveryProgress !== undefined) update.deliveryProgress = deliveryProgress;
     if (deliveryFee !== undefined) {
       const fee = parseFloat(deliveryFee) || 0;
       update.deliveryFee = fee;
@@ -580,7 +605,36 @@ app.put('/api/admin/orders/:orderId', authenticate, async (req, res) => {
     const r = await orders_.updateOne({ _id: new ObjectId(req.params.orderId) }, { $set: update });
     if (!r.matchedCount) return res.status(404).json({ error: 'Order not found' });
     res.json({ success: true });
-  } catch { res.status(500).json({ error: 'Failed' }); }
+  } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); }
+});
+
+// Public tracking endpoint - customers can check delivery status
+app.get('/api/orders/:orderId/tracking', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.orderId)) return res.status(400).json({ error: 'Invalid order ID' });
+    const order = await orders_.findOne({ _id: new ObjectId(req.params.orderId) });
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    
+    // Calculate estimated progress based on time elapsed since dispatch
+    let estimatedProgress = order.deliveryProgress || 0;
+    if (order.status === 'on_the_way' && order.dispatchedAt) {
+      const elapsed = (Date.now() - new Date(order.dispatchedAt).getTime()) / 1000; // seconds
+      const estimatedDeliveryTime = 20 * 60; // 20 minutes in seconds
+      estimatedProgress = Math.min(95, Math.round((elapsed / estimatedDeliveryTime) * 100));
+    }
+    if (order.status === 'delivered') estimatedProgress = 100;
+    
+    res.json({
+      orderId: order._id,
+      status: order.status,
+      shopCoords: order.shopCoords || SHOP_COORDS,
+      customerCoords: order.gpsCoords,
+      deliveryProgress: estimatedProgress,
+      dispatchedAt: order.dispatchedAt,
+      deliveredAt: order.deliveredAt,
+      deliveryLocation: order.deliveryLocation
+    });
+  } catch (e) { console.error('Failed to fetch tracking:', e); res.status(500).json({ error: 'Failed to fetch tracking' }); }
 });
 
 // ===== POS SALES =====
@@ -619,18 +673,17 @@ app.delete('/api/admin/sales/:saleId', authenticate, authorize('owner', 'manager
     for (const it of sale.items) if (it.productId && ObjectId.isValid(it.productId)) await products_.updateOne({ _id: new ObjectId(it.productId) }, { $inc: { stock: Math.abs(it.qty) } });
     await sales_.deleteOne({ _id: new ObjectId(req.params.saleId) });
     res.json({ success: true });
-  } catch { res.status(500).json({ error: 'Failed to void sale' }); }
+  } catch (e) { console.error('Failed to void sale:', e); res.status(500).json({ error: 'Failed to void sale' }); }
 });
 
 // ===== EXPENSES =====
 app.post('/api/admin/expenses', authenticate, async (req, res) => {
   const { description, amount, branchId } = req.body;
   if (!description || amount === undefined || amount === '') return res.status(400).json({ error: 'Description and amount required' });
-  try { const r = await expenses_.insertOne({ description, amount: parseFloat(amount) || 0, createdBy: req.user.name, branchId: branchId || req.user.branchId || null, createdAt: new Date() }); res.json({ success: true, expenseId: r.insertedId }); }
-  catch { res.status(500).json({ error: 'Failed to add expense' }); }
+  try { const r = await expenses_.insertOne({ description, amount: parseFloat(amount) || 0, createdBy: req.user.name, branchId: branchId || req.user.branchId || null, createdAt: new Date() }); res.json({ success: true, expenseId: r.insertedId });} catch (e) { console.error('Failed to add expense:', e); res.status(500).json({ error: 'Failed to add expense' }); }
 });
-app.get('/api/admin/expenses', authenticate, async (req, res) => { try { const filter = branchFilter(req); res.json(await expenses_.find(filter).sort({ createdAt: -1 }).toArray()); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.delete('/api/admin/expenses/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await expenses_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.get('/api/admin/expenses', authenticate, async (req, res) => { try { const filter = branchFilter(req); res.json(await expenses_.find(filter).sort({ createdAt: -1 }).toArray()); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
+app.delete('/api/admin/expenses/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await expenses_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
 
 // ===== CREDIT =====
 app.post('/api/admin/credit', authenticate, async (req, res) => {
@@ -639,9 +692,9 @@ app.post('/api/admin/credit', authenticate, async (req, res) => {
   try { const r = await credit_.insertOne({ customerName, phone: (phone || '').trim(), amount: parseFloat(amount) || 0, note: note || '', paid: false, branchId: branchId || req.user.branchId || null, createdAt: new Date(), paidAt: null }); res.json({ success: true, creditId: r.insertedId }); }
   catch { res.status(500).json({ error: 'Failed' }); }
 });
-app.get('/api/admin/credit', authenticate, async (req, res) => { try { const filter = branchFilter(req); res.json(await credit_.find(filter).sort({ createdAt: -1 }).toArray()); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.put('/api/admin/credit/:id/pay', authenticate, async (req, res) => { try { const r = await credit_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { paid: true, paidAt: new Date() } }); if (!r.matchedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.delete('/api/admin/credit/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await credit_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.get('/api/admin/credit', authenticate, async (req, res) => { try { const filter = branchFilter(req); res.json(await credit_.find(filter).sort({ createdAt: -1 }).toArray()); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
+app.put('/api/admin/credit/:id/pay', authenticate, async (req, res) => { try { const r = await credit_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { paid: true, paidAt: new Date() } }); if (!r.matchedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
+app.delete('/api/admin/credit/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await credit_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
 
 // ===== REVIEWS =====
 app.post('/api/reviews', async (req, res) => {
@@ -654,8 +707,8 @@ app.get('/api/reviews/summary', async (req, res) => {
   try { const all = await reviews_.find().toArray(); const count = all.length; const avg = count ? all.reduce((s, r) => s + (r.rating || 0), 0) / count : 0; res.json({ count, average: Math.round(avg * 10) / 10 }); }
   catch { res.status(500).json({ error: 'Failed' }); }
 });
-app.get('/api/admin/reviews', authenticate, async (req, res) => { try { res.json(await reviews_.find().sort({ createdAt: -1 }).toArray()); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.delete('/api/admin/reviews/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await reviews_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.get('/api/admin/reviews', authenticate, async (req, res) => { try { res.json(await reviews_.find().sort({ createdAt: -1 }).toArray()); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
+app.delete('/api/admin/reviews/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await reviews_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
 
 // ===== STAFF =====
 app.post('/api/admin/staff', authenticate, authorize('owner', 'manager'), async (req, res) => {
@@ -664,8 +717,8 @@ app.post('/api/admin/staff', authenticate, authorize('owner', 'manager'), async 
   try { const r = await staff_.insertOne({ name: name.trim(), role: role || 'Cashier', branchId: branchId || req.user.branchId || null, createdAt: new Date() }); res.json({ success: true, staffId: r.insertedId }); }
   catch { res.status(500).json({ error: 'Failed' }); }
 });
-app.get('/api/admin/staff', authenticate, async (req, res) => { try { const filter = branchFilter(req); res.json(await staff_.find(filter).sort({ createdAt: 1 }).toArray()); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.delete('/api/admin/staff/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await staff_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.get('/api/admin/staff', authenticate, async (req, res) => { try { const filter = branchFilter(req); res.json(await staff_.find(filter).sort({ createdAt: 1 }).toArray()); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
+app.delete('/api/admin/staff/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await staff_.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
 
 // ===== SUMMARY =====
 app.get('/api/admin/summary', authenticate, async (req, res) => {
@@ -835,7 +888,7 @@ app.get('/api/admin/export', authenticate, async (req, res) => {
       expenses_.find().toArray(), credit_.find().toArray(), reviews_.find().toArray(), staff_.find().toArray(),
     ]);
     res.json({ shop: 'Brilliant / Blitz Mall', exportedAt: new Date(), products, orders, sales, expenses, credit, reviews, staff });
-  } catch { res.status(500).json({ error: 'Failed to export' }); }
+  } catch (e) { console.error('Failed to export:', e); res.status(500).json({ error: 'Failed to export' }); }
 });
 
 // ===== LOYALTY & REWARDS =====
@@ -868,14 +921,14 @@ app.get('/api/admin/loyalty/:phone', authenticate, async (req, res) => {
     const entry = await loyalty_.findOne({ phone: req.params.phone });
     if (!entry) return res.json({ exists: false, message: 'No loyalty record found' });
     res.json({ exists: true, phone: entry.phone, customerName: entry.customerName, totalSpent: entry.totalSpent, points: entry.points, tier: entry.tier });
-  } catch { res.status(500).json({ error: 'Failed to lookup loyalty' }); }
+  } catch (e) { console.error('Failed to lookup loyalty:', e); res.status(500).json({ error: 'Failed to lookup loyalty' }); }
 });
 
 app.put('/api/admin/loyalty/:phone', authenticate, async (req, res) => {
   try {
     const r = await loyalty_.updateOne({ phone: req.params.phone }, { $set: { customerName: req.body.customerName || '' } });
     res.json({ success: true });
-  } catch { res.status(500).json({ error: 'Failed to update' }); }
+  } catch (e) { console.error('Failed to update:', e); res.status(500).json({ error: 'Failed to update' }); }
 });
 
 app.get('/api/admin/loyalty', authenticate, async (req, res) => {
@@ -893,7 +946,7 @@ app.post('/api/admin/loyalty/redeem', authenticate, async (req, res) => {
     const cashback = Math.round(points * 5);
     await loyalty_.updateOne({ phone }, { $inc: { points: -points }, $set: { updatedAt: new Date() } });
     res.json({ success: true, cashback, message: `${cashback} KES cashback applied!` });
-  } catch { res.status(500).json({ error: 'Failed to redeem' }); }
+  } catch (e) { console.error('Failed to redeem:', e); res.status(500).json({ error: 'Failed to redeem' }); }
 });
 
 app.post('/api/admin/loyalty/add-points', async (req, res) => {
@@ -933,11 +986,11 @@ app.post('/api/admin/coupons', authenticate, authorize('owner', 'manager'), asyn
       maxUses: parseInt(maxUses, 10) || 0, usedCount: 0, active: true, createdAt: new Date(),
     });
     res.json({ success: true, couponId: r.insertedId });
-  } catch { res.status(500).json({ error: 'Failed to create coupon' }); }
+  } catch (e) { console.error('Failed to create coupon:', e); res.status(500).json({ error: 'Failed to create coupon' }); }
 });
-app.get('/api/admin/coupons', authenticate, async (req, res) => { try { res.json(await coupons_.find().sort({ createdAt: -1 }).toArray()); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.put('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await coupons_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { active: req.body.active } }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
-app.delete('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await coupons_.deleteOne({ _id: new ObjectId(req.params.id) }); res.json({ success: true }); } catch { res.status(500).json({ error: 'Failed' }); } });
+app.get('/api/admin/coupons', authenticate, async (req, res) => { try { res.json(await coupons_.find().sort({ createdAt: -1 }).toArray()); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
+app.put('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await coupons_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { active: req.body.active } }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
+app.delete('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await coupons_.deleteOne({ _id: new ObjectId(req.params.id) }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
 app.post('/api/coupons/validate', async (req, res) => {
   const { code, total } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
@@ -954,7 +1007,7 @@ app.post('/api/coupons/validate', async (req, res) => {
     let discount = coupon.type === 'percent' ? (total * coupon.value / 100) : coupon.value;
     discount = Math.min(discount, total);
     res.json({ valid: true, code: coupon.code, type: coupon.type, value: coupon.value, discount: Math.round(discount * 100) / 100, campaignId: coupon._id });
-  } catch { res.status(500).json({ error: 'Failed to validate' }); }
+  } catch (e) { console.error('Failed to validate coupon:', e); res.status(500).json({ error: 'Failed to validate' }); }
 });
 
 // ===== M-PESA STK PUSH =====
@@ -964,15 +1017,47 @@ const MPESA_CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY || '';
 const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET || '';
 const MPESA_SHORTCODE = process.env.MPESA_SHORTCODE || '';
 const MPESA_PASSKEY = process.env.MPESA_PASSKEY || '';
-const MPESA_CALLBACK_URL = process.env.CALLBACK_URL || 'https://your-deployed-url.com/api/mpesa/callback'; // ⚠️ SET CALLBACK_URL env var!
+const getMpesaCallbackUrl = () => process.env.CALLBACK_URL || 'https://your-deployed-url.com/api/mpesa/callback'; // ⚠️ SET CALLBACK_URL env var!
+const { spawnSync } = require('child_process');
+
+// Helper: make Safaricom API calls via curl to bypass Incapsula WAF
+function safaricomCurl(url, options = {}) {
+  const curlCmd = process.platform === 'win32' ? 'curl.exe' : 'curl';
+  const args = ['-s', '-S', '--max-time', '4'];
+  if (options.method === 'POST') args.push('-X', 'POST');
+  if (options.headers) {
+    for (const [k, v] of Object.entries(options.headers)) {
+      args.push('-H', `${k}: ${v}`);
+    }
+  }
+  if (options.body) args.push('-d', options.body);
+  args.push(url);
+  const result = spawnSync(curlCmd, args, { encoding: 'utf8', timeout: 5000 });
+  if (result.error) throw new Error(`curl failed: ${result.error.message}`);
+  if (result.status !== 0) throw new Error(`curl exited with code ${result.status}: ${result.stderr}`);
+  return JSON.parse(result.stdout);
+}
+
+// Token cache (valid for ~55 minutes out of 60)
+let _mpesaTokenCache = { token: null, expiresAt: 0 };
 
 async function getMpesaToken() {
+  if (_mpesaTokenCache.token && Date.now() < _mpesaTokenCache.expiresAt) {
+    return _mpesaTokenCache.token;
+  }
   const auth = Buffer.from(`${MPESA_CONSUMER_KEY}:${MPESA_CONSUMER_SECRET}`).toString('base64');
-  const res = await fetch(`${MPESA_BASE}/oauth/v1/generate?grant_type=client_credentials`, {
-    headers: { Authorization: `Basic ${auth}` }
-  });
-  const data = await res.json();
-  return data.access_token;
+  try {
+    const data = safaricomCurl(`${MPESA_BASE}/oauth/v1/generate?grant_type=client_credentials`, {
+      headers: { 'Authorization': `Basic ${auth}` }
+    });
+    if (!data.access_token) {
+      throw new Error(data.errorMessage || 'No access_token in response');
+    }
+    _mpesaTokenCache = { token: data.access_token, expiresAt: Date.now() + 55 * 60 * 1000 };
+    return data.access_token;
+  } catch (e) {
+    throw new Error(`M-Pesa token request failed: ${e.message}`);
+  }
 }
 
 function mpesaTimestamp() {
@@ -1018,35 +1103,109 @@ app.post('/api/mpesa/stk-push', async (req, res) => {
       }
     }
 
-    const token = await getMpesaToken();
-    const timestamp = mpesaTimestamp();
-    const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
-    const formattedPhone = formatPhone(phone);
-    const body = {
-      BusinessShortCode: MPESA_SHORTCODE, Password: password, Timestamp: timestamp,
-      TransactionType: 'CustomerPayBillOnline', Amount: Math.ceil(parseFloat(amount)),
-      PartyA: formattedPhone, PartyB: MPESA_SHORTCODE, PhoneNumber: formattedPhone,
-      CallBackURL: MPESA_CALLBACK_URL, AccountReference: 'Brilliant', TransactionDesc: 'Payment for goods',
-    };
-    const mpesaRes = await fetch(`${MPESA_BASE}/mpesa/stkpush/v1/processrequest`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const mpesaData = await mpesaRes.json();
-    if (mpesaData.ResponseCode === '0') {
+    let isMock = false;
+    
+    // Mock simulation is ONLY active if explicitly enabled via env var
+    if (process.env.MPESA_MOCK_ENABLED === 'true') {
+      isMock = true;
+    }
+
+    let token;
+    if (!isMock) {
+      try {
+        // If credentials are placeholders and mock is NOT enabled, do not even try. Fail immediately.
+        if (!MPESA_CONSUMER_KEY || MPESA_CONSUMER_KEY.startsWith('your_') || 
+            !MPESA_CONSUMER_SECRET || MPESA_CONSUMER_SECRET.startsWith('your_') ||
+            !MPESA_SHORTCODE || MPESA_SHORTCODE.startsWith('your_')) {
+          return res.status(400).json({ success: false, error: 'M-Pesa API credentials are not configured.' });
+        }
+        token = await getMpesaToken();
+        if (!token) {
+          return res.status(500).json({ success: false, error: 'Failed to retrieve M-Pesa token from Safaricom.' });
+        }
+      } catch (err) {
+        console.error('M-Pesa authentication failed:', err.message);
+        return res.status(500).json({ success: false, error: 'M-Pesa authentication failed: ' + err.message });
+      }
+    }
+
+    if (!isMock) {
+      try {
+        const timestamp = mpesaTimestamp();
+        const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
+        const formattedPhone = formatPhone(phone);
+        const body = {
+          BusinessShortCode: MPESA_SHORTCODE, Password: password, Timestamp: timestamp,
+          TransactionType: 'CustomerPayBillOnline', Amount: Math.ceil(parseFloat(amount)),
+          PartyA: formattedPhone, PartyB: MPESA_SHORTCODE, PhoneNumber: formattedPhone,
+          CallBackURL: getMpesaCallbackUrl(), AccountReference: 'Brilliant', TransactionDesc: 'Payment for goods',
+        };
+        const mpesaData = safaricomCurl(`${MPESA_BASE}/mpesa/stkpush/v1/processrequest`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (mpesaData.ResponseCode === '0') {
+          if (db_) {
+            await db_.collection('mpesa_requests').insertOne({
+              checkoutRequestId: mpesaData.CheckoutRequestID, merchantRequestId: mpesaData.MerchantRequestID,
+              phone: formattedPhone, amount: body.Amount, orderId: orderId || null, saleId: saleId || null,
+              status: 'pending', createdAt: new Date(),
+            });
+          }
+          return res.json({ success: true, checkoutRequestId: mpesaData.CheckoutRequestID, message: 'M-Pesa prompt sent! Ask customer to enter PIN.' });
+        } else {
+          return res.status(400).json({ success: false, error: mpesaData.errorMessage || mpesaData.ResultDesc || 'M-Pesa request rejected by Safaricom.' });
+        }
+      } catch (err) {
+        console.error('M-Pesa STK Push request failed:', err.message);
+        return res.status(500).json({ success: false, error: 'M-Pesa STK Push request failed: ' + err.message });
+      }
+    }
+
+    if (isMock) {
+      const mockCheckoutId = 'MOCK-' + Math.random().toString(36).substr(2, 9).toUpperCase();
+      const formattedPhone = formatPhone(phone);
+      const mockAmount = Math.ceil(parseFloat(amount));
       if (db_) {
         await db_.collection('mpesa_requests').insertOne({
-          checkoutRequestId: mpesaData.CheckoutRequestID, merchantRequestId: mpesaData.MerchantRequestID,
-          phone: formattedPhone, amount: body.Amount, orderId: orderId || null, saleId: saleId || null,
-          status: 'pending', createdAt: new Date(),
+          checkoutRequestId: mockCheckoutId,
+          merchantRequestId: 'MOCK-REQ-' + Math.random().toString(36).substr(2, 9).toUpperCase(),
+          phone: formattedPhone,
+          amount: mockAmount,
+          orderId: orderId || null,
+          saleId: saleId || null,
+          status: 'pending',
+          createdAt: new Date(),
         });
       }
-      res.json({ success: true, checkoutRequestId: mpesaData.CheckoutRequestID, message: 'M-Pesa prompt sent! Ask customer to enter PIN.' });
-    } else {
-      res.status(400).json({ success: false, error: mpesaData.errorMessage || mpesaData.ResultDesc || 'M-Pesa request failed' });
+      
+      // Automatically confirm the payment after 3 seconds
+      setTimeout(async () => {
+        try {
+          if (db_) {
+            const status = 'confirmed';
+            await db_.collection('mpesa_requests').updateOne(
+              { checkoutRequestId: mockCheckoutId },
+              { $set: { status, resultCode: 0, resultDesc: 'The service request is processed successfully.', completedAt: new Date() } }
+            );
+            if (orderId && ObjectId.isValid(orderId)) {
+              await orders_.updateOne({ _id: new ObjectId(orderId) }, { $set: { paymentStatus: 'paid', paymentMethod: 'mpesa' } });
+            }
+            console.log('✅ Mock M-Pesa payment confirmed:', mockCheckoutId);
+          }
+        } catch (e) {
+          console.error('Error in mock callback simulation:', e);
+        }
+      }, 3000);
+
+      res.json({ 
+        success: true, 
+        checkoutRequestId: mockCheckoutId, 
+        message: 'M-Pesa simulation initiated! Confirming in 3 seconds...' 
+      });
     }
-  } catch (err) { console.error('STK Push error:', err); res.status(500).json({ error: 'Failed to initiate M-Pesa payment' }); }
+  } catch (err) { console.error('STK Push error:', err); res.status(500).json({ error: 'Failed to initiate M-Pesa payment', details: err.message }); }
 });
 
 // Customer cancel order endpoint
@@ -1205,8 +1364,56 @@ app.get('/api/mpesa/status/:checkoutRequestId', async (req, res) => {
   try {
     const req_ = await db_.collection('mpesa_requests').findOne({ checkoutRequestId: req.params.checkoutRequestId });
     if (!req_) return res.status(404).json({ error: 'Not found' });
+    
+    // Auto-query Safaricom if still pending (bypasses localtunnel callback issues)
+    if (req_.status === 'pending' && process.env.MPESA_MOCK_ENABLED !== 'true') {
+      try {
+        const token = await getMpesaToken();
+        const timestamp = mpesaTimestamp();
+        const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
+        const data = safaricomCurl(`${MPESA_BASE}/mpesa/stkpushquery/v1/query`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ BusinessShortCode: MPESA_SHORTCODE, Password: password, Timestamp: timestamp, CheckoutRequestID: req.params.checkoutRequestId }),
+        });
+        
+        // ResultCode is present when transaction is finished (can be string or number)
+        if (data.ResultCode !== undefined) {
+          const rc = String(data.ResultCode);
+          const desc = data.ResultDesc || '';
+          
+          // "Still processing" means Safaricom hasn't finalized — keep polling
+          if (desc.toLowerCase().includes('still') && desc.toLowerCase().includes('process')) {
+            console.log('⏳ Still processing, will keep polling...');
+            return res.json({ status: 'pending', resultDesc: '' });
+          }
+          
+          const status = rc === '0' ? 'confirmed' : 'failed';
+          const resultDesc = rc === '0' 
+            ? '✅ Transaction Complete — Payment Received!' 
+            : rc === '1032' ? '❌ Payment Cancelled by Customer'
+            : rc === '1' ? '❌ Insufficient M-Pesa Balance'
+            : rc === '2001' ? '❌ Wrong PIN Entered'
+            : rc === '1037' ? '⏱️ Payment Timed Out — Customer took too long'
+            : `❌ Payment Declined (Code: ${rc})`;
+          
+          await db_.collection('mpesa_requests').updateOne(
+            { checkoutRequestId: req.params.checkoutRequestId }, 
+            { $set: { status, resultCode: data.ResultCode, resultDesc, completedAt: new Date() } }
+          );
+          if (status === 'confirmed' && req_.orderId && ObjectId.isValid(req_.orderId)) {
+            await orders_.updateOne({ _id: new ObjectId(req_.orderId) }, { $set: { paymentStatus: 'paid', paymentMethod: 'mpesa' } });
+          }
+          console.log(status === 'confirmed' ? '✅ Payment confirmed via query' : `❌ Payment failed: ${resultDesc}`);
+          return res.json({ status, resultDesc });
+        }
+      } catch (e) {
+        console.error('Auto-query Safaricom error:', e.message);
+      }
+    }
+    
     res.json({ status: req_.status, resultDesc: req_.resultDesc || '' });
-  } catch { res.status(500).json({ error: 'Failed' }); }
+  } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); }
 });
 
 app.post('/api/mpesa/query', async (req, res) => {
@@ -1215,12 +1422,11 @@ app.post('/api/mpesa/query', async (req, res) => {
     const token = await getMpesaToken();
     const timestamp = mpesaTimestamp();
     const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
-    const mpesaRes = await fetch(`${MPESA_BASE}/mpesa/stkpushquery/v1/query`, {
+    const data = safaricomCurl(`${MPESA_BASE}/mpesa/stkpushquery/v1/query`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ BusinessShortCode: MPESA_SHORTCODE, Password: password, Timestamp: timestamp, CheckoutRequestID: checkoutRequestId }),
     });
-    const data = await mpesaRes.json();
     res.json(data);
   } catch (err) { res.status(500).json({ error: 'Failed to query status' }); }
 });
@@ -1354,7 +1560,8 @@ app.get('/api/admin/audit-logs', authenticate, async (req, res) => {
     const filter = branchFilter(req);
     const logs = await audit_logs_.find(filter).sort({ timestamp: -1 }).limit(100).toArray();
     res.json(logs);
-  } catch {
+  } catch (e) {
+    console.error('Failed to fetch audit logs:', e);
     res.status(500).json({ error: 'Failed to fetch audit logs' });
   }
 });
@@ -1378,7 +1585,8 @@ app.post('/api/admin/shifts/start', authenticate, async (req, res) => {
     const r = await shifts_.insertOne(shift);
     await logAction(req.user.userId, req.user.username, 'SHIFT_START', `Started shift with KES ${startingCash}`, req.user.branchId);
     res.json({ success: true, shiftId: r.insertedId });
-  } catch {
+  } catch (e) {
+    console.error('Failed to start shift:', e);
     res.status(500).json({ error: 'Failed to start shift' });
   }
 });
@@ -1460,7 +1668,8 @@ app.get('/api/admin/shifts/active', authenticate, async (req, res) => {
   try {
     const active = await shifts_.findOne({ cashierId: req.user.userId, status: 'open' });
     res.json({ active: !!active, shift: active });
-  } catch {
+  } catch (e) {
+    console.error('Failed to check active shift:', e);
     res.status(500).json({ error: 'Failed to check active shift' });
   }
 });
@@ -1471,7 +1680,8 @@ app.get('/api/admin/shifts', authenticate, async (req, res) => {
     const filter = branchFilter(req);
     const list = await shifts_.find(filter).sort({ startTime: -1 }).limit(100).toArray();
     res.json(list);
-  } catch {
+  } catch (e) {
+    console.error('Failed to fetch shifts:', e);
     res.status(500).json({ error: 'Failed to fetch shifts' });
   }
 });
@@ -1480,7 +1690,8 @@ app.get('/api/admin/shifts', authenticate, async (req, res) => {
 app.get('/api/admin/pricing-rules', authenticate, async (req, res) => {
   try {
     res.json(await pricing_rules_.find().toArray());
-  } catch {
+  } catch (e) {
+    console.error('Failed to fetch rules:', e);
     res.status(500).json({ error: 'Failed to fetch rules' });
   }
 });
@@ -1503,7 +1714,8 @@ app.post('/api/admin/pricing-rules', authenticate, authorize('owner'), async (re
     await pricing_rules_.insertOne(rule);
     await logAction(req.user.userId, req.user.username, 'CREATE_PRICING_RULE', `Created rule ${name} (${type})`, req.user.branchId);
     res.json({ success: true });
-  } catch {
+  } catch (e) {
+    console.error('Failed to save rule:', e);
     res.status(500).json({ error: 'Failed to save rule' });
   }
 });
@@ -1518,7 +1730,8 @@ app.put('/api/admin/pricing-rules/:id', authenticate, authorize('owner'), async 
     await pricing_rules_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: update });
     await logAction(req.user.userId, req.user.username, 'UPDATE_PRICING_RULE', `Updated rule ${req.params.id}`, req.user.branchId);
     res.json({ success: true });
-  } catch {
+  } catch (e) {
+    console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -1529,7 +1742,8 @@ app.delete('/api/admin/pricing-rules/:id', authenticate, authorize('owner'), asy
     await pricing_rules_.deleteOne({ _id: new ObjectId(req.params.id) });
     await logAction(req.user.userId, req.user.username, 'DELETE_PRICING_RULE', `Deleted rule ${req.params.id}`, req.user.branchId);
     res.json({ success: true });
-  } catch {
+  } catch (e) {
+    console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -1539,7 +1753,8 @@ app.get('/api/admin/transfers', authenticate, async (req, res) => {
   try {
     const list = await stock_transfers_.find().sort({ createdAt: -1 }).toArray();
     res.json(list);
-  } catch {
+  } catch (e) {
+    console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -1562,7 +1777,8 @@ app.post('/api/admin/transfers', authenticate, authorize('owner'), async (req, r
     await stock_transfers_.insertOne(transfer);
     await logAction(req.user.userId, req.user.username, 'TRANSFER_CREATE', `Created transfer from ${fromBranchId} to ${toBranchId}`, req.user.branchId);
     res.json({ success: true });
-  } catch {
+  } catch (e) {
+    console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -1606,7 +1822,8 @@ app.get('/api/loyalty/rewards', async (req, res) => {
   try {
     const rewards = await loyalty_rewards_.find({ active: true }).toArray();
     res.json(rewards);
-  } catch {
+  } catch (e) {
+    console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -1662,7 +1879,8 @@ app.get('/api/customer/baskets/:customerId', async (req, res) => {
   try {
     const list = await saved_baskets_.find({ customerId: req.params.customerId }).toArray();
     res.json(list);
-  } catch {
+  } catch (e) {
+    console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -1680,7 +1898,8 @@ app.post('/api/customer/baskets', async (req, res) => {
       createdAt: new Date()
     });
     res.json({ success: true });
-  } catch {
+  } catch (e) {
+    console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -1689,7 +1908,8 @@ app.delete('/api/customer/baskets/:id', async (req, res) => {
   try {
     await saved_baskets_.deleteOne({ _id: new ObjectId(req.params.id) });
     res.json({ success: true });
-  } catch {
+  } catch (e) {
+    console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -1706,7 +1926,8 @@ app.post('/api/admin/receipt-delivery/log', authenticate, async (req, res) => {
       req.user.branchId
     );
     res.json({ success: true });
-  } catch {
+  } catch (e) {
+    console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -1829,7 +2050,9 @@ async function generateAiResponse(intent, text, context) {
       if (customerId) {
         try {
           await reviews_.insertOne({ customerId, customerName: 'Customer', rating: 1, message: `[AI Complaint] ${message}`, createdAt: new Date() });
-        } catch {}
+        } catch (e) {
+          console.error('Failed to log AI complaint:', e);
+        }
       }
       return `📝 I'm sorry to hear about this issue. Your complaint has been noted and logged.\n\nTo help us resolve it faster:\n• Which order is affected?\n• What specifically went wrong?\n\nOur team will look into this. You can also use **Profile → Rate us** for formal feedback.`;
     }
@@ -1856,7 +2079,9 @@ async function generateAiResponse(intent, text, context) {
             return `• \`${c.code}\` — ${disc}${min}`;
           }).join('\n');
         }
-      } catch {}
+      } catch (e) {
+        console.error('Failed to fetch active coupons:', e);
+      }
       return `🏷️ **Active Deals:**\n\n${couponInfo || '• Use code \`BLITZ10\` for 10% off orders over KES 1,000!'}\n\n🎡 Try the **Spin the Wheel** on the home screen for exclusive coupons!`;
     }
     case 'product_search': {

@@ -2,3 +2,7 @@ node_modules
 .env
 shop-frontend/node_modules
 local_db_fallback.json
+scratch/
+shop-frontend/admin_diff.txt
+shop-frontend/app_diff.txt
+shop-frontend/fix_time.js
