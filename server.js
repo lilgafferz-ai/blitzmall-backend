@@ -1016,6 +1016,9 @@ const MPESA_BASE = MPESA_ENV === 'sandbox' ? 'https://sandbox.safaricom.co.ke' :
 const MPESA_CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY || '';
 const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET || '';
 const MPESA_SHORTCODE = process.env.MPESA_SHORTCODE || '';
+const MPESA_PASSKEY = process.env.MPESA_PASSKEY || '';
+const getMpesaCallbackUrl = () => process.env.CALLBACK_URL || 'https://your-deployed-url.com/api/mpesa/callback'; // ⚠️ SET CALLBACK_URL env var!
+
 async function safaricomRequest(url, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
