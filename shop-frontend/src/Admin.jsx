@@ -32,6 +32,7 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
   const [searching, setSearching] = React.useState(false);
   const [foundImages, setFoundImages] = React.useState([]);
   const [selectedImages, setSelectedImages] = React.useState([]);
+  const autoSearchRef = useRef(null);
 
   React.useEffect(() => {
     setForm(initialForm || BLANK);
@@ -64,10 +65,10 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
     onSubmit({ ...form, image: imageToSave });
   };
 
-  const findPhotos = async () => {
+  const findPhotos = async (silent = false) => {
     const name = form.name.trim();
     const barcode = form.barcode.trim();
-    if (!name && !barcode) { alert('Enter a product name or barcode first'); return; }
+    if (!name && !barcode) { if (!silent) alert('Enter a product name or barcode first'); return; }
     setSearching(true);
     setFoundImages([]);
     try {
@@ -81,12 +82,12 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
         setFoundImages(data.images);
         setSelectedImages(data.images); // auto-select all found
         setForm(s => ({ ...s, image: data.images }));
-      } else {
+      } else if (!silent) {
         alert('No images found online. AI images will be generated on save.');
       }
     } catch (e) {
       console.error('Image search failed:', e);
-      alert('Failed to search for images. The product will get AI-generated images on save.');
+      if (!silent) alert('Failed to search for images. The product will get AI-generated images on save.');
     } finally {
       setSearching(false);
     }
@@ -105,6 +106,25 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
       setForm(s => ({ ...s, image: selectedImages }));
     }
   }, [selectedImages]);
+
+  // Auto-search for product photos when name or barcode changes (debounced)
+  React.useEffect(() => {
+    if (autoSearchRef.current) clearTimeout(autoSearchRef.current);
+    const name = form.name.trim();
+    const barcode = form.barcode.trim();
+    if (!name && !barcode) {
+      setFoundImages([]);
+      return;
+    }
+    // Only auto-search if name is long enough or barcode is present
+    if (name.length < 2 && !barcode) return;
+    autoSearchRef.current = setTimeout(() => {
+      findPhotos(true);
+    }, 700);
+    return () => {
+      if (autoSearchRef.current) clearTimeout(autoSearchRef.current);
+    };
+  }, [form.name, form.barcode]);
 
   const isImageUrl = (v) => typeof v === 'string' && (v.startsWith('http') || v.startsWith('data:'));
 
