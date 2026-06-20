@@ -717,7 +717,7 @@ function App() {
     try {
       const r = await fetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone }) });
       const d = await r.json();
-      if (d.success) {
+      if (r.ok && d.success) {
         const isReturning = !!d.returning;
         const cust = { customerId: d.customerId, name, phone };
         setCustomer(cust);
@@ -726,8 +726,13 @@ function App() {
         setName(''); setPhone('');
         setWelcomeMsg({ name, returning: isReturning });
         setScreen('welcome');
+      } else {
+        alert(d.error || 'Login failed. Please check your details or try again later.');
       }
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error(e);
+      alert('Network error. Please check your connection and try again.');
+    }
   };
 
   const handleLogout = () => {

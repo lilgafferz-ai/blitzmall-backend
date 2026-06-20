@@ -27,6 +27,242 @@ const money = (n) => 'KES ' + (Math.round((n || 0) * 100) / 100).toLocaleString(
 const stars = (n) => '★'.repeat(Math.max(0,n)) + '☆'.repeat(Math.max(0,5-n));
 const fmt = (d) => d ? new Date(d).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) : '';
 
+const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCategoriesModal, onSubmit, onNext }) => {
+  const [form, setForm] = React.useState(initialForm || BLANK);
+  const [searching, setSearching] = React.useState(false);
+  const [foundImages, setFoundImages] = React.useState([]);
+  const [selectedImages, setSelectedImages] = React.useState([]);
+
+  React.useEffect(() => {
+    setForm(initialForm || BLANK);
+    setFoundImages([]);
+    // If editing and product already has image URLs, pre-populate selectedImages
+    if (initialForm && initialForm.image) {
+      const imgs = Array.isArray(initialForm.image) ? initialForm.image : (typeof initialForm.image === 'string' && (initialForm.image.startsWith('http') || initialForm.image.startsWith('data:')) ? [initialForm.image] : []);
+      setSelectedImages(imgs);
+    } else {
+      setSelectedImages([]);
+    }
+  }, [initialForm]);
+
+  const onImage = (e) => { 
+    const f = e.target.files[0]; 
+    if (!f) return; 
+    const rd = new FileReader(); 
+    rd.onloadend = () => {
+      const dataUrl = rd.result;
+      setForm(s => ({ ...s, image: dataUrl }));
+      setSelectedImages([dataUrl]);
+    }; 
+    rd.readAsDataURL(f); 
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    // Use selected images if any, otherwise pass current form image
+    const imageToSave = selectedImages.length > 0 ? selectedImages : form.image;
+    onSubmit({ ...form, image: imageToSave });
+  };
+
+  const findPhotos = async () => {
+    const name = form.name.trim();
+    const barcode = form.barcode.trim();
+    if (!name && !barcode) { alert('Enter a product name or barcode first'); return; }
+    setSearching(true);
+    setFoundImages([]);
+    try {
+      const res = await fetch(`${API_URL}/products/search-images`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, barcode })
+      });
+      const data = await res.json();
+      if (data.images && data.images.length > 0) {
+        setFoundImages(data.images);
+        setSelectedImages(data.images); // auto-select all found
+        setForm(s => ({ ...s, image: data.images }));
+      } else {
+        alert('No images found online. AI images will be generated on save.');
+      }
+    } catch (e) {
+      console.error('Image search failed:', e);
+      alert('Failed to search for images. The product will get AI-generated images on save.');
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const toggleImage = (url) => {
+    setSelectedImages(prev => {
+      const exists = prev.includes(url);
+      return exists ? prev.filter(u => u !== url) : [...prev, url];
+    });
+  };
+
+  // When selectedImages changes, sync to form.image
+  React.useEffect(() => {
+    if (selectedImages.length > 0) {
+      setForm(s => ({ ...s, image: selectedImages }));
+    }
+  }, [selectedImages]);
+
+  const isImageUrl = (v) => typeof v === 'string' && (v.startsWith('http') || v.startsWith('data:'));
+
+  return (
+    <form className="blitz-admin-form" onSubmit={handleSubmit}>
+      <h3>{editingId ? "Edit item" : "Add new stock"}</h3>
+      <div className="blitz-admin-grid">
+        <label htmlFor="add-stock-name">Product name *<input id="add-stock-name" name="name" value={form.name} onChange={e => setForm(s=>({...s,name:e.target.value}))} placeholder="e.g. Cooking Oil 1L" required /></label>
+        <div style={{display:'flex', flexDirection:'column', gap:'4px'}}>
+          <label htmlFor="add-stock-category" style={{margin:0}}>Category *</label>
+          <div style={{display:'flex', gap:'8px', alignItems:'center'}}>
+            <input 
+              id="add-stock-category"
+              name="category"
+              list="category-options"
+              value={form.category} 
+              onChange={e => setForm(s=>({...s,category:e.target.value}))} 
+              placeholder="e.g. Cooking, Drinks"
+              required 
+              style={{
+                flex: 1,
+                background: 'var(--bg-2)', 
+                border: '1px solid var(--line)', 
+                borderRadius: '10px', 
+                padding: '12px 14px', 
+                color: 'var(--text)', 
+                fontSize: '1rem', 
+                fontFamily: 'inherit'
+              }}
+            />
+            <button type="button" onClick={(e) => { e.preventDefault(); setShowCategoriesModal(true); }} style={{background:'var(--orange)', border:'none', color:'#fff', cursor:'pointer', fontSize:'1.2rem', padding:'0', width:'46px', height:'46px', borderRadius:'10px', display:'flex', alignItems:'center', justifyContent:'center'}} title="Add new category">+</button>
+          </div>
+          <datalist id="category-options">
+            {categories.map(c => (
+              <option key={c._id || c.name} value={c.name} />
+            ))}
+          </datalist>
+        </div>
+        <label htmlFor="add-stock-barcode">Barcode<input id="add-stock-barcode" name="barcode" value={form.barcode} onChange={e => setForm(s=>({...s,barcode:e.target.value}))} placeholder="Scan or type" /></label>
+        <label htmlFor="add-stock-qty">Qty in stock<input id="add-stock-qty" name="stock" type="number" value={form.stock} onChange={e => setForm(s=>({...s,stock:e.target.value}))} placeholder="e.g. 50" /></label>
+        <label htmlFor="add-stock-buy">Buying price (KES)<input id="add-stock-buy" name="buyingPrice" type="number" step="0.01" value={form.buyingPrice} onChange={e => setForm(s=>({...s,buyingPrice:e.target.value}))} placeholder="What you paid" /></label>
+        <label htmlFor="add-stock-sell">Selling price (KES) *<input id="add-stock-sell" name="price" type="number" step="0.01" value={form.price} onChange={e => setForm(s=>({...s,price:e.target.value}))} placeholder="What customer pays" required /></label>
+        <label htmlFor="add-stock-exp">Expiry date (if any)<input id="add-stock-exp" name="expiryDate" type="date" value={form.expiryDate} onChange={e => setForm(s=>({...s,expiryDate:e.target.value}))} /></label>
+      </div>
+      {form.buyingPrice !== "" && form.price !== "" && <div className="blitz-admin-margin">Profit per item: <b>{money(parseFloat(form.price)-parseFloat(form.buyingPrice))}</b></div>}
+      <label className="blitz-admin-full" htmlFor="add-stock-desc">Description<textarea id="add-stock-desc" name="description" value={form.description} onChange={e => setForm(s=>({...s,description:e.target.value}))} placeholder="Optional notes for customers" /></label>
+      
+      {/* ONLINE IMAGE FINDER */}
+      <div className="blitz-admin-full" style={{marginBottom:10}}>
+        <label style={{display:'flex', alignItems:'center', gap:8, marginBottom:8, fontWeight:600, fontSize:'.88rem'}}>
+          Product Photos
+          <span style={{fontWeight:400,fontSize:'.72rem',color:'var(--muted)'}}>(Auto-found or upload)</span>
+        </label>
+        <div style={{display:'flex', gap:8}}>
+          <button type="button" className="blitz-admin-btn small" onClick={findPhotos} disabled={searching || (!form.name && !form.barcode)} 
+            style={{
+              background: 'var(--orange)',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 8,
+              padding: '8px 14px',
+              fontSize: '.82rem',
+              cursor: searching ? 'wait' : 'pointer',
+              fontFamily: 'inherit',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6
+            }}>
+            {searching ? '⏳ Searching...' : '🔍 Find Photos Online'}
+          </button>
+          <label className="blitz-admin-btn small" style={{
+            background: 'var(--bg-2)',
+            border: '1px solid var(--line)',
+            borderRadius: 8,
+            padding: '8px 14px',
+            fontSize: '.82rem',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            color: 'var(--text)'
+          }}>
+            📁 Upload
+            <input type="file" accept="image/*" onChange={onImage} style={{display:'none'}} />
+          </label>
+          {selectedImages.length > 0 && (
+            <button type="button" className="blitz-admin-btn small" onClick={() => { setSelectedImages([]); setFoundImages([]); setForm(s => ({ ...s, image: null })); }} 
+              style={{
+                background: 'transparent',
+                border: '1px solid var(--red)',
+                color: 'var(--red)',
+                borderRadius: 8,
+                padding: '8px 14px',
+                fontSize: '.82rem',
+                cursor: 'pointer',
+                fontFamily: 'inherit'
+              }}>✕ Clear</button>
+          )}
+        </div>
+      </div>
+
+      {/* Show found/selected images */}
+      {(() => {
+        // Determine which images to display: foundImages (from search), selectedImages, or form.image (editing)
+        const displayImages = foundImages.length > 0 ? foundImages : (selectedImages.length > 0 ? selectedImages : (form.image ? (Array.isArray(form.image) ? form.image : (isImageUrl(form.image) ? [form.image] : [])) : []));
+        if (displayImages.length === 0) return null;
+        return (
+          <div className="blitz-admin-full" style={{display:'flex', gap:10, flexWrap:'wrap', marginBottom:10}}>
+            {displayImages.map((url, i) => (
+              <div key={i} 
+                onClick={() => foundImages.length > 0 ? toggleImage(url) : null}
+                style={{
+                  width: 100,
+                  height: 100,
+                  borderRadius: 10,
+                  overflow: 'hidden',
+                  cursor: foundImages.length > 0 ? 'pointer' : 'default',
+                  border: selectedImages.includes(url) ? '3px solid var(--green)' : '3px solid var(--line)',
+                  opacity: foundImages.length > 0 && !selectedImages.includes(url) ? 0.5 : 1,
+                  transition: 'all 0.15s',
+                  position: 'relative',
+                  background: 'var(--bg-2)'
+                }}
+                title={selectedImages.includes(url) ? 'Selected — tap to remove' : 'Tap to select'}>
+                <img src={url} alt={`Product ${i + 1}`} style={{width:'100%',height:'100%',objectFit:'cover'}} 
+                  onError={(e) => { e.target.style.display='none'; }} />
+                {selectedImages.includes(url) && (
+                  <span style={{position:'absolute',top:2,right:2,background:'var(--green)',color:'#000',borderRadius:'50%',width:18,height:18,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:'bold'}}>✓</span>
+                )}
+                <span style={{position:'absolute',bottom:2,left:2,background:'rgba(0,0,0,0.6)',color:'#fff',fontSize:10,padding:'1px 5px',borderRadius:4}}>
+                  {['Front','Back','Side'][i] || `#${i+1}`}
+                </span>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {selectedImages.length > 0 && (
+        <div className="blitz-admin-margin" style={{fontSize:'.78rem',color:'var(--green)',marginBottom:10}}>
+          ✅ {selectedImages.length} photo{selectedImages.length > 1 ? 's' : ''} selected. Tap any to remove.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 10 }}>
+        <button className="blitz-admin-btn" type="submit" style={{ flex: 1 }}>{editingId ? "Save changes" : "Add to inventory"}</button>
+        {!editingId && (
+          <button className="blitz-admin-btn" type="button" onClick={() => {
+            const imageToSave = selectedImages.length > 0 ? selectedImages : form.image;
+            onNext({ ...form, image: imageToSave });
+          }} style={{ flex: 1, background: 'var(--orange)' }}>Next (Add & Keep Open)</button>
+        )}
+      </div>
+    </form>
+  );
+});
+
 function Admin() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [user, setUser] = useState(null); // { name, role, username }
@@ -946,16 +1182,17 @@ const loadStockTransfers = async () => {
 
   const onImage = (e) => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onloadend = () => setForm(s => ({ ...s, image: rd.result })); rd.readAsDataURL(f); };
   const resetForm = () => { setForm(BLANK); setEditingId(null); setShowForm(false); };
-  const submitProduct = async (e) => {
-    e.preventDefault();
-    if (!form.name || form.price === '') { alert('Name and selling price required'); return; }
+  const submitProduct = async (formData) => {
+    if (formData && formData.preventDefault) { formData.preventDefault(); return; }
+    const currentForm = formData && formData.name !== undefined ? formData : form;
+    if (!currentForm.name || currentForm.price === '') { alert('Name and selling price required'); return; }
     try {
-      const payload = { ...form, branchId: activeBranchId || undefined };
+      const payload = { ...currentForm, branchId: activeBranchId || undefined };
       const url = editingId ? API_URL + '/admin/products/' + editingId : API_URL + '/admin/products';
       const opts = editingId ? authPut(url, payload) : authPost(url, payload);
       const r = await opts;
       if ((await r.json()).success) { 
-        const catName = form.category?.trim();
+        const catName = currentForm.category?.trim();
         if (catName && !categories.some(c => c.name.toLowerCase() === catName.toLowerCase())) {
           try {
             const res2 = await authPost(API_URL + '/admin/categories', { name: catName });
@@ -975,27 +1212,40 @@ const loadStockTransfers = async () => {
       }
     } catch (e) { console.error(e); }
   };
-  const submitProductAndNext = async (e) => {
-    if (e) e.preventDefault();
-    if (!form.name || form.price === '') { alert('Name and selling price required'); return; }
+  const submitProductAndNext = async (formData) => {
+    if (formData && formData.preventDefault) { formData.preventDefault(); return; }
+    const currentForm = formData && formData.name !== undefined ? formData : form;
+    if (!currentForm.name || !currentForm.price) { alert("Name and selling price are required."); return; }
+    
+    setSaving(true);
     try {
-      const payload = { ...form, branchId: activeBranchId || undefined };
-      const url = API_URL + '/admin/products';
-      const r = await authPost(url, payload);
-      if ((await r.json()).success) {
-        const catName = form.category?.trim();
-        if (catName && !categories.some(c => c.name.toLowerCase() === catName.toLowerCase())) {
-          try {
-            await authPost(API_URL + '/admin/categories', { name: catName });
-            loadCategories();
-          } catch (err) {}
-        }
-        const prevCat = form.category;
-        setForm({ ...BLANK, category: prevCat });
-        loadProducts();
+      let cat = currentForm.category || "Uncategorized";
+      const match = categories.find(c => c.name.toLowerCase() === cat.toLowerCase());
+      if (!match) {
+        await authPost(API_URL + '/admin/categories', { name: cat });
+        loadCategories();
+      } else {
+        cat = match.name;
       }
-    } catch (e) { console.error(e); }
+
+      const payload = { ...currentForm, category: cat };
+      const r = await authPost(API_URL + '/admin/products', payload);
+      if ((await r.json()).success) { 
+        loadProducts(); 
+        const prevCat = currentForm.category;
+        setForm({ ...BLANK, category: prevCat });
+      }
+    } catch (e) { console.error(e); } finally { setSaving(false); }
   };
+
+  const submitRef = useRef(submitProduct);
+  submitRef.current = submitProduct;
+  const nextRef = useRef(submitProductAndNext);
+  nextRef.current = submitProductAndNext;
+
+  const handleFormSubmit = useCallback((data) => submitRef.current(data), []);
+  const handleFormNext = useCallback((data) => nextRef.current(data), []);
+
   const editProduct = (p) => { setForm({ name: p.name||'', category: p.category||'', barcode: p.barcode||'', buyingPrice: p.buyingPrice??'', price: p.price??'', stock: p.stock??'', description: p.description||'', image: p.image||null, expiryDate: p.expiryDate ? new Date(p.expiryDate).toISOString().slice(0,10) : '' }); setEditingId(p._id); setShowForm(true); window.scrollTo(0,0); };
   const delProduct = async (id) => { if (!window.confirm('Delete this item?')) return; try { const r = await authDelete(API_URL + '/admin/products/' + id); if ((await r.json()).success) loadProducts(); } catch (e) { console.error(e); } };
   const updateOrder = async (id, payload) => { try { const r = await authPut(API_URL + '/admin/orders/' + id, payload); if ((await r.json()).success) loadOrders(); } catch (e) { console.error(e); } };
@@ -1651,100 +1901,61 @@ ${div}
         <div className="blitz-admin-body">
           <div className="blitz-admin-row-between"><h2>Inventory</h2><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="blitz-admin-btn small" onClick={exportInventoryExcel}>📊 Excel</button><button className="blitz-admin-btn small" onClick={() => setShowCategoriesModal(true)}>📂 Manage Categories</button><button className="blitz-admin-btn small" onClick={() => { showForm ? resetForm() : setShowForm(true); }}>{showForm ? "✕ Cancel" : "➕ Add stock"}</button></div></div>
           {showForm && (
-            <form className="blitz-admin-form" onSubmit={submitProduct}>
-              <h3>{editingId ? "Edit item" : "Add new stock"}</h3>
-              <div className="blitz-admin-grid">
-                <label>Product name *<input value={form.name} onChange={e => setForm(s=>({...s,name:e.target.value}))} placeholder="e.g. Cooking Oil 1L" required /></label>
-                <div style={{display:'flex', flexDirection:'column', gap:'4px'}}>
-                  <label style={{margin:0}}>Category *</label>
-                  <div style={{display:'flex', gap:'8px', alignItems:'center'}}>
-                    <input 
-                      list="category-options"
-                      value={form.category} 
-                      onChange={e => setForm(s=>({...s,category:e.target.value}))} 
-                      placeholder="e.g. Cooking, Drinks"
-                      required 
-                      style={{
-                        flex: 1,
-                        background: 'var(--bg-2)', 
-                        border: '1px solid var(--line)', 
-                        borderRadius: '10px', 
-                        padding: '12px 14px', 
-                        color: 'var(--text)', 
-                        fontSize: '1rem', 
-                        fontFamily: 'inherit'
-                      }}
-                    />
-                    <button type="button" onClick={(e) => { e.preventDefault(); setShowCategoriesModal(true); }} style={{background:'var(--orange)', border:'none', color:'#fff', cursor:'pointer', fontSize:'1.2rem', padding:'0', width:'46px', height:'46px', borderRadius:'10px', display:'flex', alignItems:'center', justifyContent:'center'}} title="Add new category">+</button>
-                  </div>
-                  <datalist id="category-options">
-                    {categories.map(c => (
-                      <option key={c._id || c.name} value={c.name} />
-                    ))}
-                  </datalist>
-                </div>
-                <label>Barcode<input value={form.barcode} onChange={e => setForm(s=>({...s,barcode:e.target.value}))} placeholder="Scan or type" /></label>
-                <label>Qty in stock<input type="number" value={form.stock} onChange={e => setForm(s=>({...s,stock:e.target.value}))} placeholder="e.g. 50" /></label>
-                <label>Buying price (KES)<input type="number" step="0.01" value={form.buyingPrice} onChange={e => setForm(s=>({...s,buyingPrice:e.target.value}))} placeholder="What you paid" /></label>
-                <label>Selling price (KES) *<input type="number" step="0.01" value={form.price} onChange={e => setForm(s=>({...s,price:e.target.value}))} placeholder="What customer pays" required /></label>
-                <label>Expiry date (if any)<input type="date" value={form.expiryDate} onChange={e => setForm(s=>({...s,expiryDate:e.target.value}))} /></label>
-              </div>
-              {form.buyingPrice !== "" && form.price !== "" && <div className="blitz-admin-margin">Profit per item: <b>{money(parseFloat(form.price)-parseFloat(form.buyingPrice))}</b></div>}
-              <label className="blitz-admin-full">Description<textarea value={form.description} onChange={e => setForm(s=>({...s,description:e.target.value}))} placeholder="Optional notes for customers" /></label>
-              <label className="blitz-admin-full">Image<input type="file" accept="image/*" onChange={onImage} /></label>
-              {form.image && <div className="blitz-admin-preview"><img src={form.image} alt="preview" /></div>}
-              <div style={{ display: 'flex', gap: 10 }}>
-                <button className="blitz-admin-btn" type="submit" style={{ flex: 1 }}>{editingId ? "Save changes" : "Add to inventory"}</button>
-                {!editingId && (
-                  <button className="blitz-admin-btn" type="button" onClick={submitProductAndNext} style={{ flex: 1, background: 'var(--orange)' }}>Next (Add & Keep Open)</button>
-                )}
-              </div>
-            </form>
+            <AddStockForm 
+              initialForm={form}
+              editingId={editingId}
+              categories={categories}
+              setShowCategoriesModal={setShowCategoriesModal}
+              onSubmit={handleFormSubmit}
+              onNext={handleFormNext}
+            />
           )}
           <div className="blitz-admin-search"><span>🔍</span><input placeholder="Search name, barcode or category…" value={search} onChange={e => setSearch(e.target.value)} /></div>
-          {filtered.length === 0 ? <p className="blitz-admin-empty">No items yet.</p> : (
-            <div className="blitz-admin-list">{filtered.map(p => {
-              const margin = (p.price||0)-(p.buyingPrice||0);
-              return (
-                <div className="blitz-admin-item" key={p._id}>
-                  <div className="blitz-admin-thumb">{p.image ? (Array.isArray(p.image) ? <img src={p.image[0]} alt={p.name} loading="lazy"/> : <img src={p.image} alt={p.name} loading="lazy"/>) : "🛍️"}</div>
-                  <div className="blitz-admin-item-main">
-                    <div className="blitz-admin-item-top">
-                      <b>{p.name}</b>
-                      {stockTag(p.stock)}
-                      {expiryTag(p.expiryDate)}
-                      {p.isFlashSale && (
-                        <span className="flash-sale-badge" style={{
-                          background: 'rgba(255,122,26,0.15)',
-                          color: 'var(--orange)',
-                          border: '1px solid var(--orange)',
-                          borderRadius: '6px',
-                          fontSize: '0.68rem',
-                          padding: '2px 6px',
-                          fontWeight: 'bold',
-                          marginLeft: '6px'
-                        }}>
-                          ⚡ SALE -{p.flashSaleDiscount}%
-                        </span>
-                      )}
+          {React.useMemo(() => (
+            filtered.length === 0 ? <p className="blitz-admin-empty">No items yet.</p> : (
+              <div className="blitz-admin-list">{filtered.map(p => {
+                const margin = (p.price||0)-(p.buyingPrice||0);
+                return (
+                  <div className="blitz-admin-item" key={p._id}>
+                    <div className="blitz-admin-thumb">{p.image ? (Array.isArray(p.image) ? <img src={p.image[0]} alt={p.name} loading="lazy"/> : <img src={p.image} alt={p.name} loading="lazy"/>) : "🛍️"}</div>
+                    <div className="blitz-admin-item-main">
+                      <div className="blitz-admin-item-top">
+                        <b>{p.name}</b>
+                        {stockTag(p.stock)}
+                        {expiryTag(p.expiryDate)}
+                        {p.isFlashSale && (
+                          <span className="flash-sale-badge" style={{
+                            background: 'rgba(255,122,26,0.15)',
+                            color: 'var(--orange)',
+                            border: '1px solid var(--orange)',
+                            borderRadius: '6px',
+                            fontSize: '0.68rem',
+                            padding: '2px 6px',
+                            fontWeight: 'bold',
+                            marginLeft: '6px'
+                          }}>
+                            ⚡ SALE -{p.flashSaleDiscount}%
+                          </span>
+                        )}
+                      </div>
+                      <div className="blitz-admin-item-sub"><span className="blitz-admin-cat">{p.category||"Other"}</span>{p.barcode && <span className="blitz-admin-bc">#{p.barcode}</span>}</div>
+                      <div className="blitz-admin-item-prices"><span>Buy {money(p.buyingPrice||0)}</span><span>Sell {money(p.price||0)}</span><span className={margin>=0?"profit":"loss"}>Margin {money(margin)}</span></div>
                     </div>
-                    <div className="blitz-admin-item-sub"><span className="blitz-admin-cat">{p.category||"Other"}</span>{p.barcode && <span className="blitz-admin-bc">#{p.barcode}</span>}</div>
-                    <div className="blitz-admin-item-prices"><span>Buy {money(p.buyingPrice||0)}</span><span>Sell {money(p.price||0)}</span><span className={margin>=0?"profit":"loss"}>Margin {money(margin)}</span></div>
+                    <div className="blitz-admin-item-actions">
+                      <button onClick={() => {
+                        setFlashSaleProduct(p);
+                        setFlashSaleDiscountInput(p.flashSaleDiscount ? String(p.flashSaleDiscount) : '30');
+                        setFlashSaleDurationInput('24');
+                        setShowFlashSaleModal(true);
+                      }} title="Configure Flash Sale">⚡</button>
+                      <button onClick={() => editProduct(p)}>✏️</button>
+                      <button onClick={() => delProduct(p._id)}>🗑️</button>
+                    </div>
                   </div>
-                  <div className="blitz-admin-item-actions">
-                    <button onClick={() => {
-                      setFlashSaleProduct(p);
-                      setFlashSaleDiscountInput(p.flashSaleDiscount ? String(p.flashSaleDiscount) : '30');
-                      setFlashSaleDurationInput('24');
-                      setShowFlashSaleModal(true);
-                    }} title="Configure Flash Sale">⚡</button>
-                    <button onClick={() => editProduct(p)}>✏️</button>
-                    <button onClick={() => delProduct(p._id)}>🗑️</button>
-                  </div>
-                </div>
-              );
-            })}</div>
-          )}
+                );
+              })}</div>
+            )
+          ), [filtered])}
 
           {/* PRICING RULES */}
           <div style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:'16px',marginTop:20,marginBottom:16}}>

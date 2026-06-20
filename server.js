@@ -11,6 +11,7 @@ const NodeCache = require('node-cache');
 const productCache = new NodeCache({ stdTTL: 300 }); // Cache products for 5 minutes
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(helmet());
 app.use(mongoSanitize());
 
@@ -19,6 +20,7 @@ const globalLimiter = rateLimit({
   max: 200, // Limit each IP to 200 requests per window
   standardHeaders: true,
   legacyHeaders: false,
+  message: { error: 'Too many requests from this IP, please try again later.' }
 });
 app.use(globalLimiter);
 
@@ -27,6 +29,7 @@ const authLimiter = rateLimit({
   max: 20, // Strict limit for auth routes
   standardHeaders: true,
   legacyHeaders: false,
+  message: { error: 'Too many login attempts, please try again later.' }
 });
 
 app.use(cors());
@@ -538,36 +541,135 @@ app.delete('/api/admin/branches/:id', authenticate, authorize('owner'), async (r
   catch { res.status(500).json({ error: 'Failed' }); }
 });
 
-// AI Image Generation Helper
-async function autoFetchProductImage(name, barcode) {
+// ---- Online image search via DuckDuckGo (real product photos, no API key needed) ----
+async function searchDuckDuckGoImages(query, maxResults = 10) {
+  const results = [];
+  try {
+    // Step 1: Get vqd token from DuckDuckGo's image search page
+    const htmlRes = await fetch(`https://duckduckgo.com/?q=${encodeURIComponent(query)}&iax=images&ia=images`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+    });
+    const html = await htmlRes.text();
+    const vqdMatch = html.match(/vqd=([\w-]+)/);
+    if (!vqdMatch) return results;
+    const vqd = vqdMatch[1];
+
+    // Step 2: Fetch image results using the vqd token
+    const imgRes = await fetch(`https://duckduckgo.com/i.js?q=${encodeURIComponent(query)}&vqd=${vqd}&o=json&f=,,,&p=1`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+    });
+    const data = await imgRes.json();
+
+    if (data.results && Array.isArray(data.results)) {
+      for (const r of data.results) {
+        if (r.image) results.push(r.image);
+        if (results.length >= maxResults) break;
+      }
+    }
+  } catch (e) {
+    console.error('DuckDuckGo image search failed:', e.message);
+  }
+  return results;
+}
+
+// ---- Shared image search pipeline: OpenFoodFacts → DuckDuckGo → AI fallback ----
+// Returns up to 3 image URLs. Used by both the API endpoint and autoFetchProductImage.
+const AI_VIEWS = [
+  'front view, facing straight ahead',
+  'back view, showing the rear of the product',
+  'side/angle view, showing depth and packaging',
+];
+
+async function searchProductImages(name, barcode) {
   let images = [];
+
+  // 1. Try barcode via OpenFoodFacts (real product photos)
   if (barcode && barcode.trim()) {
     try {
-      // Try OpenFoodFacts API for barcode
-      const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${barcode.trim()}.json`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.status === 1 && data.product) {
-          if (data.product.image_url) images.push(data.product.image_url);
-          if (data.product.image_front_url && data.product.image_front_url !== data.product.image_url) images.push(data.product.image_front_url);
-          if (data.product.image_ingredients_url) images.push(data.product.image_ingredients_url);
-          if (data.product.image_nutrition_url) images.push(data.product.image_nutrition_url);
+      const offRes = await fetch(`https://world.openfoodfacts.org/api/v0/product/${barcode.trim()}.json`, {
+        headers: { 'User-Agent': 'BlitzMall/1.0 (contact@blitzmall.com)' }
+      });
+      if (offRes.ok) {
+        const offData = await offRes.json();
+        if (offData.status === 1 && offData.product) {
+          if (offData.product.image_url) images.push(offData.product.image_url);
+          if (offData.product.image_front_url && offData.product.image_front_url !== offData.product.image_url) images.push(offData.product.image_front_url);
+          if (offData.product.image_ingredients_url) images.push(offData.product.image_ingredients_url);
+          if (offData.product.image_nutrition_url) images.push(offData.product.image_nutrition_url);
         }
       }
     } catch (e) {
-      console.error('Barcode API failed, falling back to AI:', e);
+      console.error('OpenFoodFacts lookup failed:', e.message);
     }
   }
-  
-  // Ensure we have at least 3 images, fallback to Pollinations AI
-  let seed = 1;
-  while (images.length < 3) {
-    const prompt = encodeURIComponent(`Product photography of ${name}, centered, isolated on a pure white background, high resolution, studio lighting, highly detailed`);
-    images.push(`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true&seed=${seed++}`);
+
+  // 2. Search DuckDuckGo for real product photos by name
+  if (images.length < 3 && name) {
+    const searchQueries = [
+      `${name} product photo front view`,
+      `${name} product`,
+      name
+    ];
+    for (const q of searchQueries) {
+      if (images.length >= 3) break;
+      const imgs = await searchDuckDuckGoImages(q, 5);
+      for (const url of imgs) {
+        if (!images.includes(url) && !url.includes('data:')) {
+          images.push(url);
+          if (images.length >= 3) break;
+        }
+      }
+    }
   }
-  
-  // Return exactly 3 images
+
+  // 3. Fallback to AI-generated images
+  while (images.length < 3) {
+    const idx = images.length;
+    const view = AI_VIEWS[idx] || `product view angle ${idx + 1}`;
+    const prompt = encodeURIComponent(
+      `Product photo of ${name || 'product'}, ${view}, isolated on pure white background, cut out, no background, transparent background style, professional e-commerce product photography, high resolution, studio lighting, sharp focus, detailed, realistic`
+    );
+    images.push(`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true&seed=${idx + 1}`);
+  }
+
   return images.slice(0, 3);
+}
+
+// ---- Rate limiter for public image search endpoint ----
+const searchImagesLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // 30 searches per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many image searches. Please wait a moment.', images: [] }
+});
+
+// ---- Public endpoint: search product images online by barcode or name ----
+app.post('/api/products/search-images', searchImagesLimiter, async (req, res) => {
+  const { name, barcode } = req.body;
+  if (!name && !barcode) return res.status(400).json({ error: 'Product name or barcode required', images: [] });
+
+  try {
+    const images = await searchProductImages(name, barcode);
+    res.json({ images });
+  } catch (e) {
+    console.error('Image search failed:', e.message);
+    // Always return AI fallback on error
+    const prompt = encodeURIComponent(`Product photo of ${name || 'product'}, product photography, white background, professional`);
+    res.json({ images: [`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true`] });
+  }
+});
+
+// ---- Auto-fetch images when adding a product (used internally) ----
+async function autoFetchProductImage(name, barcode) {
+  try {
+    return await searchProductImages(name, barcode);
+  } catch (e) {
+    console.error('autoFetchProductImage failed:', e.message);
+    // Always return SOMETHING — AI fallback even if everything breaks
+    const prompt = encodeURIComponent(`Product photo of ${name || 'product'}, isolated on pure white background, professional e-commerce`);
+    return [`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true`];
+  }
 }
 
 // ===== PRODUCTS =====
