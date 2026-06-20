@@ -7,5 +7,20 @@ services:
     envVars:
       - key: MONGODB_URI
         sync: false
+      # All secrets are set in the Render dashboard (Environment tab), never committed here.
       - key: JWT_SECRET
-        value: blitzmall_jwt_secret_2024
+        sync: false
+      - key: MPESA_ENV
+        sync: false
+      - key: MPESA_CONSUMER_KEY
+        sync: false
+      - key: MPESA_CONSUMER_SECRET
+        sync: false
+      - key: MPESA_SHORTCODE
+        sync: false
+      - key: MPESA_PASSKEY
+        sync: false
+      - key: MPESA_MOCK_ENABLED
+        sync: false
+      - key: CALLBACK_URL
+        sync: false

@@ -1,0 +1,35 @@
+# ===== Secrets — NEVER commit =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ===== Dependencies =====
+node_modules/
+shop-frontend/node_modules/
+.pnp
+.pnp.js
+
+# ===== Local data / runtime =====
+local_db_fallback.json
+
+# ===== Scratch / throwaway debugging scripts (contain hardcoded creds) =====
+scratch/
+shop-frontend/admin_diff.txt
+shop-frontend/app_diff.txt
+shop-frontend/fix_time.js
+
+# ===== Build outputs =====
+/build
+shop-frontend/build/
+/dist
+shop-frontend/dist/
+/coverage
+
+# ===== Misc =====
+.DS_Store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.local

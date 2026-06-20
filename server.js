@@ -263,6 +263,19 @@ async function connectDb() {
   app.listen(PORT, () => {
     console.log(`🚀 Shop backend running on http://localhost:${PORT}`);
     console.log(`📦 Database initialization complete`);
+
+    // Pre-warm the M-Pesa OAuth token so the FIRST payment doesn't pay an extra
+    // ~1-2s for the token round-trip, then refresh every 50 min (cache lasts 55)
+    // so a live sale never hits a cold token.
+    const mpesaConfigured = MPESA_CONSUMER_KEY && !MPESA_CONSUMER_KEY.startsWith('your_') &&
+                            MPESA_CONSUMER_SECRET && !MPESA_CONSUMER_SECRET.startsWith('your_');
+    if (mpesaConfigured && process.env.MPESA_MOCK_ENABLED !== 'true') {
+      const warm = () => getMpesaToken()
+        .then(() => console.log('🔥 M-Pesa token pre-warmed'))
+        .catch(e => console.warn('M-Pesa token pre-warm failed:', e.message));
+      warm();
+      setInterval(warm, 50 * 60 * 1000);
+    }
   });
 }
 
@@ -1090,7 +1103,7 @@ function formatPhone(phone) {
 }
 
 app.post('/api/mpesa/stk-push', async (req, res) => {
-  const { phone, amount, orderId, saleId } = req.body;
+  const { phone, amount, orderId, saleId, saleDraft } = req.body;
   if (!phone || !amount) return res.status(400).json({ error: 'Phone and amount required' });
   try {
     // Double payment protection
@@ -1205,6 +1218,7 @@ app.post('/api/mpesa/stk-push', async (req, res) => {
             await db_.collection('mpesa_requests').insertOne({
               checkoutRequestId: mpesaData.CheckoutRequestID, merchantRequestId: mpesaData.MerchantRequestID,
               phone: formattedPhone, amount: body.Amount, orderId: orderId || null, saleId: saleId || null,
+              saleDraft: saleDraft || null, saleCreated: false,
               status: 'pending', createdAt: new Date(),
             });
           }
@@ -1230,6 +1244,8 @@ app.post('/api/mpesa/stk-push', async (req, res) => {
           amount: mockAmount,
           orderId: orderId || null,
           saleId: saleId || null,
+          saleDraft: saleDraft || null,
+          saleCreated: false,
           status: 'pending',
           createdAt: new Date(),
         });
@@ -1247,6 +1263,7 @@ app.post('/api/mpesa/stk-push', async (req, res) => {
             if (orderId && ObjectId.isValid(orderId)) {
               await orders_.updateOne({ _id: new ObjectId(orderId) }, { $set: { paymentStatus: 'paid', paymentMethod: 'mpesa' } });
             }
+            await finalizePosSale(mockCheckoutId);
             console.log('✅ Mock M-Pesa payment confirmed:', mockCheckoutId);
           }
         } catch (e) {
@@ -1390,6 +1407,62 @@ app.post('/api/admin/products/:productId/flash-sale', authenticate, async (req, 
   }
 });
 
+// ---------------------------------------------------------------------------
+// Idempotently record a POS sale from a stored M-Pesa draft once payment is
+// confirmed. Safe to call from every confirm point (callback, status query,
+// mock) — the atomic `saleCreated` flag guarantees the sale is written AT MOST
+// ONCE, even if the cashier's browser disconnects between PIN entry and the
+// sale being saved. This is what stops "money taken, no sale recorded".
+// ---------------------------------------------------------------------------
+async function finalizePosSale(checkoutRequestId) {
+  if (!db_) return;
+  let claimed;
+  try {
+    // Atomic claim: only the FIRST caller flips saleCreated false->true and
+    // gets the document back. Any later/racing caller matches nothing -> null.
+    claimed = await db_.collection('mpesa_requests').findOneAndUpdate(
+      { checkoutRequestId, status: 'confirmed', 'saleDraft.items.0': { $exists: true }, saleCreated: { $ne: true } },
+      { $set: { saleCreated: true } }
+    );
+  } catch (e) { console.error('finalizePosSale claim error:', e.message); return; }
+
+  // mongodb driver v6+ returns the matched doc directly; older returns {value}.
+  const reqDoc = claimed && claimed.value !== undefined ? claimed.value : claimed;
+  if (!reqDoc || !reqDoc.saleDraft || !Array.isArray(reqDoc.saleDraft.items) || !reqDoc.saleDraft.items.length) return;
+
+  const draft = reqDoc.saleDraft;
+  try {
+    const items = draft.items;
+    const total = items.reduce((s, i) => s + i.price * i.qty, 0);
+    const profit = items.reduce((s, i) => s + (i.price - (i.buyingPrice || 0)) * i.qty, 0);
+    const sale = {
+      items, total, profit,
+      paymentMethod: 'mpesa', amountGiven: 0, cashPart: 0, mpesaPart: total, change: 0,
+      staff: draft.staff || 'Owner',
+      cashierUserId: draft.cashierUserId || null,
+      customerPhone: draft.customerPhone || reqDoc.phone || '',
+      channel: 'pos',
+      branchId: draft.branchId || null,
+      createdAt: new Date(),
+      mpesaCheckoutId: checkoutRequestId,
+    };
+    const result = await sales_.insertOne(sale);
+    for (const it of items) {
+      if (it.productId && ObjectId.isValid(it.productId)) {
+        await products_.updateOne({ _id: new ObjectId(it.productId) }, { $inc: { stock: -Math.abs(it.qty) } });
+      }
+    }
+    await db_.collection('mpesa_requests').updateOne({ checkoutRequestId }, { $set: { saleId: result.insertedId } });
+    if (sale.customerPhone) earnPoints(sale.customerPhone, total);
+    console.log('🧾 POS SALE auto-recorded from M-Pesa:', checkoutRequestId, '| KES', total, '| by', sale.staff);
+  } catch (e) {
+    console.error('finalizePosSale create error:', e.message);
+    // Creation failed after claiming — release the flag so another confirm
+    // point (or the next status poll) can retry instead of losing the sale.
+    try { await db_.collection('mpesa_requests').updateOne({ checkoutRequestId }, { $set: { saleCreated: false } }); } catch (_) {}
+  }
+}
+
 app.post('/api/mpesa/callback', async (req, res) => {
   try {
     const callback = req.body.Body?.stkCallback;
@@ -1408,6 +1481,7 @@ app.post('/api/mpesa/callback', async (req, res) => {
         if (status === 'confirmed' && req_.orderId && ObjectId.isValid(req_.orderId)) {
           await orders_.updateOne({ _id: new ObjectId(req_.orderId) }, { $set: { paymentStatus: 'paid', paymentMethod: 'mpesa' } });
         }
+        if (status === 'confirmed') { await finalizePosSale(checkoutRequestId); }
         console.log(status === 'confirmed' ? '✅ Payment confirmed' : '❌ Payment failed/cancelled');
       }
     }
@@ -1459,6 +1533,7 @@ app.get('/api/mpesa/status/:checkoutRequestId', async (req, res) => {
           if (status === 'confirmed' && req_.orderId && ObjectId.isValid(req_.orderId)) {
             await orders_.updateOne({ _id: new ObjectId(req_.orderId) }, { $set: { paymentStatus: 'paid', paymentMethod: 'mpesa' } });
           }
+          if (status === 'confirmed') { await finalizePosSale(req.params.checkoutRequestId); }
           console.log(status === 'confirmed' ? '✅ Payment confirmed via query' : `❌ Payment failed: ${resultDesc}`);
           return res.json({ status, resultDesc });
         }

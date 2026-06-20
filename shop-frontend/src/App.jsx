@@ -388,7 +388,7 @@ function App() {
     };
     const interval = setInterval(poll, 2000);
     poll();
-    const timeout = setTimeout(() => { if (!stopped) { stopped = true; clearInterval(interval); setStkStatus('failed'); setStkError('⏱️ Timed out waiting for payment. Try again.'); } }, 60000);
+    const timeout = setTimeout(() => { if (!stopped) { stopped = true; clearInterval(interval); setStkStatus('failed'); setStkError('⏱️ Timed out waiting for payment. Try again.'); } }, 120000);
     return () => { stopped = true; clearInterval(interval); clearTimeout(timeout); };
   }, [stkCheckoutId, stkStatus]);
 
@@ -942,7 +942,7 @@ function App() {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                phone: customer.customerId,
+                phone: customer.phone || customer.customerId,
                 amount: finalTotal,
                 orderId: d.orderId
               })
@@ -952,11 +952,11 @@ function App() {
               setStkCheckoutId(stkData.checkoutRequestId);
             } else {
               setStkStatus('failed');
-              alert(stkData.error || 'Failed to initiate M-Pesa STK push');
+              setStkError(stkData.error || 'Failed to initiate M-Pesa STK push');
             }
           } catch (e) {
             setStkStatus('failed');
-            alert('Failed to connect to M-Pesa service.');
+            setStkError('Failed to connect to M-Pesa service.');
           }
         } else {
           setCart([]);
@@ -1367,11 +1367,21 @@ function App() {
                 <div className={`ai-message ${msg.sender}`} key={i}>
                   <div className="ai-message-bubble">
                     {msg.text.split('\n').map((line, idx) => {
-                      // Format **bold** text and bullet points
-                      const formattedLine = line
-                        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-                        .replace(/^• /gm, '<span class="ai-bullet">•</span> ');
-                      return <p key={idx} style={{ margin: '4px 0' }} dangerouslySetInnerHTML={{ __html: formattedLine }} />;
+                      // Safely render **bold** segments and leading bullets as React
+                      // nodes instead of injecting raw HTML (prevents XSS).
+                      const isBullet = line.startsWith('• ');
+                      const content = isBullet ? line.slice(2) : line;
+                      const parts = content.split(/(\*\*.+?\*\*)/g).filter(Boolean);
+                      return (
+                        <p key={idx} style={{ margin: '4px 0' }}>
+                          {isBullet && <span className="ai-bullet">• </span>}
+                          {parts.map((part, j) =>
+                            part.startsWith('**') && part.endsWith('**')
+                              ? <strong key={j}>{part.slice(2, -2)}</strong>
+                              : <React.Fragment key={j}>{part}</React.Fragment>
+                          )}
+                        </p>
+                      );
                     })}
                   </div>
                 </div>
@@ -1645,7 +1655,7 @@ function App() {
               <div className="spinner" style={{ margin: '0 auto 20px auto', width: '50px', height: '50px', borderRadius: '50%', border: '4px solid rgba(255,255,255,0.1)', borderTopColor: 'var(--gold)', animation: 'spin 1s linear infinite' }}></div>
               <h3 style={{ fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)' }}>Waiting for Payment</h3>
               <p className="muted" style={{ fontSize: '0.9rem', margin: '12px 0' }}>
-                We have sent an M-Pesa STK push prompt to your phone number <b>{customer?.customerId}</b>.<br />
+                We have sent an M-Pesa STK push prompt to your phone number <b>{customer?.phone || customer?.customerId}</b>.<br />
                 Please enter your M-Pesa PIN to authorize the payment of <b>KES {finalTotal}</b>.
               </p>
               <small style={{ color: 'var(--muted)', display: 'block', marginBottom: '20px' }}>
@@ -1653,6 +1663,20 @@ function App() {
               </small>
               <button className="btn-ghost" onClick={() => setStkStatus('idle')}>
                 Cancel & Pay Later / Cash
+              </button>
+            </div>
+          </div>
+        )}
+        {stkStatus === 'failed' && (
+          <div className="futuristic-modal-overlay" style={{ zIndex: 9999 }}>
+            <div className="futuristic-modal-card" style={{ textAlign: 'center', padding: '30px' }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>❌</div>
+              <h3 style={{ fontFamily: 'Unbounded, sans-serif', color: 'var(--orange, #ff7a1a)' }}>Payment Failed</h3>
+              <p className="muted" style={{ fontSize: '0.9rem', margin: '12px 0' }}>
+                {stkError || 'The M-Pesa payment could not be completed. Please try again.'}
+              </p>
+              <button className="btn-ghost" onClick={() => { setStkStatus('idle'); setStkError(''); }}>
+                Try again
               </button>
             </div>
           </div>

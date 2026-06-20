@@ -732,7 +732,7 @@ const loadStockTransfers = async () => {
           stopped = true;
           setStkStatus('confirmed');
           setStkError('');
-          completeSaleRecord();
+          finishMpesaSale();
         } else if (d.status === 'failed') {
           stopped = true;
           setStkStatus('failed');
@@ -744,7 +744,7 @@ const loadStockTransfers = async () => {
     const interval = setInterval(poll, 2000);
     poll(); // also poll immediately
     // Timeout after 60 seconds
-    const timeout = setTimeout(() => { if (!stopped) { stopped = true; clearInterval(interval); setStkStatus('failed'); setStkError('⏱️ Timed out waiting for payment response. Try again.'); } }, 60000);
+    const timeout = setTimeout(() => { if (!stopped) { stopped = true; clearInterval(interval); setStkStatus('failed'); setStkError('⏱️ Timed out waiting for payment response. Try again.'); } }, 120000);
     return () => { stopped = true; clearInterval(interval); clearTimeout(timeout); };
   }, [stkCheckoutId, stkStatus]);
 
@@ -849,6 +849,20 @@ const loadStockTransfers = async () => {
       setSaleCart([]); setAmountGiven(''); setCashPart(''); setMpesaPart(''); setCustPhone('');
       window._pendingSaleCart = null;
     }
+  };
+
+  // M-Pesa sale: the backend now records the sale automatically the moment
+  // payment is confirmed, so it can't be lost if this browser disconnects.
+  // Here we only refresh the UI and show the receipt — we deliberately do NOT
+  // POST another sale, which would double-record it.
+  const finishMpesaSale = () => {
+    const cartItems = window._pendingSaleCart || [...saleCart];
+    const total = cartItems.reduce((s, i) => s + i.price * i.qty, 0);
+    setLastChange({ change: 0, total });
+    setReceipt({ items: cartItems, total, change: 0, paymentMethod: 'mpesa', cashier, date: new Date(), phone: custPhone });
+    setSaleCart([]); setAmountGiven(''); setCashPart(''); setMpesaPart(''); setCustPhone('');
+    setStkCheckoutId(null); setStkStatus('idle'); window._pendingSaleCart = null;
+    loadProducts(); loadSales(); checkAlerts();
   };
 
   // Auto-login on mount disabled for maximum security. Owner/Staff must always authenticate via login form.
@@ -1034,7 +1048,8 @@ const loadStockTransfers = async () => {
       try {
         window._pendingSaleCart = [...saleCart];
         setStkStatus('waiting'); setStkError('');
-        const r = await fetch(API_URL + '/mpesa/stk-push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: custPhone, amount: saleTotal }) });
+        const saleDraft = { items: saleCart, staff: cashier, customerPhone: custPhone, branchId: activeBranchId || null };
+        const r = await fetch(API_URL + '/mpesa/stk-push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: custPhone, amount: saleTotal, saleDraft }) });
         const d = await r.json();
         if (d.success) { setStkCheckoutId(d.checkoutRequestId); }
         else { setStkStatus('failed'); setStkError(d.error + (d.details ? ': ' + d.details : '')); }
@@ -1252,28 +1267,33 @@ const loadStockTransfers = async () => {
   const periodLabel = { today: 'Today', week: 'This week', month: 'This month', year: 'This year', all: 'All time' };
   const totalAlerts = alerts.out.length + alerts.low.length + (alerts.expired||[]).length;
   const formatReceiptMsg = (r) => {
-    const line = '━━━━━━━━━━━━━━━━━━━━━━';
-    const items = r.items.map(i => `\u{1F538} *${i.name}* \n    ${i.qty} x KES ${i.price.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}  =  KES ${(i.price*i.qty).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}`).join('\n');
-    return `\u{1F6CD} *BLITZ MALL - OFFICIAL RECEIPT* \u{1F6CD}
-${line}
-
-\u{1F4C5} *Date:* ${r.date.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}
+    const div = '\u{2796}\u{2796}\u{2796}\u{2796}\u{2796}\u{2796}\u{2796}\u{2796}\u{2796}\u{2796}\u{2796}\u{2796}';
+    const fmt = (n) => 'KES ' + Number(n).toLocaleString('en-KE');
+    const ref = '#' + new Date(r.date).getTime().toString().slice(-6);
+    const items = r.items.map(i =>
+      `\u{1F538} *${i.name}*\n      ${i.qty} \u{00D7} ${fmt(i.price)}  =  *${fmt(i.price * i.qty)}*`
+    ).join('\n');
+    return `\u{1F9FE} *BLITZMALL RECEIPT* \u{1F9FE}
+${div}
+\u{1F194} *Receipt:* ${ref}
+\u{1F4C5} ${new Date(r.date).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}
 \u{1F464} *Served by:* ${r.cashier}
-\u{1F4B3} *Method:* ${r.paymentMethod.toUpperCase()}
+\u{1F4B3} *Paid via:* ${r.paymentMethod.toUpperCase()}
+${div}
 
-\u{1F6D2} *YOUR ITEMS:*
+\u{1F6D2} *YOUR ITEMS*
 ${items}
 
-${line}
-\u{1F4B0} *TOTAL PAID: KES ${r.total.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}*
-${r.change > 0 ? `\u{1F4B5} *Change:* KES ${r.change.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}\n` : ''}${line}
+${div}
+\u{1F4B0} *TOTAL PAID:  ${fmt(r.total)}*${r.change > 0 ? `\n\u{1F4B5} *Change:*  ${fmt(r.change)}` : ''}
+${div}
 
 \u{1F3EA} *Brilliant Shop*
 \u{1F4DE} 07XX XXX XXX
-\u{1F4CD} Location: [Your Location Here]
+\u{1F4CD} [Your Location Here]
 
-\u{2728} *Thank you for shopping with us!* \u{2728}
-\u{2B50} We'd love to hear your feedback on our app!`;
+\u{2728} *Thanks for shopping with us!* \u{2728}
+\u{2B50} Loved it? Rate us on the BlitzMall app \u{1F49A}`;
   };
   const receiptWALink = receipt && receipt.phone ? waLink(receipt.phone, formatReceiptMsg(receipt)) : null;
 
@@ -1897,14 +1917,14 @@ ${r.change > 0 ? `\u{1F4B5} *Change:* KES ${r.change.toLocaleString('en-KE', { t
                   {o.status === 'delivered' && o.customerId && (
                     <a className="cr-remind" href={waLink(o.customerId,
                       '⚡️ *BLITZ MALL - DELIVERY CONFIRMED* ⚡️\n' +
-                      '━'.repeat(20) + '\n' +
+                      '\u{2796}'.repeat(12) + '\n' +
                       '✅ Your order has been *delivered*!\n' +
                       '📅 ' + new Date().toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) + '\n' +
-                      '━'.repeat(20) + '\n' +
+                      '\u{2796}'.repeat(12) + '\n' +
                       (o.items||[]).map(it => '• ' + it.name + ' x' + (it.quantity||it.qty||1) + ' — KES ' + ((it.price||0)*(it.quantity||it.qty||1)).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })).join('\n') + '\n' +
-                      '━'.repeat(20) + '\n' +
+                      '\u{2796}'.repeat(12) + '\n' +
                       '*💰 TOTAL: KES ' + (o.totalPrice||0).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) + '*\n' +
-                      '━'.repeat(20) + '\n' +
+                      '\u{2796}'.repeat(12) + '\n' +
                       '🏪 Brilliant Shop\n' +
                       '🙏 Thank you for ordering with Blitz Mall!\n' +
                       '⭐ Please leave a review on the app!'
@@ -2150,7 +2170,7 @@ ${r.change > 0 ? `\u{1F4B5} *Change:* KES ${r.change.toLocaleString('en-KE', { t
               <input value={crNote} onChange={e => setCrNote(e.target.value)} placeholder="For what? (optional)" />
               <button className="blitz-admin-btn small" type="submit">Add debt</button>
             </form>
-            {unpaid.length === 0 ? <p className="blitz-admin-empty">No one owes you. 🎉</p> : <div className="blitz-admin-list">{unpaid.map(c => <div className="cr-row" key={c._id}><div className="cr-info"><b>{c.customerName}</b>{c.note && <span className="blitz-admin-muted">{c.note}</span>}<span className="cr-date">since {new Date(c.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}{c.phone ? " · " + c.phone : ""}</span></div><div className="cr-amt">{money(c.amount)}</div><div className="cr-actions">{c.phone && <a className="cr-remind" href={waLink(c.phone,"Hi " + c.customerName + ", friendly reminder you have a balance of " + money(c.amount) + " at Brilliant. Asante!")} target="_blank" rel="noreferrer">Remind</a>}<button className="cr-paid" onClick={() => payCredit(c._id)}>Mark paid</button><button className="pos-void" onClick={() => delCredit(c._id)}>delete</button></div></div>)}</div>}
+            {unpaid.length === 0 ? <p className="blitz-admin-empty">No one owes you. 🎉</p> : <div className="blitz-admin-list">{unpaid.map(c => <div className="cr-row" key={c._id}><div className="cr-info"><b>{c.customerName}</b>{c.note && <span className="blitz-admin-muted">{c.note}</span>}<span className="cr-date">since {new Date(c.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}{c.phone ? " · " + c.phone : ""}</span></div><div className="cr-amt">{money(c.amount)}</div><div className="cr-actions">{c.phone && <a className="cr-remind" href={waLink(c.phone,"Hi " + c.customerName + ", friendly reminder you have a balance of " + money(c.amount) + " at Brilliant. Thanks!")} target="_blank" rel="noreferrer">Remind</a>}<button className="cr-paid" onClick={() => payCredit(c._id)}>Mark paid</button><button className="pos-void" onClick={() => delCredit(c._id)}>delete</button></div></div>)}</div>}
             {paid.length > 0 && <div className="cr-paidwrap"><button className="cr-toggle" onClick={() => setCrShowPaid(s=>!s)}>{crShowPaid?"Hide":"Show"} cleared ({paid.length})</button>{crShowPaid && <div className="blitz-admin-list">{paid.map(c => <div className="cr-row cleared" key={c._id}><div className="cr-info"><b>{c.customerName}</b><span className="cr-date">paid {c.paidAt ? new Date(c.paidAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) : ""}</span></div><div className="cr-amt">{money(c.amount)}</div><div className="cr-actions"><button className="pos-void" onClick={() => delCredit(c._id)}>delete</button></div></div>)}</div>}</div>}
           </div>
         );
