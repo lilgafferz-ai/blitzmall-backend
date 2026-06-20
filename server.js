@@ -4,8 +4,31 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { MongoClient, ObjectId } = require('mongodb');
+const helmet = require('helmet');
+const mongoSanitize = require('express-mongo-sanitize');
+const rateLimit = require('express-rate-limit');
+const NodeCache = require('node-cache');
+const productCache = new NodeCache({ stdTTL: 300 }); // Cache products for 5 minutes
 
 const app = express();
+app.use(helmet());
+app.use(mongoSanitize());
+
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 200, // Limit each IP to 200 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(globalLimiter);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20, // Strict limit for auth routes
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
@@ -14,7 +37,11 @@ const client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
 let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_, categories_;
-const JWT_SECRET = process.env.JWT_SECRET || 'dev_jwt_secret_replace_in_prod'; // ⚠️ SET JWT_SECRET env var in production!
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('FATAL ERROR: JWT_SECRET environment variable is not defined.');
+  process.exit(1);
+}
 const JWT_EXPIRES = '24h';
 
 // Shop GPS coordinates (Point A for delivery tracking)
@@ -260,7 +287,8 @@ async function connectDb() {
     console.warn('⚠️ CALLBACK_URL env var not set. M-Pesa callbacks will not reach your server.');
   }
 
-  app.listen(PORT, () => {
+  if (require.main === module) {
+    app.listen(PORT, () => {
     console.log(`🚀 Shop backend running on http://localhost:${PORT}`);
     console.log(`📦 Database initialization complete`);
 
@@ -277,18 +305,28 @@ async function connectDb() {
       setInterval(warm, 50 * 60 * 1000);
     }
   });
+  }
 }
 
-connectDb().catch(err => {
-  console.error('Fatal database setup error:', err);
-  setTimeout(() => process.exit(1), 500);
-});
+if (require.main === module) {
+  connectDb().catch(err => {
+    console.error('Fatal database setup error:', err);
+    setTimeout(() => process.exit(1), 500);
+  });
+}
 
 // ===== CUSTOMER =====
 app.get('/api/products', async (req, res) => {
   try {
+    const cacheKey = 'all_products';
+    const cached = productCache.get(cacheKey);
+    if (cached) return res.json(cached);
+
     const list = await products_.find().toArray();
-    res.json(await applyPricingRules(list));
+    const priced = await applyPricingRules(list);
+    
+    productCache.set(cacheKey, priced);
+    res.json(priced);
   } catch (e) {
     console.error('Failed to fetch products:', e);
     res.status(500).json({ error: 'Failed to fetch products' });
@@ -304,7 +342,7 @@ app.get('/api/admin/products', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch products' });
   }
 });
-app.post('/api/auth', async (req, res) => {
+app.post('/api/auth', authLimiter, async (req, res) => {
   const { name, phone } = req.body;
   if (!name || !phone) return res.status(400).json({ error: 'Name and phone required' });
   try {
@@ -382,7 +420,7 @@ app.post('/api/admin/setup', async (req, res) => {
 });
 
 // JWT Login
-app.post('/api/admin/login', async (req, res) => {
+app.post('/api/admin/login', authLimiter, async (req, res) => {
   let { username, password } = req.body;
   if (!username && password) {
     username = 'owner';
@@ -550,6 +588,7 @@ app.post('/api/admin/products', authenticate, authorize('owner', 'manager'), asy
       createdAt: new Date(),
     };
     const result = await products_.insertOne(product);
+    productCache.del('all_products');
     res.json({ success: true, productId: result.insertedId, message: 'Product added!' });
   } catch (e) { console.error('Failed to add product:', e); res.status(500).json({ error: 'Failed to add product' }); }
 });
@@ -568,11 +607,12 @@ app.put('/api/admin/products/:productId', authenticate, authorize('owner', 'mana
     if (expiryDate !== undefined) u.expiryDate = expiryDate ? new Date(expiryDate) : null;
     const r = await products_.updateOne({ _id: new ObjectId(req.params.productId) }, { $set: u });
     if (!r.matchedCount) return res.status(404).json({ error: 'Product not found' });
+    productCache.del('all_products');
     res.json({ success: true, message: 'Product updated!' });
   } catch (e) { console.error('Failed to update product:', e); res.status(500).json({ error: 'Failed to update product' }); }
 });
 app.delete('/api/admin/products/:productId', authenticate, authorize('owner', 'manager'), async (req, res) => {
-  try { const r = await products_.deleteOne({ _id: new ObjectId(req.params.productId) }); if (!r.deletedCount) return res.status(404).json({ error: 'Product not found' }); res.json({ success: true });} catch (e) { console.error('Failed to delete product:', e); res.status(500).json({ error: 'Failed to delete product' }); }
+  try { const r = await products_.deleteOne({ _id: new ObjectId(req.params.productId) }); if (!r.deletedCount) return res.status(404).json({ error: 'Product not found' }); productCache.del('all_products'); res.json({ success: true });} catch (e) { console.error('Failed to delete product:', e); res.status(500).json({ error: 'Failed to delete product' }); }
 });
 
 // ===== CATEGORIES =====
@@ -1447,6 +1487,7 @@ app.post('/api/admin/products/:productId/flash-sale', authenticate, async (req, 
 
     const r = await products_.updateOne({ _id: new ObjectId(productId) }, { $set: u });
     if (!r.matchedCount) return res.status(404).json({ error: 'Product not found' });
+    productCache.del('all_products');
     res.json({ success: true, message: 'Flash sale updated!' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update flash sale settings' });
@@ -2483,5 +2524,11 @@ app.post('/api/admin/ai/chat', authenticate, async (req, res) => {
     res.json({ response: 'Sorry, I encountered an error processing your request.' });
   }
 });
-
+// Global error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled Server Error:', err);
+  res.status(500).json({ error: 'Internal Server Error' });
+});
 const PORT = process.env.PORT || 5000;
+
+module.exports = { app, connectDb, client };
