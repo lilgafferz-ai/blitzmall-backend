@@ -20,7 +20,6 @@ const globalLimiter = rateLimit({
   max: 200, // Limit each IP to 200 requests per window
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many requests from this IP, please try again later.' }
 });
 app.use(globalLimiter);
 
@@ -29,7 +28,6 @@ const authLimiter = rateLimit({
   max: 20, // Strict limit for auth routes
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many login attempts, please try again later.' }
 });
 
 app.use(cors());

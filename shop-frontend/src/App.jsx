@@ -716,8 +716,11 @@ function App() {
     if (!validatePhone(phone)) { alert('Please enter a valid phone number (at least 10 digits, e.g. 0712345678)'); return; }
     try {
       const r = await fetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone }) });
+      if (!r.ok) {
+        if (r.status === 429) { alert('Too many attempts. Please try again later.'); return; }
+      }
       const d = await r.json();
-      if (r.ok && d.success) {
+      if (d.success) {
         const isReturning = !!d.returning;
         const cust = { customerId: d.customerId, name, phone };
         setCustomer(cust);
@@ -727,9 +730,9 @@ function App() {
         setWelcomeMsg({ name, returning: isReturning });
         setScreen('welcome');
       } else {
-        alert(d.error || 'Login failed. Please check your details or try again later.');
+        alert(d.error || 'Login failed.');
       }
-    } catch (e) {
+    } catch (e) { 
       console.error(e);
       alert('Network error. Please check your connection and try again.');
     }
@@ -1898,7 +1901,7 @@ function App() {
 
   // SHARE / DOWNLOAD APP
   if (screen === 'share') {
-    const apkUrl = 'https://blitzmall-frontend.vercel.app/blitzmall.apk';
+    const apkUrl = 'https://blitzmall-frontend.vercel.app/BlitzMall.apk';
     const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(apkUrl)}`;
     
     return (
