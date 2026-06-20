@@ -977,6 +977,7 @@ const loadStockTransfers = async () => {
   const editProduct = (p) => { setForm({ name: p.name||'', category: p.category||'', barcode: p.barcode||'', buyingPrice: p.buyingPrice??'', price: p.price??'', stock: p.stock??'', description: p.description||'', image: p.image||null, expiryDate: p.expiryDate ? new Date(p.expiryDate).toISOString().slice(0,10) : '' }); setEditingId(p._id); setShowForm(true); window.scrollTo(0,0); };
   const delProduct = async (id) => { if (!window.confirm('Delete this item?')) return; try { const r = await authDelete(API_URL + '/admin/products/' + id); if ((await r.json()).success) loadProducts(); } catch (e) { console.error(e); } };
   const updateOrder = async (id, payload) => { try { const r = await authPut(API_URL + '/admin/orders/' + id, payload); if ((await r.json()).success) loadOrders(); } catch (e) { console.error(e); } };
+  const delOrder = async (id) => { if (!window.confirm('Delete this order?')) return; try { const r = await authDelete(API_URL + '/admin/orders/' + id); if ((await r.json()).success) loadOrders(); else alert('Failed or insufficient permissions'); } catch (e) { console.error(e); } };
 
   const handleAddCategory = async (e) => {
     if (e) e.preventDefault();
@@ -1929,6 +1930,9 @@ ${div}
                       '🙏 Thank you for ordering with Blitz Mall!\n' +
                       '⭐ Please leave a review on the app!'
                     )} target="_blank" rel="noreferrer" style={{fontSize:'.75rem',whiteSpace:'nowrap'}}>📱 WhatsApp</a>
+                  )}
+                  {user && user.role === 'owner' && (
+                    <button className="pos-void" onClick={() => delOrder(o._id)} style={{marginLeft: 6, padding: '4px 8px', fontSize: '.75rem'}}>Delete</button>
                   )}
                 </div>
               </div>

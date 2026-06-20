@@ -620,6 +620,16 @@ app.put('/api/admin/orders/:orderId', authenticate, async (req, res) => {
     res.json({ success: true });
   } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); }
 });
+app.delete('/api/admin/orders/:orderId', authenticate, authorize('owner'), async (req, res) => {
+  try {
+    const r = await orders_.deleteOne({ _id: new ObjectId(req.params.orderId) });
+    if (!r.deletedCount) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (e) {
+    console.error('API error:', e);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
 
 // Public tracking endpoint - customers can check delivery status
 app.get('/api/orders/:orderId/tracking', async (req, res) => {
