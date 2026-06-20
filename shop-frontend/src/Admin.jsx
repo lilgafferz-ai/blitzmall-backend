@@ -1237,7 +1237,6 @@ const loadStockTransfers = async () => {
     const currentForm = formData && formData.name !== undefined ? formData : form;
     if (!currentForm.name || !currentForm.price) { alert("Name and selling price are required."); return; }
     
-    setSaving(true);
     try {
       let cat = currentForm.category || "Uncategorized";
       const match = categories.find(c => c.name.toLowerCase() === cat.toLowerCase());
@@ -1255,7 +1254,7 @@ const loadStockTransfers = async () => {
         const prevCat = currentForm.category;
         setForm({ ...BLANK, category: prevCat });
       }
-    } catch (e) { console.error(e); } finally { setSaving(false); }
+    } catch (e) { console.error(e); }
   };
 
   const submitRef = useRef(submitProduct);
@@ -1263,8 +1262,8 @@ const loadStockTransfers = async () => {
   const nextRef = useRef(submitProductAndNext);
   nextRef.current = submitProductAndNext;
 
-  const handleFormSubmit = useCallback((data) => submitRef.current(data), []);
-  const handleFormNext = useCallback((data) => nextRef.current(data), []);
+  const handleFormSubmit = React.useCallback((data) => submitRef.current(data), []);
+  const handleFormNext = React.useCallback((data) => nextRef.current(data), []);
 
   const editProduct = (p) => { setForm({ name: p.name||'', category: p.category||'', barcode: p.barcode||'', buyingPrice: p.buyingPrice??'', price: p.price??'', stock: p.stock??'', description: p.description||'', image: p.image||null, expiryDate: p.expiryDate ? new Date(p.expiryDate).toISOString().slice(0,10) : '' }); setEditingId(p._id); setShowForm(true); window.scrollTo(0,0); };
   const delProduct = async (id) => { if (!window.confirm('Delete this item?')) return; try { const r = await authDelete(API_URL + '/admin/products/' + id); if ((await r.json()).success) loadProducts(); } catch (e) { console.error(e); } };
@@ -1931,7 +1930,7 @@ ${div}
             />
           )}
           <div className="blitz-admin-search"><span>🔍</span><input placeholder="Search name, barcode or category…" value={search} onChange={e => setSearch(e.target.value)} /></div>
-          {React.useMemo(() => (
+          {(
             filtered.length === 0 ? <p className="blitz-admin-empty">No items yet.</p> : (
               <div className="blitz-admin-list">{filtered.map(p => {
                 const margin = (p.price||0)-(p.buyingPrice||0);
@@ -1975,7 +1974,7 @@ ${div}
                 );
               })}</div>
             )
-          ), [filtered])}
+          )}
 
           {/* PRICING RULES */}
           <div style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:'16px',marginTop:20,marginBottom:16}}>

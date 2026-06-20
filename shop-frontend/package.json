@@ -1,6 +1,6 @@
 {
   "name": "shop-frontend",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "main": "main.js",
   "homepage": "./",
@@ -54,10 +54,11 @@
   },
   "devDependencies": {
     "@capacitor/assets": "^3.0.5",
-    "electron": "^42.3.3",
+    "electron": "^42.4.1",
     "electron-builder": "^24.13.3"
   },
   "build": {
+    "electronVersion": "42.3.3",
     "appId": "com.blitzmall.app",
     "productName": "BlitzMall",
     "publish": [

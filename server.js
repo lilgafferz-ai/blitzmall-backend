@@ -12,6 +12,8 @@ const productCache = new NodeCache({ stdTTL: 300 }); // Cache products for 5 min
 
 const app = express();
 app.set('trust proxy', 1);
+const path = require('path');
+app.use('/apk', express.static(path.join(__dirname, 'shop-frontend/public')));
 app.use(helmet());
 app.use(mongoSanitize());
 
