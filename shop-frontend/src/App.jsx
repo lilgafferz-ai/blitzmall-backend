@@ -259,7 +259,7 @@ function App() {
     try {
       const r = await fetch(`${API_URL}/products`);
       const d = await r.json();
-      if (Array.isArray(d) && d.length) {
+      if (Array.isArray(d)) {
         setProducts(d);
         localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(d));
       }
@@ -270,7 +270,7 @@ function App() {
     try {
       const r = await fetch(`${API_URL}/banners`);
       const d = await r.json();
-      if (Array.isArray(d) && d.length) {
+      if (Array.isArray(d)) {
         setBanners(d);
       }
     } catch (e) { console.warn('Failed to load banners'); }
@@ -628,7 +628,7 @@ function App() {
     try {
       const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
       const d = await r.json();
-      if (Array.isArray(d) && d.length) {
+      if (Array.isArray(d)) {
         setMyOrders(d.reverse());
         localStorage.setItem(ORDERS_CACHE_KEY_ORDERS, JSON.stringify(d));
         // Update tracking progress for active deliveries
