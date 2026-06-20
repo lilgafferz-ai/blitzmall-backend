@@ -1901,7 +1901,7 @@ function App() {
 
   // SHARE / DOWNLOAD APP
   if (screen === 'share') {
-    const apkUrl = 'https://blitzmall-frontend.vercel.app/blitzmall.apk';
+    const apkUrl = 'https://blitzmall-frontend.vercel.app/blitzmall-v2.apk';
     const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(apkUrl)}`;
     
     return (
