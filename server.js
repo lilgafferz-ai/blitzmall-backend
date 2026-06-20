@@ -540,9 +540,9 @@ app.delete('/api/admin/branches/:id', authenticate, authorize('owner'), async (r
 
 // AI Image Generation Helper
 async function autoFetchProductImage(name, barcode) {
-  try {
-    let images = [];
-    if (barcode && barcode.trim()) {
+  let images = [];
+  if (barcode && barcode.trim()) {
+    try {
       // Try OpenFoodFacts API for barcode
       const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${barcode.trim()}.json`);
       if (res.ok) {
@@ -554,21 +554,20 @@ async function autoFetchProductImage(name, barcode) {
           if (data.product.image_nutrition_url) images.push(data.product.image_nutrition_url);
         }
       }
+    } catch (e) {
+      console.error('Barcode API failed, falling back to AI:', e);
     }
-    
-    // Ensure we have at least 3 images, fallback to Pollinations AI
-    let seed = 1;
-    while (images.length < 3) {
-      const prompt = encodeURIComponent(`Product photography of ${name}, centered, isolated on a pure white background, high resolution, studio lighting, highly detailed`);
-      images.push(`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true&seed=${seed++}`);
-    }
-    
-    // Return exactly 3 images
-    return images.slice(0, 3);
-  } catch (error) {
-    console.error('Error auto-fetching image:', error);
-    return null;
   }
+  
+  // Ensure we have at least 3 images, fallback to Pollinations AI
+  let seed = 1;
+  while (images.length < 3) {
+    const prompt = encodeURIComponent(`Product photography of ${name}, centered, isolated on a pure white background, high resolution, studio lighting, highly detailed`);
+    images.push(`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true&seed=${seed++}`);
+  }
+  
+  // Return exactly 3 images
+  return images.slice(0, 3);
 }
 
 // ===== PRODUCTS =====
@@ -582,7 +581,7 @@ app.post('/api/admin/products', authenticate, authorize('owner', 'manager'), asy
     const product = {
       name, category: (category || '').trim() || 'Other', barcode: (barcode || '').trim(),
       buyingPrice: parseFloat(buyingPrice) || 0, price: parseFloat(price) || 0, stock: parseInt(stock, 10) || 0,
-      description: description || '', image: image || (isMobile ? null : await autoFetchProductImage(name, barcode)),
+      description: description || '', image: image || await autoFetchProductImage(name, barcode),
       expiryDate: expiryDate ? new Date(expiryDate) : null,
       branchId: branchId || req.user.branchId || null,
       createdAt: new Date(),
