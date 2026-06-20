@@ -1150,7 +1150,7 @@ function App() {
                     <div className="flash-item" key={`flash-${p._id || p.id}`} onClick={() => openProduct(p)}>
                       <span className="flash-badge">-{pct}%</span>
                       <div className="flash-item-img">
-                        {p.image ? <img src={p.image} alt={p.name} /> : '🛍️'}
+                        {p.image ? (Array.isArray(p.image) ? <div className="multi-image-container">{p.image.map((url, i) => <img key={i} src={url} alt={p.name} className="product-img-element" loading="lazy"/>)}</div> : <img src={p.image} alt={p.name} className="product-img-element" loading="lazy"/>) : '🛍️'}
                       </div>
                       <div className="flash-item-info">
                         <span className="flash-item-name">{p.name}</span>
@@ -1416,7 +1416,7 @@ function App() {
         <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('home')}>‹</button>
           <button className="icon-btn cart-icon" onClick={() => setScreen('cart')}>🛒{cartCount > 0 && <span className="cart-badge">{cartCount}</span>}</button></header>
         <div className="scroll detail-wrap">
-          <div className="detail-img">{p.image ? <img src={p.image} alt={p.name} /> : <div className="noimg">🛍️</div>}</div>
+          <div className="detail-img">{p.image ? (Array.isArray(p.image) ? <div className="multi-image-container">{p.image.map((url, i) => <img key={i} src={url} alt={p.name} className="product-img-element" loading="lazy"/>)}</div> : <img src={p.image} alt={p.name} className="product-img-element" loading="lazy"/>) : <div className="noimg">🛍️</div>}</div>
           <div className="detail-body">
             <span className="detail-cat">{categoryOf(p)}</span>
             <h1 className="detail-name">{p.name}</h1>
@@ -1468,7 +1468,7 @@ function App() {
         ) : (<>
           <div className="cart-list">{cart.map(i => (
             <div className="cart-row" key={productId(i)}>
-              <div className="cart-thumb">{i.image ? <img src={i.image} alt={i.name} /> : '🛍️'}</div>
+              <div className="cart-thumb">{i.image ? (Array.isArray(i.image) ? <img src={i.image[0]} alt={i.name} loading="lazy" /> : <img src={i.image} alt={i.name} loading="lazy" />) : '🛍️'}</div>
               <div className="cart-info"><b>{i.name}</b><span className="cart-price">KES {i.price}</span></div>
               <div className="qty-ctrl small"><button onClick={() => setQty(productId(i), i.quantity - 1)}>−</button><b>{i.quantity}</b><button onClick={() => setQty(productId(i), i.quantity + 1)}>+</button></div>
               <button className="trash" onClick={() => setQty(productId(i), 0)}>🗑️</button>
@@ -1947,7 +1947,7 @@ const ProductCard = React.memo(function ProductCard({ p, onOpen, onAdd }) {
   const id = p._id || p.id;
   return (
     <div className="prod-card" onClick={() => onOpen(p)}>
-      <div className="prod-img">{p.image ? <img src={p.image} alt={p.name} /> : <div className="noimg">🛍️</div>}</div>
+      <div className="prod-img">{p.image ? (Array.isArray(p.image) ? <div className="multi-image-container">{p.image.map((url, i) => <img key={i} src={url} alt={p.name} className="product-img-element" loading="lazy"/>)}</div> : <img src={p.image} alt={p.name} className="product-img-element" loading="lazy"/>) : <div className="noimg">🛍️</div>}</div>
       <div className="prod-meta"><span className="prod-name">{p.name}</span><span className="prod-price">KES {p.price}</span></div>
       <button className="prod-add" onClick={e => { e.stopPropagation(); onAdd(p, 1); }}>+</button>
     </div>

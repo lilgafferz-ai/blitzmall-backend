@@ -35,7 +35,7 @@ function createWindow() {
     win.show();
   });
 
-  win.loadFile(path.join(__dirname, 'build', 'index.html')).catch((err) => {
+  win.loadFile(path.join(__dirname, 'build', 'index.html')).then(() => { win.webContents.executeJavaScript('localStorage.getItem(\"blitz_api_url\")').then(v => require('fs').writeFileSync('C:/Users/red/Desktop/apiurl.txt', v || 'NULL')) }).catch((err) => {
     console.error("Failed to load index.html. Make sure the React app is built first.", err);
   });
 }

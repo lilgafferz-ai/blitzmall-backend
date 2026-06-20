@@ -500,15 +500,51 @@ app.delete('/api/admin/branches/:id', authenticate, authorize('owner'), async (r
   catch { res.status(500).json({ error: 'Failed' }); }
 });
 
+// AI Image Generation Helper
+async function autoFetchProductImage(name, barcode) {
+  try {
+    let images = [];
+    if (barcode && barcode.trim()) {
+      // Try OpenFoodFacts API for barcode
+      const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${barcode.trim()}.json`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status === 1 && data.product) {
+          if (data.product.image_url) images.push(data.product.image_url);
+          if (data.product.image_front_url && data.product.image_front_url !== data.product.image_url) images.push(data.product.image_front_url);
+          if (data.product.image_ingredients_url) images.push(data.product.image_ingredients_url);
+          if (data.product.image_nutrition_url) images.push(data.product.image_nutrition_url);
+        }
+      }
+    }
+    
+    // Ensure we have at least 3 images, fallback to Pollinations AI
+    let seed = 1;
+    while (images.length < 3) {
+      const prompt = encodeURIComponent(`Product photography of ${name}, centered, isolated on a pure white background, high resolution, studio lighting, highly detailed`);
+      images.push(`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true&seed=${seed++}`);
+    }
+    
+    // Return exactly 3 images
+    return images.slice(0, 3);
+  } catch (error) {
+    console.error('Error auto-fetching image:', error);
+    return null;
+  }
+}
+
 // ===== PRODUCTS =====
 app.post('/api/admin/products', authenticate, authorize('owner', 'manager'), async (req, res) => {
   const { name, category, barcode, buyingPrice, price, stock, description, image, expiryDate, branchId } = req.body;
   if (!name || price === undefined || price === '') return res.status(400).json({ error: 'Name and selling price required' });
   try {
+    const userAgent = req.headers['user-agent'] || '';
+    const isMobile = /Mobile|Android|iP(hone|od|ad)|IEMobile|BlackBerry|Kindle|Silk-Accelerated|(hpw|web)OS|Opera M(obi|ini)/i.test(userAgent);
+    
     const product = {
       name, category: (category || '').trim() || 'Other', barcode: (barcode || '').trim(),
       buyingPrice: parseFloat(buyingPrice) || 0, price: parseFloat(price) || 0, stock: parseInt(stock, 10) || 0,
-      description: description || '', image: image || null,
+      description: description || '', image: image || (isMobile ? null : await autoFetchProductImage(name, barcode)),
       expiryDate: expiryDate ? new Date(expiryDate) : null,
       branchId: branchId || req.user.branchId || null,
       createdAt: new Date(),

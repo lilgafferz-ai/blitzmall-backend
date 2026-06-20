@@ -290,14 +290,19 @@ function Admin() {
     }
   };
   const loadCategories = async () => {
+    let localCats = [];
+    try { localCats = JSON.parse(localStorage.getItem('blitz_custom_categories') || '[]'); } catch(e){}
     try {
       const r = await authGet(API_URL + '/admin/categories');
       if (r.ok) {
         const data = await r.json();
-        setCategories(asArray(data));
+        setCategories([...asArray(data), ...localCats]);
+      } else {
+        setCategories(localCats);
       }
     } catch (e) {
       console.error('Failed to load categories', e);
+      setCategories(localCats);
     }
   };
   const loadOrders = async () => { try { const r = await authGet(withBranch(API_URL + '/admin/orders')); setOrders(asArray(await r.json())); } catch (e) { console.error(e); setOrders([]); } };
@@ -949,7 +954,25 @@ const loadStockTransfers = async () => {
       const url = editingId ? API_URL + '/admin/products/' + editingId : API_URL + '/admin/products';
       const opts = editingId ? authPut(url, payload) : authPost(url, payload);
       const r = await opts;
-      if ((await r.json()).success) { resetForm(); loadProducts(); }
+      if ((await r.json()).success) { 
+        const catName = form.category?.trim();
+        if (catName && !categories.some(c => c.name.toLowerCase() === catName.toLowerCase())) {
+          try {
+            const res2 = await authPost(API_URL + '/admin/categories', { name: catName });
+            if (!res2.ok) throw new Error('API fail');
+            loadCategories();
+          } catch (err) {
+            const localCats = JSON.parse(localStorage.getItem('blitz_custom_categories') || '[]');
+            if (!localCats.some(c => c.name.toLowerCase() === catName.toLowerCase())) {
+              localCats.push({ _id: 'local_' + Date.now(), name: catName });
+              localStorage.setItem('blitz_custom_categories', JSON.stringify(localCats));
+            }
+            loadCategories();
+          }
+        }
+        resetForm(); 
+        loadProducts(); 
+      }
     } catch (e) { console.error(e); }
   };
   const submitProductAndNext = async (e) => {
@@ -960,6 +983,13 @@ const loadStockTransfers = async () => {
       const url = API_URL + '/admin/products';
       const r = await authPost(url, payload);
       if ((await r.json()).success) {
+        const catName = form.category?.trim();
+        if (catName && !categories.some(c => c.name.toLowerCase() === catName.toLowerCase())) {
+          try {
+            await authPost(API_URL + '/admin/categories', { name: catName });
+            loadCategories();
+          } catch (err) {}
+        }
         const prevCat = form.category;
         setForm({ ...BLANK, category: prevCat });
         loadProducts();
@@ -973,33 +1003,45 @@ const loadStockTransfers = async () => {
 
   const handleAddCategory = async (e) => {
     if (e) e.preventDefault();
-    if (!newCategoryName.trim()) return;
+    const name = newCategoryName.trim();
+    if (!name) return;
     setCategoryError('');
     try {
-      const r = await authPost(API_URL + '/admin/categories', { name: newCategoryName.trim() });
+      const r = await authPost(API_URL + '/admin/categories', { name });
+      if (!r.ok) throw new Error('API Error');
       const d = await r.json();
-      if (r.ok && d.success) {
+      if (!d.success) throw new Error(d.error);
+      setNewCategoryName('');
+      loadCategories();
+    } catch (err) {
+      try {
+        const localCats = JSON.parse(localStorage.getItem('blitz_custom_categories') || '[]');
+        if (!localCats.some(c => c.name.toLowerCase() === name.toLowerCase()) && !categories.some(c => c.name.toLowerCase() === name.toLowerCase())) {
+          localCats.push({ _id: 'local_' + Date.now(), name });
+          localStorage.setItem('blitz_custom_categories', JSON.stringify(localCats));
+        }
         setNewCategoryName('');
         loadCategories();
-      } else {
-        setCategoryError(d.error || 'Failed to add category');
+      } catch(e) {
+        setCategoryError('Server error. Failed to add category.');
       }
-    } catch (err) {
-      console.error(err);
-      setCategoryError('Server error. Failed to add category.');
     }
   };
 
   const handleDeleteCategory = async (id, name) => {
     if (!window.confirm(`Are you sure you want to delete the category "${name}"?`)) return;
+    if (String(id).startsWith('local_')) {
+      const localCats = JSON.parse(localStorage.getItem('blitz_custom_categories') || '[]');
+      localStorage.setItem('blitz_custom_categories', JSON.stringify(localCats.filter(c => c._id !== id)));
+      loadCategories();
+      return;
+    }
     try {
       const r = await authDelete(API_URL + '/admin/categories/' + id);
+      if (!r.ok) throw new Error('API Error');
       const d = await r.json();
-      if (r.ok && d.success) {
-        loadCategories();
-      } else {
-        alert(d.error || 'Failed to delete category');
-      }
+      if (d.success) loadCategories();
+      else alert(d.error || 'Failed to delete category');
     } catch (err) {
       console.error(err);
       alert('Server error. Failed to delete category.');
@@ -1613,31 +1655,34 @@ ${div}
               <h3>{editingId ? "Edit item" : "Add new stock"}</h3>
               <div className="blitz-admin-grid">
                 <label>Product name *<input value={form.name} onChange={e => setForm(s=>({...s,name:e.target.value}))} placeholder="e.g. Cooking Oil 1L" required /></label>
-                <label>Category *
-                  <select 
-                    value={form.category} 
-                    onChange={e => setForm(s=>({...s,category:e.target.value}))} 
-                    required 
-                    style={{
-                      background: 'var(--bg-2)', 
-                      border: '1px solid var(--line)', 
-                      borderRadius: '10px', 
-                      padding: '12px 14px', 
-                      color: 'var(--text)', 
-                      fontSize: '1rem', 
-                      fontFamily: 'inherit',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    <option value="">Select a category...</option>
-                    {form.category && !categories.some(c => c.name === form.category) && (
-                      <option value={form.category}>{form.category} (Not in list)</option>
-                    )}
+                <div style={{display:'flex', flexDirection:'column', gap:'4px'}}>
+                  <label style={{margin:0}}>Category *</label>
+                  <div style={{display:'flex', gap:'8px', alignItems:'center'}}>
+                    <input 
+                      list="category-options"
+                      value={form.category} 
+                      onChange={e => setForm(s=>({...s,category:e.target.value}))} 
+                      placeholder="e.g. Cooking, Drinks"
+                      required 
+                      style={{
+                        flex: 1,
+                        background: 'var(--bg-2)', 
+                        border: '1px solid var(--line)', 
+                        borderRadius: '10px', 
+                        padding: '12px 14px', 
+                        color: 'var(--text)', 
+                        fontSize: '1rem', 
+                        fontFamily: 'inherit'
+                      }}
+                    />
+                    <button type="button" onClick={(e) => { e.preventDefault(); setShowCategoriesModal(true); }} style={{background:'var(--orange)', border:'none', color:'#fff', cursor:'pointer', fontSize:'1.2rem', padding:'0', width:'46px', height:'46px', borderRadius:'10px', display:'flex', alignItems:'center', justifyContent:'center'}} title="Add new category">+</button>
+                  </div>
+                  <datalist id="category-options">
                     {categories.map(c => (
-                      <option key={c._id || c.name} value={c.name}>{c.name}</option>
+                      <option key={c._id || c.name} value={c.name} />
                     ))}
-                  </select>
-                </label>
+                  </datalist>
+                </div>
                 <label>Barcode<input value={form.barcode} onChange={e => setForm(s=>({...s,barcode:e.target.value}))} placeholder="Scan or type" /></label>
                 <label>Qty in stock<input type="number" value={form.stock} onChange={e => setForm(s=>({...s,stock:e.target.value}))} placeholder="e.g. 50" /></label>
                 <label>Buying price (KES)<input type="number" step="0.01" value={form.buyingPrice} onChange={e => setForm(s=>({...s,buyingPrice:e.target.value}))} placeholder="What you paid" /></label>
@@ -1662,7 +1707,7 @@ ${div}
               const margin = (p.price||0)-(p.buyingPrice||0);
               return (
                 <div className="blitz-admin-item" key={p._id}>
-                  <div className="blitz-admin-thumb">{p.image ? <img src={p.image} alt={p.name}/> : "🛍️"}</div>
+                  <div className="blitz-admin-thumb">{p.image ? (Array.isArray(p.image) ? <img src={p.image[0]} alt={p.name} loading="lazy"/> : <img src={p.image} alt={p.name} loading="lazy"/>) : "🛍️"}</div>
                   <div className="blitz-admin-item-main">
                     <div className="blitz-admin-item-top">
                       <b>{p.name}</b>

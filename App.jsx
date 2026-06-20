@@ -137,7 +137,19 @@ function App() {
             <div className="products-grid">
               {products.map(product => (
                 <div key={product.id} className="product-card">
-                  <div className="product-image">{product.image}</div>
+                  <div className="product-image">
+                    {Array.isArray(product.image) ? (
+                      <div className="multi-image-container">
+                        {product.image.map((imgUrl, i) => (
+                          <img key={i} src={imgUrl} alt={`${product.name} ${i+1}`} className="product-img-element" />
+                        ))}
+                      </div>
+                    ) : typeof product.image === 'string' && product.image.startsWith('http') ? (
+                      <img src={product.image} alt={product.name} className="product-img-element" />
+                    ) : (
+                      product.image || '📦'
+                    )}
+                  </div>
                   <h3>{product.name}</h3>
                   <p className="price">KES {product.price}</p>
                   <button 
