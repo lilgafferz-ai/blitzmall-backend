@@ -1225,7 +1225,9 @@ const loadStockTransfers = async () => {
               }}
             >
               <option value="https://blitzmall-backend.onrender.com/api">Cloud (Live Online Database)</option>
-              <option value={`http://${window.location.hostname || 'localhost'}:5000/api`}>Local Server (Development)</option>
+              {!window.Capacitor?.isNativePlatform?.() && (
+                <option value={`http://${window.location.hostname || 'localhost'}:5000/api`}>Local Server (Development)</option>
+              )}
             </select>
           </div>
           <button className="blitz-admin-btn" type="submit">Sign In</button>
@@ -1406,7 +1408,9 @@ ${div}
                 }}
               >
                 <option value="https://blitzmall-backend.onrender.com/api">Cloud (Live Online Database)</option>
-                <option value={`http://${window.location.hostname || 'localhost'}:5000/api`}>Local Server (Development)</option>
+                {!window.Capacitor?.isNativePlatform?.() && (
+                  <option value={`http://${window.location.hostname || 'localhost'}:5000/api`}>Local Server (Development)</option>
+                )}
               </select>
             </div>
 
