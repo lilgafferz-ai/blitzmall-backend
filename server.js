@@ -14,7 +14,12 @@ const app = express();
 app.set('trust proxy', 1);
 const path = require('path');
 app.use('/apk', express.static(path.join(__dirname, 'shop-frontend/public')));
-app.use(helmet());
+// Serve React frontend
+app.use(express.static(path.join(__dirname, 'shop-frontend/build')));
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
 app.use(mongoSanitize());
 
 const globalLimiter = rateLimit({
@@ -2625,6 +2630,11 @@ app.post('/api/admin/ai/chat', authenticate, async (req, res) => {
     res.json({ response: 'Sorry, I encountered an error processing your request.' });
   }
 });
+// Serve React frontend for any non-API route (React Router support)
+app.get(/^(?!\/api).+/, (req, res) => {
+  res.sendFile(path.join(__dirname, 'shop-frontend/build', 'index.html'));
+});
+
 // Global error handling middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled Server Error:', err);
