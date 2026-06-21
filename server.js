@@ -610,66 +610,56 @@ async function searchDuckDuckGoImages(query, maxResults = 10) {
 
 // ---- Shared image search pipeline: OpenFoodFacts → DuckDuckGo → AI fallback ----
 // Returns up to 3 image URLs. Used by both the API endpoint and autoFetchProductImage.
-const AI_VIEWS = [
-  'front view, facing straight ahead',
-  'back view, showing the rear of the product',
-  'side/angle view, showing depth and packaging',
-];
-
+// Finds REAL, accurate photos of the actual product — by the scanned barcode
+// (most reliable) or the product name. No AI/generated images: if we can't find
+// a genuine photo we return fewer (or none) rather than a made-up one.
 async function searchProductImages(name, barcode) {
-  let images = [];
+  const images = [];
+  const addImg = (url) => {
+    if (url && typeof url === 'string' && !url.startsWith('data:') && !images.includes(url)) images.push(url);
+  };
+  let canonicalName = '';
 
-  // 1. Try barcode via OpenFoodFacts (real product photos)
+  // 1. BARCODE — the most accurate signal: it uniquely identifies the exact
+  //    product, so these are guaranteed-correct photos. Check the whole Open
+  //    Facts family to cover food, drinks, beauty, household and pet products.
   if (barcode && barcode.trim()) {
-    try {
-      const offRes = await fetch(`https://world.openfoodfacts.org/api/v0/product/${barcode.trim()}.json`, {
-        headers: { 'User-Agent': 'BlitzMall/1.0 (contact@blitzmall.com)' }
-      });
-      if (offRes.ok) {
-        const offData = await offRes.json();
-        if (offData.status === 1 && offData.product) {
-          if (offData.product.image_url) images.push(offData.product.image_url);
-          if (offData.product.image_front_url && offData.product.image_front_url !== offData.product.image_url) images.push(offData.product.image_front_url);
-          if (offData.product.image_ingredients_url) images.push(offData.product.image_ingredients_url);
-          if (offData.product.image_nutrition_url) images.push(offData.product.image_nutrition_url);
-        }
-      }
-    } catch (e) {
-      console.error('OpenFoodFacts lookup failed:', e.message);
-    }
-  }
-
-  // 2. Search DuckDuckGo for real product photos by name.
-  // Queries are biased toward white-background "packshot" studio photos so the
-  // results match the rest of the catalogue's clean white-background look.
-  if (images.length < 3 && name) {
-    const searchQueries = [
-      `${name} product packshot white background`,
-      `${name} product photo white background`,
-      `${name} product isolated on white`
+    const bc = barcode.trim();
+    const dbs = [
+      'https://world.openfoodfacts.org',
+      'https://world.openbeautyfacts.org',
+      'https://world.openproductsfacts.org',
+      'https://world.openpetfoodfacts.org',
     ];
-    for (const q of searchQueries) {
+    for (const base of dbs) {
       if (images.length >= 3) break;
-      const imgs = await searchDuckDuckGoImages(q, 5);
-      for (const url of imgs) {
-        if (!images.includes(url) && !url.includes('data:')) {
-          images.push(url);
-          if (images.length >= 3) break;
+      try {
+        const r = await fetch(`${base}/api/v0/product/${bc}.json`, { headers: { 'User-Agent': 'BlitzMall/1.0' } });
+        if (!r.ok) continue;
+        const d = await r.json();
+        if (d.status === 1 && d.product) {
+          if (!canonicalName) canonicalName = (d.product.product_name || d.product.product_name_en || '').trim();
+          // Front-of-pack photo is the recognisable product shot; then the main image.
+          addImg(d.product.image_front_url);
+          addImg(d.product.image_url);
         }
-      }
+      } catch (e) { /* try the next database */ }
     }
   }
 
-  // 3. Fallback to AI-generated images
-  while (images.length < 3) {
-    const idx = images.length;
-    const view = AI_VIEWS[idx] || `product view angle ${idx + 1}`;
-    const prompt = encodeURIComponent(
-      `Product photo of ${name || 'product'}, ${view}, isolated on pure white background, cut out, no background, transparent background style, professional e-commerce product photography, high resolution, studio lighting, sharp focus, detailed, realistic`
-    );
-    images.push(`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true&seed=${idx + 1}`);
+  // 2. NAME — used only to top up to 3. Prefer the official name returned by the
+  //    barcode lookup (more accurate than free-typed text), else the typed name.
+  //    The exact name is queried first so the closest matches come back first.
+  const query = (canonicalName || name || '').trim();
+  if (images.length < 3 && query) {
+    for (const q of [query, `${query} product white background`]) {
+      if (images.length >= 3) break;
+      const imgs = await searchDuckDuckGoImages(q, 6);
+      for (const url of imgs) { addImg(url); if (images.length >= 3) break; }
+    }
   }
 
+  // Real photos only — never pad with AI. Accuracy over quantity.
   return images.slice(0, 3);
 }
 
@@ -692,9 +682,7 @@ app.post('/api/products/search-images', searchImagesLimiter, async (req, res) =>
     res.json({ images });
   } catch (e) {
     console.error('Image search failed:', e.message);
-    // Always return AI fallback on error
-    const prompt = encodeURIComponent(`Product photo of ${name || 'product'}, product photography, white background, professional`);
-    res.json({ images: [`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true`] });
+    res.json({ images: [] }); // no fake/AI images — real photos only
   }
 });
 
@@ -704,9 +692,7 @@ async function autoFetchProductImage(name, barcode) {
     return await searchProductImages(name, barcode);
   } catch (e) {
     console.error('autoFetchProductImage failed:', e.message);
-    // Always return SOMETHING — AI fallback even if everything breaks
-    const prompt = encodeURIComponent(`Product photo of ${name || 'product'}, isolated on pure white background, professional e-commerce`);
-    return [`https://image.pollinations.ai/prompt/${prompt}?width=512&height=512&nologo=true`];
+    return []; // no fake/AI images — real photos only
   }
 }
 

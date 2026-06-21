@@ -97,11 +97,11 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
         setSelectedImages(data.images); // auto-select all found
         setForm(s => ({ ...s, image: data.images }));
       } else if (!silent) {
-        alert('No images found online. AI images will be generated on save.');
+        alert('No accurate photos found for this product. Please upload one manually.');
       }
     } catch (e) {
       console.error('Image search failed:', e);
-      if (!silent) alert('Failed to search for images. The product will get AI-generated images on save.');
+      if (!silent) alert('Could not search for photos right now. Please upload one manually.');
     } finally {
       setSearching(false);
     }
