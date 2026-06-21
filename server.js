@@ -648,10 +648,13 @@ async function searchProductImages(name, barcode) {
   // ONLY products whose own details contain the words you typed, so the chosen
   // photo matches your description. Best match first; reject everything else.
   if (qWords.length) {
-    const need = Math.max(1, Math.ceil(textWords.length * 0.7)); // most brand/product words must match
+    // Search the catalogue by brand/product words only (size terms make the
+    // catalogue search miss), but still score the size in for ranking below.
+    const searchTerms = textWords.length ? textWords.join(' ') : (name || '').trim();
+    const need = Math.max(1, Math.ceil(textWords.length * 0.6)); // a majority of brand/product words must match
     const lists = await Promise.all(FACTS.map(async (base) => {
       try {
-        const u = `${base}/cgi/search.pl?search_terms=${encodeURIComponent(name.trim())}&search_simple=1&action=process&json=1&page_size=20&fields=product_name,brands,quantity,image_front_url`;
+        const u = `${base}/cgi/search.pl?search_terms=${encodeURIComponent(searchTerms)}&search_simple=1&action=process&json=1&page_size=20&fields=product_name,brands,quantity,image_front_url`;
         const r = await fetchT(u, 9000);
         if (!r.ok) return [];
         const d = await r.json();
