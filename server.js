@@ -5,7 +5,9 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { MongoClient, ObjectId } = require('mongodb');
 const helmet = require('helmet');
-const mongoSanitize = require('express-mongo-sanitize');
+// express-mongo-sanitize removed: it reassigns req.query, which throws under
+// Express 5 (req.query is getter-only). Replaced by the Express 5-safe
+// sanitizeRequest middleware defined below.
 const rateLimit = require('express-rate-limit');
 const NodeCache = require('node-cache');
 const productCache = new NodeCache({ stdTTL: 300 }); // Cache products for 5 minutes
@@ -24,7 +26,32 @@ app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
-app.use(mongoSanitize());
+// NoSQL-injection sanitizer (Express 5-safe). Strips dangerous keys ($-prefixed
+// or containing ".") from request data in place, and re-pins a sanitized
+// req.query via defineProperty (assignment to req.query throws in Express 5).
+function stripKeys(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 6) return obj;
+  for (const key of Object.keys(obj)) {
+    if (key.startsWith('$') || key.includes('.')) {
+      delete obj[key];
+    } else {
+      stripKeys(obj[key], depth + 1);
+    }
+  }
+  return obj;
+}
+app.use((req, res, next) => {
+  try { if (req.body) stripKeys(req.body); } catch (e) {}
+  try { if (req.params) stripKeys(req.params); } catch (e) {}
+  try {
+    const q = req.query;
+    if (q && typeof q === 'object') {
+      stripKeys(q);
+      Object.defineProperty(req, 'query', { value: q, writable: true, configurable: true, enumerable: true });
+    }
+  } catch (e) {}
+  next();
+});
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
