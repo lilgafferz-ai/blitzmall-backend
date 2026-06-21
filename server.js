@@ -618,44 +618,62 @@ async function searchProductImages(name, barcode) {
   const addImg = (url) => {
     if (url && typeof url === 'string' && !url.startsWith('data:') && !images.includes(url)) images.push(url);
   };
+  // fetch with a timeout so a slow source can't hang the finder
+  const fetchT = (url, ms = 7000) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ms);
+    return fetch(url, { headers: { 'User-Agent': 'BlitzMall/1.0' }, signal: ctrl.signal }).finally(() => clearTimeout(t));
+  };
   let canonicalName = '';
 
+  // The Open Facts family covers food, drinks, beauty, household and pet products
+  // and exposes BOTH a barcode lookup and a name search — real photos, no API key.
+  const FACTS = [
+    'https://world.openfoodfacts.org',
+    'https://world.openbeautyfacts.org',
+    'https://world.openproductsfacts.org',
+    'https://world.openpetfoodfacts.org',
+  ];
+
   // 1. BARCODE — the most accurate signal: it uniquely identifies the exact
-  //    product, so these are guaranteed-correct photos. Check the whole Open
-  //    Facts family to cover food, drinks, beauty, household and pet products.
+  //    product, so these are guaranteed-correct photos.
   if (barcode && barcode.trim()) {
     const bc = barcode.trim();
-    const dbs = [
-      'https://world.openfoodfacts.org',
-      'https://world.openbeautyfacts.org',
-      'https://world.openproductsfacts.org',
-      'https://world.openpetfoodfacts.org',
-    ];
-    for (const base of dbs) {
+    for (const base of FACTS) {
       if (images.length >= 3) break;
       try {
-        const r = await fetch(`${base}/api/v0/product/${bc}.json`, { headers: { 'User-Agent': 'BlitzMall/1.0' } });
+        const r = await fetchT(`${base}/api/v0/product/${bc}.json`);
         if (!r.ok) continue;
         const d = await r.json();
         if (d.status === 1 && d.product) {
           if (!canonicalName) canonicalName = (d.product.product_name || d.product.product_name_en || '').trim();
-          // Front-of-pack photo is the recognisable product shot; then the main image.
-          addImg(d.product.image_front_url);
+          addImg(d.product.image_front_url); // front-of-pack: the recognisable shot
           addImg(d.product.image_url);
         }
       } catch (e) { /* try the next database */ }
     }
   }
 
-  // 2. NAME — used only to top up to 3. Prefer the official name returned by the
-  //    barcode lookup (more accurate than free-typed text), else the typed name.
-  //    The exact name is queried first so the closest matches come back first.
+  // 2. NAME — reliable Open Facts text search returns real product photos that
+  //    match the name. Prefer the official name from the barcode when we have it.
   const query = (canonicalName || name || '').trim();
   if (images.length < 3 && query) {
-    for (const q of [query, `${query} product white background`]) {
+    for (const base of FACTS) {
       if (images.length >= 3) break;
-      const imgs = await searchDuckDuckGoImages(q, 6);
-      for (const url of imgs) { addImg(url); if (images.length >= 3) break; }
+      try {
+        const u = `${base}/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=10&fields=product_name,image_front_url`;
+        const r = await fetchT(u, 9000);
+        if (!r.ok) continue;
+        const d = await r.json();
+        for (const p of (d.products || [])) { addImg(p.image_front_url); if (images.length >= 3) break; }
+      } catch (e) { /* try the next database */ }
+    }
+    // Last resort: DuckDuckGo image search (often blocked on cloud hosts).
+    if (images.length < 3) {
+      try {
+        const imgs = await searchDuckDuckGoImages(query, 6);
+        for (const url of imgs) { addImg(url); if (images.length >= 3) break; }
+      } catch (e) {}
     }
   }
 
