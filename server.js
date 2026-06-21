@@ -644,41 +644,79 @@ async function searchProductImages(name, barcode) {
   const sizeWords = qWords.filter(w => /\d/.test(w));   // 500ml, 1l, 250g …
   const textWords = qWords.filter(w => !/\d/.test(w));  // brand / product words
 
-  // NAME — the primary, strict path. Search every catalogue in parallel, then keep
-  // ONLY products whose own details contain the words you typed, so the chosen
-  // photo matches your description. Best match first; reject everything else.
+  // NAME — the primary, strict path. Query EVERY free, no-key image source in
+  // parallel, then keep only results whose own text contains the words you typed,
+  // so the chosen photo matches your description. Best match first.
   if (qWords.length) {
-    // Search the catalogue by brand/product words only (size terms make the
-    // catalogue search miss), but still score the size in for ranking below.
+    // Search by brand/product words (size terms make searches miss); size is
+    // still scored below for ranking.
     const searchTerms = textWords.length ? textWords.join(' ') : (name || '').trim();
     const need = Math.max(1, Math.ceil(textWords.length * 0.6)); // a majority of brand/product words must match
-    const lists = await Promise.all(FACTS.map(async (base) => {
-      try {
-        const u = `${base}/cgi/search.pl?search_terms=${encodeURIComponent(searchTerms)}&search_simple=1&action=process&json=1&page_size=20&fields=product_name,brands,quantity,image_front_url`;
-        const r = await fetchT(u, 9000);
-        if (!r.ok) return [];
-        const d = await r.json();
-        return d.products || [];
-      } catch (e) { return []; }
-    }));
-    const candidates = [];
-    for (const p of lists.flat()) {
-      if (!p.image_front_url) continue;
-      const text = norm(`${p.product_name || ''} ${p.brands || ''} ${p.quantity || ''}`);
+    const q = encodeURIComponent(searchTerms);
+
+    // Each source yields { url, text, bonus }. `text` is what we match against;
+    // `bonus` prioritises real product packshots (Open Facts) over generic images.
+    const sources = [
+      // Open Facts family — real product packshots
+      ...FACTS.map((base) => (async () => {
+        try {
+          const r = await fetchT(`${base}/cgi/search.pl?search_terms=${q}&search_simple=1&action=process&json=1&page_size=20&fields=product_name,brands,quantity,image_front_url`, 9000);
+          if (!r.ok) return [];
+          const d = await r.json();
+          return (d.products || []).filter(p => p.image_front_url).map(p => ({
+            url: p.image_front_url,
+            text: `${p.product_name || ''} ${p.brands || ''} ${p.quantity || ''}`,
+            bonus: 6,
+          }));
+        } catch (e) { return []; }
+      })()),
+      // Wikimedia Commons — free, no key
+      (async () => {
+        try {
+          const r = await fetchT(`https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=15&prop=imageinfo&iiprop=url&iiurlwidth=600&format=json&origin=*`, 9000);
+          if (!r.ok) return [];
+          const d = await r.json();
+          const pages = d.query && d.query.pages ? Object.values(d.query.pages) : [];
+          return pages.map(p => ({
+            url: p.imageinfo && p.imageinfo[0] && (p.imageinfo[0].thumburl || p.imageinfo[0].url),
+            text: (p.title || '').replace(/^File:/i, '').replace(/\.\w+$/, ''),
+            bonus: 1,
+          })).filter(c => c.url && /\.(jpe?g|png|webp)$/i.test(c.url));
+        } catch (e) { return []; }
+      })(),
+      // Openverse — aggregates Flickr, Wikimedia, museums and more (free, no key)
+      (async () => {
+        try {
+          const r = await fetchT(`https://api.openverse.org/v1/images/?q=${q}&page_size=15&mature=false`, 9000);
+          if (!r.ok) return [];
+          const d = await r.json();
+          return (d.results || []).map(x => ({
+            url: x.thumbnail || x.url,
+            text: `${x.title || ''} ${(x.tags || []).map(t => t.name).join(' ')}`,
+            bonus: 0,
+          })).filter(c => c.url);
+        } catch (e) { return []; }
+      })(),
+    ];
+
+    const all = (await Promise.all(sources)).flat();
+    const scored = [];
+    for (const c of all) {
+      const text = norm(c.text);
       if (!text) continue;
       const tm = textWords.filter(w => text.includes(w)).length;
       const sm = sizeWords.filter(w => text.includes(w)).length;
       let score;
       if (textWords.length) {
-        if (tm < need) continue;   // not enough of your words match — reject it
-        score = tm * 2 + sm;       // brand/product matches weigh most; size breaks ties
+        if (tm < need) continue;          // not enough of your words match — reject
+        score = tm * 2 + sm + (c.bonus || 0);
       } else {
         if (sm === 0) continue;
-        score = sm;
+        score = sm + (c.bonus || 0);
       }
-      candidates.push({ url: p.image_front_url, score });
+      scored.push({ url: c.url, score });
     }
-    candidates.sort((a, b) => b.score - a.score).forEach(c => { if (images.length < 3) addImg(c.url); });
+    scored.sort((a, b) => b.score - a.score).forEach(c => { if (images.length < 3) addImg(c.url); });
   }
 
   // BARCODE — fallback only: if a code happens to be present and the name found
