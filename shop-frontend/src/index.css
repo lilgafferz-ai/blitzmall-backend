@@ -1,15 +1,10 @@
 html {
-  /* Base size for all rem units. Desktop/PC stays compact; phones get a larger,
-     more readable size via the media query below. Tune these two values. */
-  font-size: 13px;
+  /* One comfortable, readable base size for all rem units — same on phone and
+     PC. Bigger than the original 12px for easy reading, but not oversized.
+     Tune this single value to scale the whole app up or down. */
+  font-size: 14px;
   -webkit-text-size-adjust: 100%; /* stop Android WebView from auto-enlarging text */
   text-size-adjust: 100%;
-}
-
-/* Bigger, easier-to-read text on phones — the customer shopping app.
-   Helps customers with poor eyesight read prices, names and buttons. */
-@media (max-width: 640px) {
-  html { font-size: 15px; }
 }
 
 body {
