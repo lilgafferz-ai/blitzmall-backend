@@ -657,6 +657,16 @@ async function searchProductImages(name, barcode) {
     // Each source yields { url, text, bonus }. `text` is what we match against;
     // `bonus` prioritises real product packshots (Open Facts) over generic images.
     const sources = [
+      // Google Custom Search images — broadest coverage, finds almost anything.
+      // Only active when GOOGLE_API_KEY + GOOGLE_CSE_ID env vars are set.
+      ...((process.env.GOOGLE_API_KEY && process.env.GOOGLE_CSE_ID) ? [(async () => {
+        try {
+          const r = await fetchT(`https://www.googleapis.com/customsearch/v1?key=${process.env.GOOGLE_API_KEY}&cx=${process.env.GOOGLE_CSE_ID}&searchType=image&imgType=photo&num=8&q=${encodeURIComponent((name || '').trim())}`, 9000);
+          if (!r.ok) return [];
+          const d = await r.json();
+          return (d.items || []).map(it => ({ url: it.link, text: `${it.title || ''} ${it.snippet || ''}`, bonus: 5 })).filter(c => c.url);
+        } catch (e) { return []; }
+      })()] : []),
       // Open Facts family — real product packshots
       ...FACTS.map((base) => (async () => {
         try {

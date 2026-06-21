@@ -24,3 +24,8 @@ services:
         sync: false
       - key: CALLBACK_URL
         sync: false
+      # Google Custom Search (product image finder) — set in the dashboard
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GOOGLE_CSE_ID
+        sync: false
