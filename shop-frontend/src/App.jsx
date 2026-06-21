@@ -114,7 +114,13 @@ function App() {
   const [screen, setScreen] = useState('splash');
   const [perfMode, setPerfMode] = useState(() => {
     try {
-      return localStorage.getItem('blitz_perf_mode') === 'true';
+      const saved = localStorage.getItem('blitz_perf_mode');
+      if (saved !== null) return saved === 'true'; // user's explicit choice wins
+      // No saved choice yet: auto-enable on low-end devices (few CPU cores or
+      // little RAM) so the app stays fast; high-end devices keep the rich UI.
+      const cores = navigator.hardwareConcurrency || 8;
+      const mem = navigator.deviceMemory || 8;
+      return cores <= 4 || mem <= 3;
     } catch (e) {
       return false;
     }
@@ -246,6 +252,7 @@ function App() {
   const [pullDistance, setPullDistance] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showRefreshBtn, setShowRefreshBtn] = useState(false);
+  const [appInfo, setAppInfo] = useState(null);
   const pullThreshold = 80;
   const loadProducts = useCallback(async () => {
     try {
@@ -614,6 +621,16 @@ function App() {
       loadCustLoyalty();
       loadLoyaltyRewards();
     }
+  }, [screen]);
+
+  // When the Share screen opens, ask the server for the newest APK so the QR
+  // code and download link always point at the latest released build.
+  useEffect(() => {
+    if (screen !== 'share') return;
+    fetch(`${API_URL}/app-info`)
+      .then(r => r.json())
+      .then(d => { if (d && d.apkUrl) setAppInfo(d); })
+      .catch(() => {});
   }, [screen]);
 
   const loadMyOrders = async () => {
@@ -1901,7 +1918,9 @@ function App() {
 
   // SHARE / DOWNLOAD APP
   if (screen === 'share') {
-    const apkUrl = 'https://blitzmall-backend.onrender.com/apk/blitzmall-v2.apk';
+    // Prefer the live "latest APK" reported by the server; fall back to the
+    // known URL if the server can't be reached.
+    const apkUrl = appInfo?.apkUrl || 'https://blitzmall-backend.onrender.com/apk/blitzmall-v2.apk';
     const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(apkUrl)}`;
     
     return (
@@ -1915,7 +1934,12 @@ function App() {
             <BlitzLogo size={50} />
             <h3 style={{ marginTop: '12px', marginBottom: '4px', fontFamily: 'Unbounded, sans-serif', fontSize: '1.2rem' }}>Get BlitzMall App</h3>
             <p className="muted" style={{ fontSize: '0.9rem' }}>Scan this QR code to download the Android APK directly onto your phone.</p>
-            
+            {appInfo?.version && (
+              <div style={{ fontSize: '0.72rem', color: 'var(--green)', marginBottom: 8 }}>
+                ✅ Latest version: {appInfo.version}
+              </div>
+            )}
+
             <div className="share-qr-container">
               <img src={qrUrl} alt="App Download QR Code" />
             </div>

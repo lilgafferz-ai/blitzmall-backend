@@ -1,5 +1,9 @@
 html {
-  font-size: 12px;
+  /* Base size for all rem units. Lowered to make the UI more compact and fit
+     more content per screen. Tune this single value to scale the whole app. */
+  font-size: 10.5px;
+  -webkit-text-size-adjust: 100%; /* stop Android WebView from auto-enlarging text */
+  text-size-adjust: 100%;
 }
 
 body {

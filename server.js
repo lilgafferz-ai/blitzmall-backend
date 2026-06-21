@@ -13,7 +13,11 @@ const productCache = new NodeCache({ stdTTL: 300 }); // Cache products for 5 min
 const app = express();
 app.set('trust proxy', 1);
 const path = require('path');
-app.use('/apk', express.static(path.join(__dirname, 'shop-frontend/public')));
+// Downloadable APK(s) live OUTSIDE the web build so they aren't bundled into the
+// app itself. Still served at the same /apk/... URL the Share screen/QR use.
+app.use('/apk', express.static(path.join(__dirname, 'shop-frontend/downloads')));
+// Self-hosted over-the-air web bundles for the native app (see /api/native-update)
+app.use('/updates', express.static(path.join(__dirname, 'shop-frontend/ota')));
 // Serve React frontend
 app.use(express.static(path.join(__dirname, 'shop-frontend/build')));
 app.use(helmet({
@@ -608,12 +612,14 @@ async function searchProductImages(name, barcode) {
     }
   }
 
-  // 2. Search DuckDuckGo for real product photos by name
+  // 2. Search DuckDuckGo for real product photos by name.
+  // Queries are biased toward white-background "packshot" studio photos so the
+  // results match the rest of the catalogue's clean white-background look.
   if (images.length < 3 && name) {
     const searchQueries = [
-      `${name} product photo front view`,
-      `${name} product`,
-      name
+      `${name} product packshot white background`,
+      `${name} product photo white background`,
+      `${name} product isolated on white`
     ];
     for (const q of searchQueries) {
       if (images.length >= 3) break;
@@ -2630,9 +2636,53 @@ app.post('/api/admin/ai/chat', authenticate, async (req, res) => {
     res.json({ response: 'Sorry, I encountered an error processing your request.' });
   }
 });
+// Reports the newest downloadable APK so the in-app Share/QR screen always
+// links to the latest build automatically — just drop a new *.apk into
+// shop-frontend/public/ on release and the app picks it up, no code change.
+app.get('/api/app-info', (req, res) => {
+  try {
+    const fs = require('fs');
+    const dir = path.join(__dirname, 'shop-frontend/downloads');
+    const apks = fs.readdirSync(dir)
+      .filter(f => f.toLowerCase().endsWith('.apk'))
+      .map(f => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.t - a.t);
+    if (!apks.length) return res.json({ apkUrl: null });
+    const latest = apks[0];
+    const base = `${req.protocol}://${req.get('host')}`;
+    res.json({
+      apkUrl: `${base}/apk/${encodeURIComponent(latest.f)}`,
+      fileName: latest.f,
+      version: new Date(latest.t).toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    console.error('app-info error:', e);
+    res.json({ apkUrl: null });
+  }
+});
+
+// Reports the newest over-the-air web bundle for the native app. The mobile app
+// calls this on launch; if the version differs from what it's running, it
+// downloads the bundle and applies it on the next reopen. The bundle + its
+// latest.json are produced by `npm run build` (see scripts/make-ota-bundle.js).
+app.get('/api/native-update', (req, res) => {
+  try {
+    const fs = require('fs');
+    const p = path.join(__dirname, 'shop-frontend/ota/latest.json');
+    if (!fs.existsSync(p)) return res.json({ version: null });
+    const info = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!info.fileName || !info.version) return res.json({ version: null });
+    const base = `${req.protocol}://${req.get('host')}`;
+    res.json({ version: info.version, url: `${base}/updates/${encodeURIComponent(info.fileName)}` });
+  } catch (e) {
+    console.error('native-update error:', e);
+    res.json({ version: null });
+  }
+});
+
 // Serve React frontend for any non-API route (React Router support)
 app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api') || req.path.startsWith('/apk')) {
+  if (req.path.startsWith('/api') || req.path.startsWith('/apk') || req.path.startsWith('/updates')) {
     return next();
   }
   res.sendFile(path.join(__dirname, 'shop-frontend/build', 'index.html'));

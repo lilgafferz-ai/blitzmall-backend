@@ -27,6 +27,20 @@ const money = (n) => 'KES ' + (Math.round((n || 0) * 100) / 100).toLocaleString(
 const stars = (n) => '★'.repeat(Math.max(0,n)) + '☆'.repeat(Math.max(0,5-n));
 const fmt = (d) => d ? new Date(d).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) : '';
 
+// The online image finder is a back-office tool. It is only enabled on the
+// desktop ("PC") app — the Electron build or a desktop browser — and hidden on
+// the phone, where staff run the shop floor and shouldn't be hunting for photos.
+const isPcApp = (() => {
+  try {
+    const ua = (navigator.userAgent || '').toLowerCase();
+    const isMobileNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+    const isPhone = /android|iphone|ipad|ipod|mobile/.test(ua);
+    return /electron/.test(ua) || (!isMobileNative && !isPhone);
+  } catch (e) {
+    return false;
+  }
+})();
+
 const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCategoriesModal, onSubmit, onNext }) => {
   const [form, setForm] = React.useState(initialForm || BLANK);
   const [searching, setSearching] = React.useState(false);
@@ -107,8 +121,10 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
     }
   }, [selectedImages]);
 
-  // Auto-search for product photos when name or barcode changes (debounced)
+  // Auto-search for product photos when name or barcode changes (debounced).
+  // Skipped entirely on the phone — the finder is a PC-only feature.
   React.useEffect(() => {
+    if (!isPcApp) return;
     if (autoSearchRef.current) clearTimeout(autoSearchRef.current);
     const name = form.name.trim();
     const barcode = form.barcode.trim();
@@ -176,10 +192,11 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
       <div className="blitz-admin-full" style={{marginBottom:10}}>
         <label style={{display:'flex', alignItems:'center', gap:8, marginBottom:8, fontWeight:600, fontSize:'.88rem'}}>
           Product Photos
-          <span style={{fontWeight:400,fontSize:'.72rem',color:'var(--muted)'}}>(Auto-found or upload)</span>
+          <span style={{fontWeight:400,fontSize:'.72rem',color:'var(--muted)'}}>{isPcApp ? '(Auto-found on white background, or upload)' : '(Upload)'}</span>
         </label>
         <div style={{display:'flex', gap:8}}>
-          <button type="button" className="blitz-admin-btn small" onClick={findPhotos} disabled={searching || (!form.name && !form.barcode)} 
+          {isPcApp && (
+          <button type="button" className="blitz-admin-btn small" onClick={findPhotos} disabled={searching || (!form.name && !form.barcode)}
             style={{
               background: 'var(--orange)',
               color: '#fff',
@@ -195,6 +212,7 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
             }}>
             {searching ? '⏳ Searching...' : '🔍 Find Photos Online'}
           </button>
+          )}
           <label className="blitz-admin-btn small" style={{
             background: 'var(--bg-2)',
             border: '1px solid var(--line)',
@@ -1082,7 +1100,7 @@ const loadStockTransfers = async () => {
   }, [stopCamera]);
 
   const completeSaleRecord = async () => {
-    const saleData = { items: saleCart.length ? saleCart : window._pendingSaleCart, paymentMethod: payMethod, amountGiven, cashPart, mpesaPart, cashier, custPhone, branchId: activeBranchId || undefined };
+    const saleData = { items: saleCart.length ? saleCart : window._pendingSaleCart, paymentMethod: payMethod, amountGiven, cashPart, mpesaPart, staff: cashier, customerPhone: custPhone, branchId: activeBranchId || undefined };
     try {
       const r = await authPost(API_URL + '/admin/sales', saleData);
       const d = await r.json();

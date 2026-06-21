@@ -25,3 +25,8 @@ yarn-error.log*
 # Electron build outputs
 /dist
 
+# Android signing secrets — never commit these
+/android/keystore.properties
+*.jks
+*.keystore
+

@@ -38,10 +38,6 @@ export const getQueuedSales = () => {
   } catch (e) { return []; }
 };
 
-const clearSynced = () => {
-  localStorage.removeItem(QUEUE_KEY);
-};
-
 export const getPendingCount = () => getQueuedSales().length;
 
 // ===== SYNC ENGINE =====
@@ -51,7 +47,7 @@ export const syncQueuedSales = async (authHeaders) => {
   if (!queue.length) return { synced: 0, failed: 0 };
 
   let synced = 0;
-  let failed = 0;
+  const remaining = [];
   let API_URL = 'https://blitzmall-backend.onrender.com/api';
   try {
     const saved = localStorage.getItem('blitz_api_url');
@@ -72,26 +68,31 @@ export const syncQueuedSales = async (authHeaders) => {
           amountGiven: sale.amountGiven || 0,
           cashPart: sale.cashPart || 0,
           mpesaPart: sale.mpesaPart || 0,
-          staff: sale.cashier || 'Owner',
-          customerPhone: sale.custPhone || '',
+          // Support the current field names and any sale queued by an older
+          // app version (which used cashier/custPhone).
+          staff: sale.staff || sale.cashier || 'Owner',
+          customerPhone: sale.customerPhone || sale.custPhone || '',
+          branchId: sale.branchId,
         }),
       });
       const d = await r.json();
       if (d.success) {
         synced++;
       } else {
-        failed++;
+        remaining.push(sale); // server rejected it — keep it to retry later
       }
     } catch (e) {
-      failed++;
+      remaining.push(sale); // network error — keep it to retry later
     }
   }
 
+  // Persist only the sales that still need syncing, so synced sales are
+  // cleared and failed ones are never silently dropped.
+  localStorage.setItem(QUEUE_KEY, JSON.stringify(remaining));
   if (synced > 0) {
-    clearSynced();
     window.dispatchEvent(new CustomEvent(OFFLINE_EVENT, { detail: { synced } }));
   }
-  return { synced, failed };
+  return { synced, failed: remaining.length };
 };
 
 // ===== ONLINE/OFFLINE DETECTION =====
