@@ -2707,6 +2707,12 @@ app.get('/api/native-update', (req, res) => {
   }
 });
 
+// Lightweight health/version probe. Lets us confirm which build is actually
+// running (old broken build won't have this route or the sanitizer fix).
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, build: 'express5-sanitizer-fix', time: new Date().toISOString() });
+});
+
 // Serve React frontend for any non-API route (React Router support)
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api') || req.path.startsWith('/apk') || req.path.startsWith('/updates')) {
