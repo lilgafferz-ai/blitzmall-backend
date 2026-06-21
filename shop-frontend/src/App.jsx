@@ -63,6 +63,14 @@ const getAvatarSrc = (src) => {
   return src.startsWith('/') ? src.substring(1) : src;
 };
 
+// Product images may be a single URL or an array of up to 3. These helpers keep
+// the default display to one photo and expose the full set for the tap gallery.
+const firstImage = (img) => (Array.isArray(img) ? img[0] : img);
+const allImages = (img) => (Array.isArray(img) ? img.filter(Boolean) : (img ? [img] : []));
+// Upscale Open Food/Beauty Facts thumbnails (…front_en.3.400.jpg) to full-res
+// so the tapped gallery is crisp and clear. Other URLs pass through unchanged.
+const hiRes = (url) => (typeof url === 'string' ? url.replace(/\.\d+\.jpg(\?.*)?$/i, '.full.jpg') : url);
+
 function Avatar({ profile, size = 40 }) {
   const st = { width: size, height: size };
   const rawSrc = profile?.photo || (AVATARS.find(x => x.id === profile?.avatarId) || AVATARS[0]).src;
@@ -253,6 +261,7 @@ function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showRefreshBtn, setShowRefreshBtn] = useState(false);
   const [appInfo, setAppInfo] = useState(null);
+  const [gallery, setGallery] = useState(null); // image URLs when the photo gallery is open
   const pullThreshold = 80;
   const loadProducts = useCallback(async () => {
     try {
@@ -1175,7 +1184,7 @@ function App() {
                     <div className="flash-item" key={`flash-${p._id || p.id}`} onClick={() => openProduct(p)}>
                       <span className="flash-badge">-{pct}%</span>
                       <div className="flash-item-img">
-                        {p.image ? (Array.isArray(p.image) ? <div className="multi-image-container">{p.image.map((url, i) => <img key={i} src={url} alt={p.name} className="product-img-element" loading="lazy"/>)}</div> : <img src={p.image} alt={p.name} className="product-img-element" loading="lazy"/>) : '🛍️'}
+                        {p.image ? <img src={firstImage(p.image)} alt={p.name} className="product-img-element" loading="lazy"/> : '🛍️'}
                       </div>
                       <div className="flash-item-info">
                         <span className="flash-item-name">{p.name}</span>
@@ -1441,7 +1450,10 @@ function App() {
         <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('home')}>‹</button>
           <button className="icon-btn cart-icon" onClick={() => setScreen('cart')}>🛒{cartCount > 0 && <span className="cart-badge">{cartCount}</span>}</button></header>
         <div className="scroll detail-wrap">
-          <div className="detail-img">{p.image ? (Array.isArray(p.image) ? <div className="multi-image-container">{p.image.map((url, i) => <img key={i} src={url} alt={p.name} className="product-img-element" loading="lazy"/>)}</div> : <img src={p.image} alt={p.name} className="product-img-element" loading="lazy"/>) : <div className="noimg">🛍️</div>}</div>
+          <div className="detail-img" onClick={() => { const imgs = allImages(p.image); if (imgs.length) setGallery(imgs); }}>
+            {p.image ? <img src={firstImage(p.image)} alt={p.name} className="product-img-element" loading="lazy"/> : <div className="noimg">🛍️</div>}
+            {allImages(p.image).length > 1 && <span className="detail-img-hint">📷 {allImages(p.image).length} photos · tap</span>}
+          </div>
           <div className="detail-body">
             <span className="detail-cat">{categoryOf(p)}</span>
             <h1 className="detail-name">{p.name}</h1>
@@ -1453,6 +1465,17 @@ function App() {
         </div>
         <div className="detail-bar"><div className="detail-bar-total">KES {p.price * detailQty}</div>
           <button className="btn-neon" onClick={() => { addToCart(p, detailQty); setScreen('cart'); }}>Add to cart</button></div>
+        {gallery && (
+          <div className="img-gallery-overlay" onClick={() => setGallery(null)}>
+            <button className="gallery-close" onClick={() => setGallery(null)}>✕</button>
+            <div className="gallery-slider" onClick={e => e.stopPropagation()}>
+              {gallery.map((url, i) => (
+                <div className="gallery-slide" key={i}><img src={hiRes(url)} alt={`Photo ${i + 1}`} /></div>
+              ))}
+            </div>
+            {gallery.length > 1 && <div className="gallery-hint">← swipe to see all {gallery.length} photos →</div>}
+          </div>
+        )}
         {renderToasts()}
       </div>
     );
@@ -1979,7 +2002,7 @@ const ProductCard = React.memo(function ProductCard({ p, onOpen, onAdd }) {
   const id = p._id || p.id;
   return (
     <div className="prod-card" onClick={() => onOpen(p)}>
-      <div className="prod-img">{p.image ? (Array.isArray(p.image) ? <div className="multi-image-container">{p.image.map((url, i) => <img key={i} src={url} alt={p.name} className="product-img-element" loading="lazy"/>)}</div> : <img src={p.image} alt={p.name} className="product-img-element" loading="lazy"/>) : <div className="noimg">🛍️</div>}</div>
+      <div className="prod-img">{p.image ? <img src={firstImage(p.image)} alt={p.name} className="product-img-element" loading="lazy"/> : <div className="noimg">🛍️</div>}</div>
       <div className="prod-meta"><span className="prod-name">{p.name}</span><span className="prod-price">KES {p.price}</span></div>
       <button className="prod-add" onClick={e => { e.stopPropagation(); onAdd(p, 1); }}>+</button>
     </div>
