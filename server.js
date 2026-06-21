@@ -2631,7 +2631,10 @@ app.post('/api/admin/ai/chat', authenticate, async (req, res) => {
   }
 });
 // Serve React frontend for any non-API route (React Router support)
-app.get(/^(?!\/api).+/, (req, res) => {
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api') || req.path.startsWith('/apk')) {
+    return next();
+  }
   res.sendFile(path.join(__dirname, 'shop-frontend/build', 'index.html'));
 });
 
