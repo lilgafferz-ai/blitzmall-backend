@@ -610,9 +610,9 @@ async function searchDuckDuckGoImages(query, maxResults = 10) {
 
 // ---- Shared image search pipeline: OpenFoodFacts → DuckDuckGo → AI fallback ----
 // Returns up to 3 image URLs. Used by both the API endpoint and autoFetchProductImage.
-// Finds REAL, accurate photos of the actual product — by the scanned barcode
-// (most reliable) or the product name. No AI/generated images: if we can't find
-// a genuine photo we return fewer (or none) rather than a made-up one.
+// Finds REAL photos BY NAME, only returning a photo when the product's own details
+// (brand, product, size) match the words typed — so the picture and the typed
+// description line up. Barcode is a fallback only. No AI / no random web images.
 async function searchProductImages(name, barcode) {
   const images = [];
   const addImg = (url) => {
@@ -624,10 +624,15 @@ async function searchProductImages(name, barcode) {
     const t = setTimeout(() => ctrl.abort(), ms);
     return fetch(url, { headers: { 'User-Agent': 'BlitzMall/1.0' }, signal: ctrl.signal }).finally(() => clearTimeout(t));
   };
-  let canonicalName = '';
+  // Normalise text and glue sizes together ("500 ml" -> "500ml") for matching.
+  const STOP = new Set(['the','and','for','with','of','a','an','x','pack','pcs','pc','ml','l','g','kg']);
+  const norm = (s) => (s || '').toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/(\d)\s+(ml|l|g|kg|cl|mg|kgs|pcs)\b/g, '$1$2')
+    .replace(/\s+/g, ' ').trim();
 
-  // The Open Facts family covers food, drinks, beauty, household and pet products
-  // and exposes BOTH a barcode lookup and a name search — real photos, no API key.
+  // Open Facts family (food, drinks, beauty, household, pet) — real product
+  // photos with a searchable catalogue, no API key.
   const FACTS = [
     'https://world.openfoodfacts.org',
     'https://world.openbeautyfacts.org',
@@ -635,9 +640,47 @@ async function searchProductImages(name, barcode) {
     'https://world.openpetfoodfacts.org',
   ];
 
-  // 1. BARCODE — the most accurate signal: it uniquely identifies the exact
-  //    product, so these are guaranteed-correct photos.
-  if (barcode && barcode.trim()) {
+  const qWords = norm(name).split(' ').filter(w => w.length >= 2 && !STOP.has(w));
+  const sizeWords = qWords.filter(w => /\d/.test(w));   // 500ml, 1l, 250g …
+  const textWords = qWords.filter(w => !/\d/.test(w));  // brand / product words
+
+  // NAME — the primary, strict path. Search every catalogue in parallel, then keep
+  // ONLY products whose own details contain the words you typed, so the chosen
+  // photo matches your description. Best match first; reject everything else.
+  if (qWords.length) {
+    const need = Math.max(1, Math.ceil(textWords.length * 0.7)); // most brand/product words must match
+    const lists = await Promise.all(FACTS.map(async (base) => {
+      try {
+        const u = `${base}/cgi/search.pl?search_terms=${encodeURIComponent(name.trim())}&search_simple=1&action=process&json=1&page_size=20&fields=product_name,brands,quantity,image_front_url`;
+        const r = await fetchT(u, 9000);
+        if (!r.ok) return [];
+        const d = await r.json();
+        return d.products || [];
+      } catch (e) { return []; }
+    }));
+    const candidates = [];
+    for (const p of lists.flat()) {
+      if (!p.image_front_url) continue;
+      const text = norm(`${p.product_name || ''} ${p.brands || ''} ${p.quantity || ''}`);
+      if (!text) continue;
+      const tm = textWords.filter(w => text.includes(w)).length;
+      const sm = sizeWords.filter(w => text.includes(w)).length;
+      let score;
+      if (textWords.length) {
+        if (tm < need) continue;   // not enough of your words match — reject it
+        score = tm * 2 + sm;       // brand/product matches weigh most; size breaks ties
+      } else {
+        if (sm === 0) continue;
+        score = sm;
+      }
+      candidates.push({ url: p.image_front_url, score });
+    }
+    candidates.sort((a, b) => b.score - a.score).forEach(c => { if (images.length < 3) addImg(c.url); });
+  }
+
+  // BARCODE — fallback only: if a code happens to be present and the name found
+  // nothing, look it up (an exact, guaranteed-correct match).
+  if (images.length === 0 && barcode && barcode.trim()) {
     const bc = barcode.trim();
     for (const base of FACTS) {
       if (images.length >= 3) break;
@@ -645,39 +688,13 @@ async function searchProductImages(name, barcode) {
         const r = await fetchT(`${base}/api/v0/product/${bc}.json`);
         if (!r.ok) continue;
         const d = await r.json();
-        if (d.status === 1 && d.product) {
-          if (!canonicalName) canonicalName = (d.product.product_name || d.product.product_name_en || '').trim();
-          addImg(d.product.image_front_url); // front-of-pack: the recognisable shot
-          addImg(d.product.image_url);
-        }
-      } catch (e) { /* try the next database */ }
-    }
-  }
-
-  // 2. NAME — reliable Open Facts text search returns real product photos that
-  //    match the name. Prefer the official name from the barcode when we have it.
-  const query = (canonicalName || name || '').trim();
-  if (images.length < 3 && query) {
-    for (const base of FACTS) {
-      if (images.length >= 3) break;
-      try {
-        const u = `${base}/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=10&fields=product_name,image_front_url`;
-        const r = await fetchT(u, 9000);
-        if (!r.ok) continue;
-        const d = await r.json();
-        for (const p of (d.products || [])) { addImg(p.image_front_url); if (images.length >= 3) break; }
-      } catch (e) { /* try the next database */ }
-    }
-    // Last resort: DuckDuckGo image search (often blocked on cloud hosts).
-    if (images.length < 3) {
-      try {
-        const imgs = await searchDuckDuckGoImages(query, 6);
-        for (const url of imgs) { addImg(url); if (images.length >= 3) break; }
+        if (d.status === 1 && d.product) { addImg(d.product.image_front_url); addImg(d.product.image_url); }
       } catch (e) {}
     }
   }
 
-  // Real photos only — never pad with AI. Accuracy over quantity.
+  // Only photos whose details match what you typed — accuracy over quantity
+  // (returns nothing rather than a wrong picture; then you upload manually).
   return images.slice(0, 3);
 }
 
