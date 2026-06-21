@@ -2714,7 +2714,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // Serve React frontend for any non-API route (React Router support)
-app.get('*', (req, res, next) => {
+app.get('/*path', (req, res, next) => {
   if (req.path.startsWith('/api') || req.path.startsWith('/apk') || req.path.startsWith('/updates')) {
     return next();
   }
