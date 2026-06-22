@@ -2785,6 +2785,25 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, build: 'express5-sanitizer-fix', time: new Date().toISOString() });
 });
 
+// TEMP diagnostic for the Google image source — remove after debugging. Reveals
+// whether the keys are set and what Google replies (never returns the key itself).
+app.get('/api/image-search-debug', async (req, res) => {
+  const out = { hasKey: !!process.env.GOOGLE_API_KEY, hasCx: !!process.env.GOOGLE_CSE_ID };
+  if (!out.hasKey || !out.hasCx) return res.json(out);
+  try {
+    const u = `https://www.googleapis.com/customsearch/v1?key=${process.env.GOOGLE_API_KEY}&cx=${process.env.GOOGLE_CSE_ID}&searchType=image&num=3&q=coca%20cola`;
+    const r = await fetch(u);
+    const d = await r.json().catch(() => ({}));
+    out.httpStatus = r.status;
+    out.itemCount = (d.items || []).length;
+    if (d.error) out.googleError = { code: d.error.code, message: d.error.message, reason: (d.error.errors && d.error.errors[0] && d.error.errors[0].reason) || null };
+    res.json(out);
+  } catch (e) {
+    out.fetchError = String((e && e.message) || e);
+    res.json(out);
+  }
+});
+
 // Serve React frontend for any non-API route (React Router support)
 app.get('/*path', (req, res, next) => {
   if (req.path.startsWith('/api') || req.path.startsWith('/apk') || req.path.startsWith('/updates')) {
