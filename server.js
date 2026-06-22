@@ -2796,7 +2796,11 @@ app.get('/api/image-search-debug', async (req, res) => {
     const d = await r.json().catch(() => ({}));
     out.httpStatus = r.status;
     out.itemCount = (d.items || []).length;
-    if (d.error) out.googleError = { code: d.error.code, message: d.error.message, reason: (d.error.errors && d.error.errors[0] && d.error.errors[0].reason) || null };
+    if (d.error) {
+      out.googleError = { code: d.error.code, message: d.error.message, status: d.error.status || null };
+      // details often carries metadata.consumer = "projects/<NUMBER>" — the project the KEY belongs to
+      out.errorDetails = d.error.details || null;
+    }
     res.json(out);
   } catch (e) {
     out.fetchError = String((e && e.message) || e);
