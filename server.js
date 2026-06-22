@@ -2789,6 +2789,9 @@ app.get('/api/health', (req, res) => {
 // whether the keys are set and what Google replies (never returns the key itself).
 app.get('/api/image-search-debug', async (req, res) => {
   const out = { hasKey: !!process.env.GOOGLE_API_KEY, hasCx: !!process.env.GOOGLE_CSE_ID };
+  out.keyTail = process.env.GOOGLE_API_KEY ? ('…' + process.env.GOOGLE_API_KEY.slice(-6)) : null; // last 6 chars only
+  out.keyLen = process.env.GOOGLE_API_KEY ? process.env.GOOGLE_API_KEY.length : 0;
+  out.cx = process.env.GOOGLE_CSE_ID || null; // the cx is not secret
   if (!out.hasKey || !out.hasCx) return res.json(out);
   try {
     const u = `https://www.googleapis.com/customsearch/v1?key=${process.env.GOOGLE_API_KEY}&cx=${process.env.GOOGLE_CSE_ID}&searchType=image&num=3&q=coca%20cola`;
