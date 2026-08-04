@@ -433,6 +433,8 @@ function Admin() {
   const [showCategoriesModal, setShowCategoriesModal] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [categoryError, setCategoryError] = useState('');
+  // Active inventory category filter ('' = All stock)
+  const [inventoryCategory, setInventoryCategory] = useState('');
   // Admin AI Chat states
   const [adminAiMessages, setAdminAiMessages] = useState([
     { sender: 'bot', text: '🤖 Hi! I\'m your Blitz Mall AI Business Assistant. Ask me about sales, inventory, orders, profit, predictions, or anything about your store!' }
@@ -482,11 +484,35 @@ function Admin() {
 
   useEffect(() => { mutedRef.current = muted; }, [muted]);
 
+  const deferredSearch = React.useDeferredValue(search);
+
   const filtered = React.useMemo(() => {
     const list = Array.isArray(products) ? products : [];
-    const term = search.trim().toLowerCase();
-    return list.filter(p => !term || p.name.toLowerCase().includes(term) || (p.barcode||'').includes(search) || (p.category||'').toLowerCase().includes(term));
-  }, [products, search]);
+    const term = deferredSearch.trim().toLowerCase();
+    return list.filter(p => {
+      // Category filter: only show stock under the selected category ('' = All)
+      const cat = (p.category && p.category.trim()) ? p.category.trim() : 'Other';
+      if (inventoryCategory && cat.toLowerCase() !== inventoryCategory.toLowerCase()) return false;
+      return !term || p.name.toLowerCase().includes(term) || (p.barcode||'').includes(deferredSearch) || cat.toLowerCase().includes(term);
+    });
+  }, [products, deferredSearch, inventoryCategory]);
+
+  // Categories derived from actual stock, each with a live item count
+  const inventoryCats = React.useMemo(() => {
+    const counts = new Map();
+    (Array.isArray(products) ? products : []).forEach(p => {
+      const cat = (p.category && p.category.trim()) ? p.category.trim() : 'Other';
+      counts.set(cat, (counts.get(cat) || 0) + 1);
+    });
+    return [...counts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [products]);
+
+  // If the selected category no longer has any stock, fall back to viewing all
+  useEffect(() => {
+    if (inventoryCategory && !inventoryCats.some(c => c.name.toLowerCase() === inventoryCategory.toLowerCase())) {
+      setInventoryCategory('');
+    }
+  }, [inventoryCategory, inventoryCats]);
 
 
 
@@ -1146,11 +1172,17 @@ const loadStockTransfers = async () => {
     };
   }, []);
 
-  // Inactivity timeout (15 minutes)
+  // Inactivity timeout (15 minutes) - throttled to prevent cursor lag during mousemove
   useEffect(() => {
     if (!loggedIn) return;
     let timer;
-    const resetTimer = () => {
+    let lastReset = 0;
+
+    const resetTimer = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastReset < 30000) return; // Throttle to max once per 30s for passive events like mousemove
+      lastReset = now;
+
       clearTimeout(timer);
       timer = setTimeout(() => {
         localStorage.removeItem('bm_token');
@@ -1163,13 +1195,20 @@ const loadStockTransfers = async () => {
       }, 15 * 60 * 1000);
     };
 
-    const events = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
-    events.forEach(event => window.addEventListener(event, resetTimer));
-    resetTimer();
+    const passiveEvents = ['mousemove', 'scroll'];
+    const activeEvents = ['keydown', 'click', 'touchstart'];
+
+    const handlePassive = () => resetTimer(false);
+    const handleActive = () => resetTimer(true);
+
+    passiveEvents.forEach(e => window.addEventListener(e, handlePassive, { passive: true }));
+    activeEvents.forEach(e => window.addEventListener(e, handleActive, { passive: true }));
+    resetTimer(true);
 
     return () => {
       clearTimeout(timer);
-      events.forEach(event => window.removeEventListener(event, resetTimer));
+      passiveEvents.forEach(e => window.removeEventListener(e, handlePassive));
+      activeEvents.forEach(e => window.removeEventListener(e, handleActive));
     };
   }, [loggedIn]);
 
@@ -1936,7 +1975,13 @@ ${div}
 
       {safeTab === "inventory" && (
         <div className="blitz-admin-body">
-          <div className="blitz-admin-row-between"><h2>Inventory</h2><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="blitz-admin-btn small" onClick={exportInventoryExcel}>📊 Excel</button><button className="blitz-admin-btn small" onClick={() => setShowCategoriesModal(true)}>📂 Manage Categories</button><button className="blitz-admin-btn small" onClick={() => { showForm ? resetForm() : setShowForm(true); }}>{showForm ? "✕ Cancel" : "➕ Add stock"}</button></div></div>
+          <div className="blitz-admin-row-between"><h2>Inventory</h2><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="blitz-admin-btn small" onClick={exportInventoryExcel}>📊 Excel</button><button className="blitz-admin-btn small" onClick={() => setShowCategoriesModal(true)}>📂 Manage Categories</button><button className="blitz-admin-btn small" onClick={() => { if (showForm) { resetForm(); } else { setForm(f => ({ ...f, category: inventoryCategory || f.category })); setShowForm(true); } }}>{showForm ? "✕ Cancel" : "➕ Add stock"}</button></div></div>
+          <div className="inv-cats">
+            <button className={!inventoryCategory ? 'on' : ''} onClick={() => setInventoryCategory('')} title="Show all stock">📦 All <span className="cnt">({products.length})</span></button>
+            {inventoryCats.map(c => (
+              <button key={c.name} className={inventoryCategory === c.name ? 'on' : ''} onClick={() => setInventoryCategory(c.name)}>{c.name} <span className="cnt">({c.count})</span></button>
+            ))}
+          </div>
           {showForm && (
             <AddStockForm 
               initialForm={form}
@@ -1949,7 +1994,7 @@ ${div}
           )}
           <div className="blitz-admin-search"><span>🔍</span><input placeholder="Search name, barcode or category…" value={search} onChange={e => setSearch(e.target.value)} /></div>
           {(
-            filtered.length === 0 ? <p className="blitz-admin-empty">No items yet.</p> : (
+            filtered.length === 0 ? <p className="blitz-admin-empty">{inventoryCategory ? `No items in "${inventoryCategory}"` : 'No items yet.'}</p> : (
               <div className="blitz-admin-list">{filtered.map(p => {
                 const margin = (p.price||0)-(p.buyingPrice||0);
                 return (

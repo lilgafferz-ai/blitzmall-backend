@@ -285,6 +285,8 @@ function App() {
   }, []);
 
   const touchStartYRef = useRef(0);
+  const pullDistanceRef = useRef(0);
+  const rafIdRef = useRef(null);
 
   const handleTouchStart = (e) => {
     const el = e.currentTarget;
@@ -295,17 +297,31 @@ function App() {
   const handleTouchMove = (e) => {
     if (!touchStartYRef.current) return;
     const delta = e.touches[0].clientY - touchStartYRef.current;
-    if (delta > 0 && delta < 200) setPullDistance(delta);
+    if (delta > 0 && delta < 200) {
+      pullDistanceRef.current = delta;
+      if (!rafIdRef.current) {
+        rafIdRef.current = requestAnimationFrame(() => {
+          setPullDistance(pullDistanceRef.current);
+          rafIdRef.current = null;
+        });
+      }
+    }
   };
 
   const handleTouchEnd = async () => {
-    if (pullDistance >= pullThreshold && !isRefreshing) {
+    if (rafIdRef.current) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    const finalDist = pullDistanceRef.current || pullDistance;
+    if (finalDist >= pullThreshold && !isRefreshing) {
       setIsRefreshing(true);
       await loadProducts();
       await loadBanners();
       setIsRefreshing(false);
     }
     setPullDistance(0);
+    pullDistanceRef.current = 0;
     touchStartYRef.current = 0;
   };
 
@@ -569,34 +585,23 @@ function App() {
     </div>
   );
 
-  const renderShakeStyle = () => (
-    <style>{`
-      @keyframes shake {
-        0%, 100% { transform: translateX(0); }
-        10%, 30%, 50%, 70%, 90% { transform: translateX(-6px); }
-        20%, 40%, 60%, 80% { transform: translateX(6px); }
-      }
-      .shake-animation {
-        animation: shake 0.6s ease-in-out infinite;
-      }
-    `}</style>
-  );
+  const deferredSearchTerm = React.useDeferredValue(searchTerm);
 
   const categoryOf = (p) => (p.category && p.category.trim()) ? p.category.trim() : 'Other';
   const categories = React.useMemo(() => {
     return ['All', ...[...new Set(products.map(categoryOf))].sort()];
   }, [products]);
   const productId = (p) => p._id || p.id;
-  const total = cart.reduce((s, i) => s + i.price * i.quantity, 0);
-  const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
+  const total = React.useMemo(() => cart.reduce((s, i) => s + i.price * i.quantity, 0), [cart]);
+  const cartCount = React.useMemo(() => cart.reduce((s, i) => s + i.quantity, 0), [cart]);
 
   const trending = React.useMemo(() => {
-    const term = searchTerm.trim().toLowerCase();
+    const term = deferredSearchTerm.trim().toLowerCase();
     let shown = products;
     if (activeCategory !== 'All') shown = shown.filter(p => categoryOf(p) === activeCategory);
     if (term) shown = shown.filter(p => p.name.toLowerCase().includes(term) || (p.description || '').toLowerCase().includes(term) || categoryOf(p).toLowerCase().includes(term));
     return [...shown].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-  }, [products, activeCategory, searchTerm]);
+  }, [products, activeCategory, deferredSearchTerm]);
 
   const ORDERS_CACHE_KEY_ORDERS = ORDERS_CACHE_KEY + '_' + (customer?.customerId || 'anon');
   const syncOfflineOrders = useCallback(async () => {
@@ -1437,7 +1442,6 @@ function App() {
 
         <BottomNav />
         {renderToasts()}
-        {renderShakeStyle()}
       </div>
     );
   }
