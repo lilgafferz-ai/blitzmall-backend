@@ -435,6 +435,8 @@ function Admin() {
   const [categoryError, setCategoryError] = useState('');
   // Active inventory category filter ('' = All stock)
   const [inventoryCategory, setInventoryCategory] = useState('');
+  // Collapsed inventory category sections (grouped stock view)
+  const [collapsedCats, setCollapsedCats] = useState({});
   // Admin AI Chat states
   const [adminAiMessages, setAdminAiMessages] = useState([
     { sender: 'bot', text: '🤖 Hi! I\'m your Blitz Mall AI Business Assistant. Ask me about sales, inventory, orders, profit, predictions, or anything about your store!' }
@@ -496,6 +498,21 @@ function Admin() {
       return !term || p.name.toLowerCase().includes(term) || (p.barcode||'').includes(deferredSearch) || cat.toLowerCase().includes(term);
     });
   }, [products, deferredSearch, inventoryCategory]);
+
+  // Group the filtered stock by category into collapsible sections ('Other' last)
+  const invGroups = React.useMemo(() => {
+    const g = new Map();
+    filtered.forEach(p => {
+      const cat = (p.category && p.category.trim()) ? p.category.trim() : 'Other';
+      if (!g.has(cat)) g.set(cat, []);
+      g.get(cat).push(p);
+    });
+    return [...g.entries()].sort((a, b) => {
+      if (a[0] === 'Other') return 1;
+      if (b[0] === 'Other') return -1;
+      return a[0].localeCompare(b[0]);
+    });
+  }, [filtered]);
 
   // Categories derived from actual stock, each with a live item count
   const inventoryCats = React.useMemo(() => {
@@ -1995,7 +2012,18 @@ ${div}
           <div className="blitz-admin-search"><span>🔍</span><input placeholder="Search name, barcode or category…" value={search} onChange={e => setSearch(e.target.value)} /></div>
           {(
             filtered.length === 0 ? <p className="blitz-admin-empty">{inventoryCategory ? `No items in "${inventoryCategory}"` : 'No items yet.'}</p> : (
-              <div className="blitz-admin-list">{filtered.map(p => {
+              <div className="blitz-admin-list">{invGroups.map(([cat, items]) => {
+                const collapsed = !!collapsedCats[cat];
+                return (
+                  <div className="inv-group" key={cat}>
+                    <button type="button" className="inv-group-head" onClick={() => setCollapsedCats(c => ({ ...c, [cat]: !c[cat] }))} title={collapsed ? `Expand ${cat} section` : `Collapse ${cat} section`}>
+                      <span className="inv-group-title">🗂️ {cat}</span>
+                      <span className="inv-group-meta">{items.length} item{items.length !== 1 ? 's' : ''} · {money(items.reduce((s, p) => s + (p.stock || 0), 0))} in stock</span>
+                      <span className={`inv-group-arrow${collapsed ? '' : ' open'}`}>▾</span>
+                    </button>
+                    {!collapsed && (
+                      <div className="inv-group-body">
+                {items.map(p => {
                 const margin = (p.price||0)-(p.buyingPrice||0);
                 return (
                   <div className="blitz-admin-item" key={p._id}>
@@ -2032,10 +2060,15 @@ ${div}
                       }} title="Configure Flash Sale">⚡</button>
                       <button onClick={() => editProduct(p)}>✏️</button>
                       <button onClick={() => delProduct(p._id)}>🗑️</button>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}</div>
+                  );
+                })}
+                </div>
+              )}
+            </div>
+          );
+        })}</div>
             )
           )}
 

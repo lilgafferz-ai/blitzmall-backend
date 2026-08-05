@@ -175,6 +175,17 @@ input, textarea, select {
 .inv-cats button.on { background:var(--grad); color:#1a0a00; border-color:transparent; box-shadow:var(--glow); }
 .inv-cats button .cnt { opacity:.65; font-weight:700; }
 
+/* Inventory grouped category sections */
+.inv-group { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--card); }
+.inv-group-head { width:100%; display:flex; align-items:center; gap:10px; padding:12px 14px; background:var(--bg-2); border:none; cursor:pointer; color:var(--text); font-family:inherit; font-size:.92rem; font-weight:700; text-align:left; transition:background .15s; }
+.inv-group-head:hover { background:var(--line); }
+.inv-group-title { display:flex; align-items:center; gap:8px; color:var(--gold); }
+.inv-group-meta { margin-left:auto; font-size:.74rem; font-weight:600; color:var(--muted); white-space:nowrap; }
+.inv-group-arrow { color:var(--muted); font-size:.78rem; transition:transform .2s; }
+.inv-group-arrow.open { transform:rotate(180deg); }
+.inv-group-body { display:flex; flex-direction:column; gap:10px; padding:12px; }
+.inv-group-body .blitz-admin-item { background:var(--bg); }
+
 .tag { font-size:.72rem; padding:2px 9px; border-radius:20px; font-weight:600; }
 .tag.ok { background:rgba(54,211,153,.12); color:var(--green); }
 .tag.low { background:rgba(255,210,74,.14); color:var(--gold); }

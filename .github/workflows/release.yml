@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-and-deploy:
@@ -32,7 +36,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run electron:build -- -p always
 
+      # The mobile app updates via the self-hosted OTA bundle committed to ota/
+      # (served by /api/native-update on Render). Capgo cloud is only used if a
+      # CAPGO_TOKEN secret is configured, so a missing token never fails the run.
       - name: Publish Android Update (Capgo OTA)
+        if: ${{ secrets.CAPGO_TOKEN != '' }}
         working-directory: ./shop-frontend
         env:
           CAPGO_TOKEN: ${{ secrets.CAPGO_TOKEN }}
