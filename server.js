@@ -433,6 +433,19 @@ const authorize = (...roles) => {
   };
 };
 
+// Permission-based gate for routes the frontend already shows to staff.
+// Owner always passes; anyone else must hold the named permission in their
+// permissions array (the same list that decides which tabs staff see, e.g.
+// the Inventory tab on the phone POS). Keeps the server consistent with the UI.
+const requirePermission = (perm) => {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+    if (req.user.role === 'owner') return next();
+    if (Array.isArray(req.user.permissions) && req.user.permissions.includes(perm)) return next();
+    return res.status(403).json({ error: 'Insufficient permissions' });
+  };
+};
+
 // Helper branchFilter definition moved to top level
 
 // ===== USERS & JWT AUTH =====
@@ -783,7 +796,7 @@ async function autoFetchProductImage(name, barcode) {
 }
 
 // ===== PRODUCTS =====
-app.post('/api/admin/products', authenticate, authorize('owner', 'manager'), async (req, res) => {
+app.post('/api/admin/products', authenticate, requirePermission('inventory'), async (req, res) => {
   const { name, category, barcode, buyingPrice, price, stock, description, image, expiryDate, branchId } = req.body;
   if (!name || price === undefined || price === '') return res.status(400).json({ error: 'Name and selling price required' });
   try {
@@ -803,7 +816,7 @@ app.post('/api/admin/products', authenticate, authorize('owner', 'manager'), asy
     res.json({ success: true, productId: result.insertedId, message: 'Product added!' });
   } catch (e) { console.error('Failed to add product:', e); res.status(500).json({ error: 'Failed to add product' }); }
 });
-app.put('/api/admin/products/:productId', authenticate, authorize('owner', 'manager'), async (req, res) => {
+app.put('/api/admin/products/:productId', authenticate, requirePermission('inventory'), async (req, res) => {
   const { name, category, barcode, buyingPrice, price, stock, description, image, expiryDate } = req.body;
   try {
     const u = {};
@@ -822,7 +835,7 @@ app.put('/api/admin/products/:productId', authenticate, authorize('owner', 'mana
     res.json({ success: true, message: 'Product updated!' });
   } catch (e) { console.error('Failed to update product:', e); res.status(500).json({ error: 'Failed to update product' }); }
 });
-app.delete('/api/admin/products/:productId', authenticate, authorize('owner', 'manager'), async (req, res) => {
+app.delete('/api/admin/products/:productId', authenticate, requirePermission('inventory'), async (req, res) => {
   try { const r = await products_.deleteOne({ _id: new ObjectId(req.params.productId) }); if (!r.deletedCount) return res.status(404).json({ error: 'Product not found' }); productCache.del('all_products'); res.json({ success: true });} catch (e) { console.error('Failed to delete product:', e); res.status(500).json({ error: 'Failed to delete product' }); }
 });
 
@@ -836,7 +849,7 @@ app.get('/api/admin/categories', authenticate, async (req, res) => {
   }
 });
 
-app.post('/api/admin/categories', authenticate, authorize('owner', 'manager'), async (req, res) => {
+app.post('/api/admin/categories', authenticate, requirePermission('inventory'), async (req, res) => {
   const { name } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Category name required' });
   const trimmedName = name.trim();
@@ -857,7 +870,7 @@ app.post('/api/admin/categories', authenticate, authorize('owner', 'manager'), a
   }
 });
 
-app.delete('/api/admin/categories/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+app.delete('/api/admin/categories/:id', authenticate, requirePermission('inventory'), async (req, res) => {
   try {
     const r = await categories_.deleteOne({ _id: new ObjectId(req.params.id) });
     if (!r.deletedCount) return res.status(404).json({ error: 'Category not found' });

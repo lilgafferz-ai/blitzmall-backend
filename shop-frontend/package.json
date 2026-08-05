@@ -1,6 +1,6 @@
 {
   "name": "shop-frontend",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "main": "main.js",
   "homepage": "./",
@@ -67,7 +67,8 @@
       {
         "provider": "github",
         "owner": "lilgafferz-ai",
-        "repo": "blitzmall-backend"
+        "repo": "blitzmall-backend",
+        "draft": false
       }
     ],
     "files": [

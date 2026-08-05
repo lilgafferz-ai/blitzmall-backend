@@ -1309,7 +1309,12 @@ const loadStockTransfers = async () => {
       const url = editingId ? API_URL + '/admin/products/' + editingId : API_URL + '/admin/products';
       const opts = editingId ? authPut(url, payload) : authPost(url, payload);
       const r = await opts;
-      if ((await r.json()).success) { 
+      const d = await r.json().catch(() => ({}));
+      if (!d || !d.success) {
+        alert('❌ ' + ((d && d.error) || 'Could not save product. Server returned ' + r.status + '. Please try again.'));
+        return;
+      }
+      {
         const catName = currentForm.category?.trim();
         if (catName && !categories.some(c => c.name.toLowerCase() === catName.toLowerCase())) {
           try {
@@ -1328,7 +1333,7 @@ const loadStockTransfers = async () => {
         resetForm(); 
         loadProducts(); 
       }
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); alert('❌ Network error — could not save. Check your connection and try again.'); }
   };
   const submitProductAndNext = async (formData) => {
     if (formData && formData.preventDefault) { formData.preventDefault(); return; }
@@ -1347,12 +1352,15 @@ const loadStockTransfers = async () => {
 
       const payload = { ...currentForm, category: cat };
       const r = await authPost(API_URL + '/admin/products', payload);
-      if ((await r.json()).success) { 
+      const d = await r.json().catch(() => ({}));
+      if (d && d.success) { 
         loadProducts(); 
         const prevCat = currentForm.category;
         setForm({ ...BLANK, category: prevCat });
+      } else {
+        alert('❌ ' + ((d && d.error) || 'Could not save product. Server returned ' + r.status + '. Please try again.'));
       }
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); alert('❌ Network error — could not save. Check your connection and try again.'); }
   };
 
   const submitRef = useRef(submitProduct);
@@ -1364,7 +1372,7 @@ const loadStockTransfers = async () => {
   const handleFormNext = React.useCallback((data) => nextRef.current(data), []);
 
   const editProduct = (p) => { setForm({ name: p.name||'', category: p.category||'', barcode: p.barcode||'', buyingPrice: p.buyingPrice??'', price: p.price??'', stock: p.stock??'', description: p.description||'', image: p.image||null, expiryDate: p.expiryDate ? new Date(p.expiryDate).toISOString().slice(0,10) : '' }); setEditingId(p._id); setShowForm(true); window.scrollTo(0,0); };
-  const delProduct = async (id) => { if (!window.confirm('Delete this item?')) return; try { const r = await authDelete(API_URL + '/admin/products/' + id); if ((await r.json()).success) loadProducts(); } catch (e) { console.error(e); } };
+  const delProduct = async (id) => { if (!window.confirm('Delete this item?')) return; try { const r = await authDelete(API_URL + '/admin/products/' + id); const d = await r.json().catch(() => ({})); if (d && d.success) loadProducts(); else alert('❌ ' + ((d && d.error) || 'Could not delete item (HTTP ' + r.status + ').')); } catch (e) { console.error(e); alert('❌ Network error — could not delete.'); } };
   const updateOrder = async (id, payload) => { try { const r = await authPut(API_URL + '/admin/orders/' + id, payload); if ((await r.json()).success) loadOrders(); } catch (e) { console.error(e); } };
   const delOrder = async (id) => { if (!window.confirm('Delete this order?')) return; try { const r = await authDelete(API_URL + '/admin/orders/' + id); if ((await r.json()).success) loadOrders(); else alert('Failed or insufficient permissions'); } catch (e) { console.error(e); } };
 
