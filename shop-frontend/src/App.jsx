@@ -1099,7 +1099,7 @@ function App() {
         <form onSubmit={handleLogin}>
           <input className="field" placeholder="Your name" value={name} onChange={e => setName(e.target.value)} required />
           <input className="field" type="tel" placeholder="Phone (07xx xxx xxx)" value={phone} onChange={e => setPhone(e.target.value)} required />
-          <button className="btn-neon" type="submit">Enter Blitz Mall</button>
+          <button className="btn-neon login-cta" type="submit">Enter Blitz Mall</button>
         </form>
         <button className="owner-link" onClick={() => setIsAdmin(true)}>Owner login</button>
       </div>

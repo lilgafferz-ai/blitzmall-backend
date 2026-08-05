@@ -71,6 +71,13 @@ input, textarea {
 .btn-neon{background:var(--grad);color:#1a0a00;border:none;border-radius:12px;padding:15px;font-size:1rem;font-weight:700;font-family:inherit;cursor:pointer;box-shadow:var(--glow);transition:transform .15s,box-shadow .2s;will-change:transform;}
 .btn-neon:hover{transform:translateY(-2px);box-shadow:0 0 26px rgba(255,122,26,.7),0 0 56px rgba(255,45,45,.35);}
 .btn-neon:active{transform:translateY(0);}
+/* The sign-in CTA breathes with a neon glow so it reads as the main action */
+@keyframes neonPulse {
+  0%, 100% { box-shadow: 0 0 10px rgba(255,122,26,.45), 0 0 26px rgba(255,45,45,.16); }
+  50% { box-shadow: 0 0 22px rgba(255,122,26,.9), 0 0 56px rgba(255,45,45,.42); }
+}
+.btn-neon.login-cta { animation: neonPulse 2.2s ease-in-out infinite; }
+.btn-neon.login-cta:hover { animation-duration: 1.1s; }
 .btn-ghost{background:transparent;color:var(--text);border:1px solid var(--line);border-radius:12px;padding:13px;font-weight:600;font-family:inherit;cursor:pointer;transition:.2s;}
 .btn-ghost:hover{border-color:var(--orange);color:var(--orange);}
 .owner-link{background:none;border:none;color:#55555f;margin-top:18px;cursor:pointer;font-size:.85rem;font-family:inherit;}

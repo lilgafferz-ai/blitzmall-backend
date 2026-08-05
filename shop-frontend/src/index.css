@@ -50,6 +50,13 @@ body.perf-mode .info-card {
   border: 1px solid var(--line, #282830) !important;
 }
 
+/* The sign-in CTA keeps its neon glow even in perf mode — it's the main
+   action on the login screen and one button costs nothing. */
+body.perf-mode .login-card .btn-neon.login-cta {
+  box-shadow: 0 0 10px rgba(255,122,26,.45), 0 0 26px rgba(255,45,45,.16) !important;
+  animation: neonPulse 2.2s ease-in-out infinite !important;
+}
+
 /* Remove glows and simplify active panels */
 body.perf-mode .btn-neon,
 body.perf-mode .spin-action-btn,
