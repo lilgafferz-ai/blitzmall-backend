@@ -22,5 +22,16 @@
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.2.0",
     "node-cache": "^5.1.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^7.0.0"
+  },
+  "jest": {
+    "testMatch": [
+      "<rootDir>/tests/**/*.test.js"
+    ],
+    "testEnvironment": "node",
+    "forceExit": true
   }
 }

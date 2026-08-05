@@ -35,7 +35,7 @@ function createWindow() {
     win.show();
   });
 
-  win.loadFile(path.join(__dirname, 'build', 'index.html')).then(() => { win.webContents.executeJavaScript('localStorage.getItem(\"blitz_api_url\")').then(v => require('fs').writeFileSync('C:/Users/red/Desktop/apiurl.txt', v || 'NULL')) }).catch((err) => {
+  win.loadFile(path.join(__dirname, 'build', 'index.html')).catch((err) => {
     console.error("Failed to load index.html. Make sure the React app is built first.", err);
   });
 }
@@ -43,7 +43,18 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
 
-  autoUpdater.checkForUpdatesAndNotify();
+  // Harden the auto-updater: checkForUpdatesAndNotify() fails silently on
+  // network errors or GitHub API rate-limit 403s (which burn the hourly
+  // quota). Retry later instead of giving up, and surface errors in the log.
+  const checkForUpdates = () => {
+    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+      console.error('[updater] Update check failed:', err && err.message);
+      setTimeout(checkForUpdates, 30 * 60 * 1000); // retry in 30 min
+    });
+  };
+  autoUpdater.on('error', (err) => console.error('[updater] Auto-updater error:', err && err.message));
+  // Give the window a moment to boot before hitting the update server
+  setTimeout(checkForUpdates, 10 * 1000);
 
   autoUpdater.on('update-downloaded', (info) => {
     dialog.showMessageBox({

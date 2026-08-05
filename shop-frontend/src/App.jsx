@@ -135,6 +135,11 @@ function App() {
   });
 
   useEffect(() => {
+    // The Admin screen owns its own perf-mode class (Fast/Rich toggle). Skip
+    // it here so the Admin is never silently forced into perf mode on a PC
+    // the customer view auto-flags as low-end — which is what killed the
+    // glowing Sign In button.
+    if (isAdmin) return;
     try {
       if (perfMode) {
         document.body.classList.add('perf-mode');
@@ -142,7 +147,7 @@ function App() {
         document.body.classList.remove('perf-mode');
       }
     } catch (e) {}
-  }, [perfMode]);
+  }, [perfMode, isAdmin]);
 
   // Futuristic addictive features
   const [showSpinWheel, setShowSpinWheel] = useState(false);

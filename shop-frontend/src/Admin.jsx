@@ -482,6 +482,12 @@ function Admin() {
   const prevBranchId = useRef(null);
   const notifSent = useRef(new Set());
   const prevOrderCount = useRef(0);
+  // JSON fingerprints of the last polled data. Guards prevent the 15s polling
+  // loop from re-rendering the entire dashboard when nothing actually changed
+  // — the re-render churn is what made the app progressively freeze after
+  // long sessions (every poll re-ran the whole Admin tree).
+  const ordersJsonRef = useRef('');
+  const alertsJsonRef = useRef('');
   const audioCtx = useRef(null);
   const mutedRef = useRef(false);
 
@@ -583,6 +589,9 @@ function Admin() {
       if (!r.ok) return;
       const d = await r.json();
       const out = d.out || [], low = d.low || [], expiringSoon = d.expiringSoon || [], expired = d.expired || [];
+      const json = JSON.stringify({ low, out, expiringSoon, expired });
+      if (json === alertsJsonRef.current) return; // nothing changed — skip re-render
+      alertsJsonRef.current = json;
       setAlerts({ low, out, expiringSoon, expired });
       const newlyOut = out.map(p => p.name).filter(n => !prevOut.current.has(n));
       if (newlyOut.length > 0) { playAlarm(); setShowBanner(true); }
@@ -623,7 +632,17 @@ function Admin() {
       setCategories(localCats);
     }
   };
-  const loadOrders = async () => { try { const r = await authGet(withBranch(API_URL + '/admin/orders')); setOrders(asArray(await r.json())); } catch (e) { console.error(e); setOrders([]); } };
+  const loadOrders = async () => {
+    try {
+      const r = await authGet(withBranch(API_URL + '/admin/orders'));
+      const list = asArray(await r.json());
+      const json = JSON.stringify(list);
+      if (json !== ordersJsonRef.current) { ordersJsonRef.current = json; setOrders(list); }
+    } catch (e) {
+      console.error(e);
+      if (ordersJsonRef.current !== '[]') { ordersJsonRef.current = '[]'; setOrders([]); }
+    }
+  };
   const loadSales = async () => { try { const r = await authGet(withBranch(API_URL + '/admin/sales?limit=15')); setRecentSales(asArray(await r.json())); } catch (e) { console.error(e); setRecentSales([]); } };
   const loadSummary = async () => {
     try {
@@ -1580,7 +1599,7 @@ const loadStockTransfers = async () => {
             <input className="owner-field" type="text" placeholder="Your name" value={setupName} onChange={e => setSetupName(e.target.value)} required />
             <input className="owner-field" type="text" placeholder="Username" value={setupUsername} onChange={e => setSetupUsername(e.target.value)} required />
             <input className="owner-field" type="password" placeholder="Password (min 6 chars)" value={setupPassword} onChange={e => setSetupPassword(e.target.value)} minLength={6} required />
-            <button className="blitz-admin-btn" type="submit">Create Owner Account</button>
+            <button className="blitz-admin-btn glow-pulse" type="submit">Create Owner Account</button>
           </form>
         </div></div>
       );
@@ -1620,7 +1639,7 @@ const loadStockTransfers = async () => {
               )}
             </select>
           </div>
-          <button className="blitz-admin-btn" type="submit">Sign In</button>
+          <button className="blitz-admin-btn glow-pulse" type="submit">Sign In</button>
         </form>
       </div></div>
     );
@@ -2174,7 +2193,7 @@ ${div}
 
               {stockTransfers.length === 0 ? <p className="blitz-admin-empty sm">No stock transfers recorded</p> : (
                 <div className="blitz-admin-list">
-                  {stockTransfers.map(tr => {
+                  {stockTransfers.slice(0, 30).map(tr => {
                     const fromName = branches.find(b => b._id === tr.fromBranchId)?.name || 'Source';
                     const toName = branches.find(b => b._id === tr.toBranchId)?.name || 'Destination';
                     return (
@@ -2202,7 +2221,7 @@ ${div}
       {safeTab === "orders" && (
         <div className="blitz-admin-body"><h2>Orders</h2>
           {orders.length === 0 ? <p className="blitz-admin-empty">No orders yet</p> : (
-            <div className="blitz-admin-list">{orders.map(o => {
+            <div className="blitz-admin-list">{orders.slice(0, 50).map(o => {
               // Calculate delivery progress for tracking animation
               let adminProgress = 0;
               if (o.status === 'on_the_way' && o.dispatchedAt) {
@@ -2309,7 +2328,9 @@ ${div}
                 </div>
               </div>
               );
-            })}</div>
+            })}
+            {orders.length > 50 && <p className="blitz-admin-muted" style={{textAlign:'center',fontSize:'.78rem',paddingTop:10}}>Showing the latest 50 of {orders.length} orders — older orders still count toward your records.</p>}
+            </div>
           )}
         </div>
       )}
@@ -2954,7 +2975,7 @@ ${div}
                 <p className="blitz-admin-muted" style={{marginBottom:10,fontSize:'.8rem'}}>Review cashier drawer reports, expected vs actual cash, and reconciliation differences.</p>
                 {shiftsList.length === 0 ? <p className="blitz-admin-empty">No cashier shifts recorded yet.</p> : (
                   <div className="blitz-admin-list" style={{maxHeight:'300px',overflowY:'auto'}}>
-                    {shiftsList.map(s => {
+                    {shiftsList.slice(0, 20).map(s => {
                       const diff = s.difference || 0;
                       return (
                         <div className="exp-row" key={s._id} style={{fontSize:'.82rem',display:'flex',flexDirection:'column',alignItems:'stretch',gap:4,padding:'12px',borderBottom:'1px solid var(--line)'}}>
@@ -2996,7 +3017,7 @@ ${div}
                 <p className="blitz-admin-muted" style={{marginBottom:10,fontSize:'.8rem'}}>Track all actions performed by managers and cashiers (e.g. price updates, shifts, rules).</p>
                 {auditLogs.length === 0 ? <p className="blitz-admin-empty">No audit logs recorded yet.</p> : (
                   <div className="blitz-admin-list" style={{maxHeight:'350px',overflowY:'auto'}}>
-                    {auditLogs.map(l => (
+                    {auditLogs.slice(0, 40).map(l => (
                       <div className="exp-row" key={l._id} style={{fontSize:'.8rem',display:'flex',flexDirection:'column',gap:2,padding:'8px 12px'}}>
                         <div style={{display:'flex',justifyContent:'space-between'}}>
                           <span><b>@{l.username}</b> · <span className="blitz-admin-muted">{l.action}</span></span>

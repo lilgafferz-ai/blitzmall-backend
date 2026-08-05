@@ -1,23 +1,18 @@
 const request = require('supertest');
-const { app, connectDb, client } = require('../server');
-const { MongoMemoryServer } = require('mongodb-memory-server');
 
-let mongoServer;
+// Set env BEFORE requiring the server (see auth.test.js for details).
+process.env.JWT_SECRET = 'test_secret_key';
+process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
+
+const { app, connectDb, client } = require('../server');
 
 beforeAll(async () => {
-  mongoServer = await MongoMemoryServer.create();
-  process.env.MONGODB_URI = mongoServer.getUri();
-  process.env.JWT_SECRET = 'test_secret_key';
-  
   await connectDb();
 });
 
 afterAll(async () => {
   if (client) {
     await client.close();
-  }
-  if (mongoServer) {
-    await mongoServer.stop();
   }
 });
 

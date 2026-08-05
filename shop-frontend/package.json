@@ -1,6 +1,6 @@
 {
   "name": "shop-frontend",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "main": "main.js",
   "homepage": "./",
