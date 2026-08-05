@@ -30,8 +30,15 @@ jobs:
         working-directory: ./shop-frontend
         run: npm run build
 
+      # electron-builder needs Windows Developer Mode enabled so 7-Zip can
+      # create the symlinks inside its winCodeSign cache; without it the
+      # extraction fails with "Cannot create symbolic link" and the build dies.
+      - name: Enable Developer Mode (winCodeSign symlink support)
+        run: reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /t REG_DWORD /f /v "AllowDevelopmentWithoutDevLicense" /d "1"
+
       - name: Publish Desktop Update (Electron)
         working-directory: ./shop-frontend
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run electron:build -- -p always

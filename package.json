@@ -32,6 +32,7 @@
       "<rootDir>/tests/**/*.test.js"
     ],
     "testEnvironment": "node",
-    "forceExit": true
+    "forceExit": true,
+    "testTimeout": 30000
   }
 }

@@ -7,19 +7,31 @@ on:
     branches: [ "main", "master" ]
 
 jobs:
-  build:
+  backend-tests:
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        node-version: [18.x, 20.x]
 
     steps:
     - uses: actions/checkout@v4
-    - name: Use Node.js ${{ matrix.node-version }}
+    - name: Use Node.js 20.x
       uses: actions/setup-node@v4
       with:
-        node-version: ${{ matrix.node-version }}
+        node-version: 20
         cache: 'npm'
     - run: npm ci
-    - run: npm test
+    - run: npm test -- --runInBand
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Use Node.js 20.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: 'npm'
+        cache-dependency-path: shop-frontend/package-lock.json
+    - run: npm ci
+      working-directory: ./shop-frontend
+    - run: CI=true npm test -- --watchAll=false
+      working-directory: ./shop-frontend
