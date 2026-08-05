@@ -50,9 +50,12 @@ body.perf-mode .info-card {
   border: 1px solid var(--line, #282830) !important;
 }
 
-/* The sign-in CTA keeps its neon glow even in perf mode — it's the main
-   action on the login screen and one button costs nothing. */
+/* The sign-in CTA keeps its vivid gradient + neon glow even in perf mode —
+   it's the main action on the login screen and one button costs nothing. */
 body.perf-mode .login-card .btn-neon.login-cta {
+  background: var(--grad, linear-gradient(135deg, #ffd24a 0%, #ff7a1a 50%, #ff2d2d 100%)) !important;
+  color: #1a0a00 !important;
+  border: none !important;
   box-shadow: 0 0 10px rgba(255,122,26,.45), 0 0 26px rgba(255,45,45,.16) !important;
   animation: neonPulse 2.2s ease-in-out infinite !important;
 }
@@ -68,6 +71,12 @@ body.perf-mode .prod-card:hover {
   text-shadow: none !important;
   background: #141418 !important;
   border: 1px solid var(--line, #282830) !important;
+}
+
+/* Perf-mode buttons get flat dark surfaces — keep their labels readable */
+body.perf-mode .btn-neon,
+body.perf-mode .spin-action-btn {
+  color: var(--text, #f4f4f6) !important;
 }
 
 body.perf-mode .loyalty-card-wrapper {
