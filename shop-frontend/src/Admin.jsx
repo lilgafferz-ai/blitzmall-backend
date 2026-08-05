@@ -140,6 +140,7 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
     return () => {
       if (autoSearchRef.current) clearTimeout(autoSearchRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.name, form.barcode]);
 
   const isImageUrl = (v) => typeof v === 'string' && (v.startsWith('http') || v.startsWith('data:'));
@@ -367,7 +368,7 @@ function Admin() {
   const cameraRef = useRef(null);
   const barcodeLoopRef = useRef(null);
   const [staffList, setStaffList] = useState([]);
-  const [cashier, setCashier] = useState('Owner');
+  const [cashier] = useState('Owner');
   const [newStaffName, setNewStaffName] = useState('');
   const [summary, setSummary] = useState(null);
   const [period, setPeriod] = useState('today');
@@ -407,7 +408,7 @@ function Admin() {
   const [branches, setBranches] = useState([]);
   const [activeBranchId, setActiveBranchId] = useState(null);
   const [predictions, setPredictions] = useState(null);
-  const [predLoading, setPredLoading] = useState(false);
+  const [, setPredLoading] = useState(false);
   const [branchForm, setBranchForm] = useState({ name:'', location:'', phone:'', email:'' });
 
   // Shift management states
@@ -942,7 +943,6 @@ const loadStockTransfers = async () => {
   // Show browser notifications for critical alerts (deduplicated)
   useEffect(() => {
     if (!loggedIn || !notifGranted || !('Notification' in window)) return;
-    const now = Date.now();
     // Out of stock
     for (const p of (alerts.out||[])) {
       const key = 'out_' + p.name;
@@ -969,6 +969,7 @@ const loadStockTransfers = async () => {
     }
       // Clear old entries after 10 minutes to allow re-notification
     if (notifSent.current.size > 100) notifSent.current = new Set();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [alerts.out.length, alerts.low.length, alerts.expired?.length, loggedIn, notifGranted]);
 
   // New order browser notifications
@@ -995,6 +996,7 @@ const loadStockTransfers = async () => {
       prevOrderCount.current = orders.length;
     }
     if (notifSent.current.size > 100) notifSent.current = new Set();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orders.length, loggedIn, notifGranted]);
 
   useEffect(() => {
@@ -1009,6 +1011,7 @@ const loadStockTransfers = async () => {
     }, 15000);
     const kaId = setInterval(keepAlive, 240000); // ping every 4 min to keep Render awake
     return () => { clearInterval(id); clearInterval(kaId); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loggedIn]);
 
   useEffect(() => {
@@ -1022,6 +1025,7 @@ const loadStockTransfers = async () => {
     else if (tab === 'loyalty') { loadLoyaltyMembers(); loadCoupons(); }
     else if (tab === 'branches' && (!user || user.role === 'owner')) loadBranches();
     else if (tab === 'inventory') { loadProducts(); loadCategories(); loadPricingRules(); loadStockTransfers(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, loggedIn]);
 
   // Reload data when branch filter changes
@@ -1031,6 +1035,7 @@ const loadStockTransfers = async () => {
       loadProducts(); loadOrders(); loadSales(); loadSummary(); loadExpenses(); loadCredit();
     }
     prevBranchId.current = activeBranchId;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeBranchId, loggedIn]);
 
   // Poll M-Pesa STK status after sending push
@@ -1060,6 +1065,7 @@ const loadStockTransfers = async () => {
     // Timeout after 60 seconds
     const timeout = setTimeout(() => { if (!stopped) { stopped = true; clearInterval(interval); setStkStatus('failed'); setStkError('⏱️ Timed out waiting for payment response. Try again.'); } }, 120000);
     return () => { stopped = true; clearInterval(interval); clearTimeout(timeout); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stkCheckoutId, stkStatus]);
 
   // Camera barcode scanning
@@ -1274,7 +1280,6 @@ const loadStockTransfers = async () => {
     } catch (e) { alert('Network error'); }
   };
 
-  const onImage = (e) => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onloadend = () => setForm(s => ({ ...s, image: rd.result })); rd.readAsDataURL(f); };
   const resetForm = () => { setForm(BLANK); setEditingId(null); setShowForm(false); };
   const submitProduct = async (formData) => {
     if (formData && formData.preventDefault) { formData.preventDefault(); return; }

@@ -377,6 +377,7 @@ function App() {
 
   useEffect(() => {
     if (isOnline) syncOfflineOrders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOnline]);
 
   useEffect(() => {
@@ -414,6 +415,7 @@ function App() {
     poll();
     const timeout = setTimeout(() => { if (!stopped) { stopped = true; clearInterval(interval); setStkStatus('failed'); setStkError('⏱️ Timed out waiting for payment. Try again.'); } }, 120000);
     return () => { stopped = true; clearInterval(interval); clearTimeout(timeout); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stkCheckoutId, stkStatus]);
 
   const loadSavedBaskets = async () => {
@@ -619,7 +621,7 @@ function App() {
       }
       localStorage.setItem(OFFLINE_ORDERS_KEY, JSON.stringify(synced));
     } catch (e) { console.warn('Failed to sync offline orders:', e); }
-  }, [customer]);
+  }, []);
 
   useEffect(() => {
     if (!customer?.customerId) return;
@@ -628,6 +630,7 @@ function App() {
       if (Array.isArray(cached) && cached.length) setMyOrders(cached);
     } catch {}
     loadSavedBaskets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customer]);
 
   useEffect(() => {
@@ -635,6 +638,7 @@ function App() {
       loadCustLoyalty();
       loadLoyaltyRewards();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen]);
 
   // When the Share screen opens, ask the server for the newest APK so the QR
@@ -685,6 +689,7 @@ function App() {
       loadMyOrders();
     }, 15000); // refresh every 15 seconds
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, customer?.customerId]);
 
   const addToCart = useCallback((p, qty = 1) => {
@@ -1474,7 +1479,7 @@ function App() {
             <button className="gallery-close" onClick={() => setGallery(null)}>✕</button>
             <div className="gallery-slider" onClick={e => e.stopPropagation()}>
               {gallery.map((url, i) => (
-                <div className="gallery-slide" key={i}><img src={hiRes(url)} alt={`Photo ${i + 1}`} /></div>
+                <div className="gallery-slide" key={i}><img src={hiRes(url)} alt={`Slide ${i + 1}`} /></div>
               ))}
             </div>
             {gallery.length > 1 && <div className="gallery-hint">← swipe to see all {gallery.length} photos →</div>}
@@ -1871,7 +1876,6 @@ function App() {
         ) : myOrders.map(o => {
           const idx = steps.indexOf(o.status);
           const progress = orderTrackingProgress[o._id] || 0;
-          const trackWidth = 'calc(100% - 140px)'; // total track width
           const bikeLeft = `calc(70px + ${(progress / 100)} * (100% - 140px))`;
           const progressWidth = `calc(${(progress / 100)} * (100% - 140px))`;
           const etaMinutes = o.status === 'on_the_way' && o.dispatchedAt
@@ -2003,7 +2007,6 @@ function App() {
 }
 
 const ProductCard = React.memo(function ProductCard({ p, onOpen, onAdd }) {
-  const id = p._id || p.id;
   return (
     <div className="prod-card" onClick={() => onOpen(p)}>
       <div className="prod-img">{p.image ? <img src={firstImage(p.image)} alt={p.name} className="product-img-element" loading="lazy"/> : <div className="noimg">🛍️</div>}</div>
