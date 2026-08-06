@@ -311,6 +311,7 @@ function App() {
   
   const aiQuickActions = [
     { label: '🛒 Add milk', text: 'add milk to cart' },
+    { label: '🛍️ Order milk + bread', text: 'order milk and bread' },
     { label: '📦 Track order', text: 'track my order' },
     { label: '🍳 Recipe ideas', text: 'recipe ideas' },
     { label: '🏷️ Show deals', text: 'show me deals' },
@@ -333,6 +334,9 @@ function App() {
         const aiData = await aiRes.json();
         if (aiData.action?.type === 'add_to_cart' && aiData.action.product) {
           addToCart(aiData.action.product, aiData.action.quantity || 1);
+        } else if (aiData.action?.type === 'order_placed') {
+          showToast('✅ Order placed! Track it in My Orders.');
+          loadMyOrders();
         }
         const botResponse = aiData.response || 'Sorry, I could not process that.';
         setAiMessages(prev => [...prev, { sender: 'bot', text: botResponse }]);
@@ -1172,6 +1176,9 @@ function App() {
       const aiData = await aiRes.json();
       if (aiData.action?.type === 'add_to_cart' && aiData.action.product) {
         addToCart(aiData.action.product, aiData.action.quantity || 1);
+      } else if (aiData.action?.type === 'order_placed') {
+        showToast('✅ Order placed! Track it in My Orders.');
+        loadMyOrders();
       }
       const botResponse = aiData.response || 'Sorry, I could not process that.';
       setAiMessages(prev => [...prev, { sender: 'bot', text: botResponse }]);

@@ -460,6 +460,8 @@ function Admin() {
     { label: '🛒 Pending orders', text: 'Show pending orders' },
     { label: '🏆 Best sellers', text: 'Best selling products' },
     { label: '🔮 Predictions', text: 'Restock predictions' },
+    { label: '📝 Restock Milk', text: 'restock Milk by 10' },
+    { label: '🚨 Anomalies', text: 'Any anomalies today?' },
   ];
 
   const handleAdminAiQuickAction = async (text) => {
@@ -467,6 +469,7 @@ function Admin() {
     setAdminAiLoading(true);
     try {
       const data = await (await authPost(API_URL + '/admin/ai/chat', { message: text })).json();
+      if (data.action?.type === 'refresh') { loadProducts(); loadOrders(); loadSummary(); loadExpenses(); loadSales(); }
       setAdminAiMessages(prev => [...prev, { sender: 'bot', text: data.response || 'Sorry, could not process that.' }]);
     } catch (e) {
       setAdminAiMessages(prev => [...prev, { sender: 'bot', text: '🤖 Sorry, I encountered an error.' }]);
@@ -810,6 +813,7 @@ function Admin() {
     try {
       const r = await authPost(API_URL + '/admin/ai/chat', { message: msg });
       const d = await r.json();
+      if (d.action?.type === 'refresh') { loadProducts(); loadOrders(); loadSummary(); loadExpenses(); loadSales(); }
       setAdminAiMessages(prev => [...prev, { sender: 'bot', text: d.response || 'Sorry, I could not process that.' }]);
     } catch (e) {
       console.error(e);

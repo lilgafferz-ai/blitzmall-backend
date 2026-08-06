@@ -2707,6 +2707,67 @@ app.post('/api/admin/receipt-delivery/log', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed' });
   }
 });
+// ===== LLM BRAIN (Ollama, optional) =====
+// If a local Ollama server is reachable the assistants answer anything the rule
+// engine cannot match. Falls back to the rules automatically (even on Render,
+// where Ollama is absent), so the app keeps working everywhere.
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
+let ollamaOk = false;
+let ollamaCheckedAt = 0;
+
+async function ollamaReady() {
+  if (Date.now() - ollamaCheckedAt < 60 * 1000) return ollamaOk;
+  ollamaCheckedAt = Date.now();
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 2000);
+    const r = await fetch(OLLAMA_URL + '/api/tags', { signal: ctrl.signal });
+    clearTimeout(t);
+    ollamaOk = r.ok;
+  } catch (e) { ollamaOk = false; }
+  return ollamaOk;
+}
+
+async function askOllama(system, user, timeoutMs = 15000) {
+  if (!(await ollamaReady())) return null;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const res = await fetch(OLLAMA_URL + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+      body: JSON.stringify({ model: OLLAMA_MODEL, stream: false, messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ] })
+    });
+    clearTimeout(t);
+    if (!res.ok) { ollamaCheckedAt = 0; return null; }
+    const data = await res.json();
+    return (data.message && data.message.content) ? data.message.content.trim() : null;
+  } catch (e) {
+    console.error('[AI] Ollama error:', e.message);
+    ollamaCheckedAt = 0;
+    return null;
+  }
+}
+
+// Common Swahili/Sheng product words -> English, so "maziwa" finds Milk.
+const SW_TO_EN = {
+  maziwa: 'milk', mkate: 'bread', sukari: 'sugar', unga: 'flour', mafuta: 'oil',
+  mayai: 'eggs', chai: 'tea', samaki: 'fish', nyama: 'meat', mahindi: 'maize',
+  mchele: 'rice', viazi: 'potatoes', kabichi: 'cabbage', matunda: 'fruit',
+  mboga: 'vegetables', sabuni: 'soap', mandazi: 'mandazi', chapati: 'chapati',
+  ndizi: 'bananas', karanga: 'groundnuts', supu: 'soup', soda: 'soda', maji: 'water',
+  juisi: 'juice', siagi: 'butter', jibini: 'cheese', kuku: 'chicken', ndimu: 'lime',
+  nyanya: 'tomatoes', vitunguu: 'onions', pilipili: 'peppers', karoti: 'carrots'
+};
+function expandSwahili(str) {
+  return str.split(' ').map(w => (SW_TO_EN[w] || w)).join(' ');
+}
+
 // ===== AI ASSISTANT ENGINE =====
 function normalizeAiText(text) {
   if (!text) return '';
@@ -2714,7 +2775,7 @@ function normalizeAiText(text) {
 }
 
 function findMatchingProducts(query, products, limit = 5) {
-  const q = normalizeAiText(query);
+  const q = expandSwahili(normalizeAiText(query));
   const stopWords = new Set(['add','buy','get','order','put','place','grab','take','want','need','find','search','show','me','the','a','an','to','in','my','some','with','and','or','for','of','is','it','this','that','please','can','you','i','do','have','from','on','at','up','out','about','how','much','what','which','give','look']);
   const words = q.split(' ').filter(w => w.length > 1 && !stopWords.has(w));
   const scored = products.map(p => {
@@ -2736,7 +2797,12 @@ function findMatchingProducts(query, products, limit = 5) {
 
 function detectAiIntent(text, products) {
   const t = normalizeAiText(text);
-  if (/\b(add|buy|get|order|put|grab|take|want|need|give me|cart)\b/i.test(t)) {
+  // Place a real order when several items are mentioned: "order milk and bread"
+  if (/\b(order|buy|agiza|nunua)\b/i.test(t) && /\b(and|na|plus|&|,)\b/i.test(t)) {
+    const multi = findMatchingProducts(t, products, 10);
+    if (multi.length >= 2) return { type: 'place_order', products: multi };
+  }
+  if (/\b(add|buy|get|order|put|grab|take|want|need|give me|cart|ongeza|nunua|weka|chagua)\b/i.test(t)) {
     const matched = findMatchingProducts(t, products, 1);
     if (matched.length > 0) {
       const qtyMatch = t.match(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/);
@@ -2746,28 +2812,28 @@ function detectAiIntent(text, products) {
     }
     return { type: 'add_to_cart_no_match' };
   }
-  if (/\b(track|status|where|follow|locate|my order|my orders)\b/i.test(t)) return { type: 'order_status' };
-  if (/\b(cancel|stop|abort|void)\b/i.test(t)) {
+  if (/\b(track|status|where|follow|locate|my order|my orders|fuatilia|iko wapi)\b/i.test(t)) return { type: 'order_status' };
+  if (/\b(cancel|stop|abort|void|ghairi|futa)\b/i.test(t)) {
     if (/\b(yes|confirm|do it|go ahead|please|sure)\b/i.test(t)) return { type: 'confirm_cancel' };
     return { type: 'cancel_order' };
   }
-  if (/\b(complain|complaint|issue|problem|wrong|bad|terrible|awful|delay|late|missing|broken|damaged|refund)\b/i.test(t)) return { type: 'complaint' };
-  if (/\b(recipe|cook|make|prepare|bake|fry|dish|meal|how to make)\b/i.test(t)) return { type: 'recipe' };
-  if (/\b(loyalty|points|reward|cashback|balance|tier|redeem)\b/i.test(t)) return { type: 'loyalty' };
-  if (/\b(delivery|shipping|fare|deliver)\b/i.test(t)) return { type: 'delivery' };
-  if (/\b(discount|coupon|promo|code|offer|deal|save)\b/i.test(t)) return { type: 'discount' };
-  if (/\b(search|find|show|look|browse|list)\b/i.test(t)) {
+  if (/\b(complain|complaint|issue|problem|wrong|bad|terrible|awful|delay|late|missing|broken|damaged|refund|lalamiko|shida|tatizo)\b/i.test(t)) return { type: 'complaint' };
+  if (/\b(recipe|cook|make|prepare|bake|fry|dish|meal|how to make|mapishi|kupika|kaanga)\b/i.test(t)) return { type: 'recipe' };
+  if (/\b(loyalty|points|reward|cashback|balance|tier|redeem|pointi|zawadi|hatua)\b/i.test(t)) return { type: 'loyalty' };
+  if (/\b(delivery|shipping|fare|deliver|usafirishaji|peleka)\b/i.test(t)) return { type: 'delivery' };
+  if (/\b(discount|coupon|promo|code|offer|deal|save|punguzo|kuponi)\b/i.test(t)) return { type: 'discount' };
+  if (/\b(search|find|show|look|browse|list|tafuta|nionyeshe|onyesha)\b/i.test(t)) {
     const matched = findMatchingProducts(t, products, 5);
     return matched.length > 0 ? { type: 'product_search', results: matched } : { type: 'product_search_no_results' };
   }
-  if (/\b(recommend|suggest|popular|best|top|what should)\b/i.test(t)) return { type: 'recommend' };
-  if (/\b(hello|hi|hey|jambo|sup|yo|morning|afternoon|evening|how are|what's up)\b/i.test(t)) return { type: 'greeting' };
+  if (/\b(recommend|suggest|popular|best|top|what should|pendekeza|bora)\b/i.test(t)) return { type: 'recommend' };
+  if (/\b(hello|hi|hey|jambo|sup|yo|morning|afternoon|evening|how are|what's up|habari|mambo|vipi|poa|sijambo)\b/i.test(t)) return { type: 'greeting' };
   if (/\b(help|what can you|capabilities|features)\b/i.test(t)) return { type: 'help' };
-  if (/\b(price|cost|how much|expensive|cheap)\b/i.test(t)) {
+  if (/\b(price|cost|how much|expensive|cheap|bei|ngapi|ghali|nafuu)\b/i.test(t)) {
     const matched = findMatchingProducts(t, products, 5);
     return matched.length > 0 ? { type: 'price_check', products: matched } : { type: 'price_general' };
   }
-  if (/\b(stock|available|in stock|out of|left|remaining)\b/i.test(t)) {
+  if (/\b(stock|available|in stock|out of|left|remaining|imeisha|hakuna)\b/i.test(t)) {
     const matched = findMatchingProducts(t, products, 5);
     return matched.length > 0 ? { type: 'stock_check', products: matched } : { type: 'stock_general' };
   }
@@ -2867,9 +2933,19 @@ async function generateAiResponse(intent, text, context) {
     case 'product_search_no_results':
       return '🔍 No products found. Try different keywords or browse categories on the home screen!';
     case 'recommend': {
-      const popular = products.filter(p => p.stock > 0).sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).slice(0, 5);
+      // Personalised picks: prefer categories the customer has bought before.
+      const bought = new Set((orders || []).flatMap(o => (o.items || []).map(i => (i.category || '').trim().toLowerCase()).filter(Boolean)));
+      let popular = [];
+      if (bought.size) {
+        popular = products.filter(p => p.stock > 0 && bought.has((p.category || '').trim().toLowerCase())).slice(0, 5);
+      }
+      if (popular.length < 3) {
+        const newest = products.filter(p => p.stock > 0).sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).slice(0, 5);
+        popular = [...new Set([...popular, ...newest])].slice(0, 5);
+      }
       if (!popular.length) return '🛍️ No products available right now.';
-      return `🌟 **Top Picks:**\n\n${popular.map(p => `• **${p.name}** — KES ${p.price}`).join('\n')}\n\nSay "add [name]" to add to cart!`;
+      const headline = bought.size ? '🎯 **Recommended for you (from your past orders):**' : '🌟 **Top Picks:**';
+      return `${headline}\n\n${popular.map(p => `• **${p.name}** — KES ${p.price}`).join('\n')}\n\nSay "add [name]" to add to cart, or "order milk and bread" to place an order!`;
     }
     case 'price_check': {
       return `💰 **Prices:**\n\n${intent.products.map(p => `• **${p.name}** — KES ${p.price}${p.isFlashSale ? ' ⚡ FLASH' : ''}`).join('\n')}`;
@@ -2881,10 +2957,38 @@ async function generateAiResponse(intent, text, context) {
     }
     case 'stock_general':
       return '📦 Check product pages for real-time stock levels!';
+    case 'place_order': {
+      if (!customerId) return '👤 Please log in first so I can place your order.';
+      const items = (intent.products || []).slice(0, 10).map(p => ({ _id: p._id, name: p.name, price: p.price, quantity: 1 }));
+      const total = items.reduce((s, i) => s + i.price * i.quantity, 0);
+      const order = {
+        customerId, customerName: 'Customer', items, totalPrice: total,
+        paymentMethod: 'delivery', status: 'pending', createdAt: new Date(),
+        deliveryLocation: 'Ordered via AI chat', deliveryFee: 0, gpsCoords: null,
+        shopCoords: SHOP_COORDS, couponCode: null, discount: 0,
+        deliveryProgress: 0, dispatchedAt: null, deliveredAt: null, viaAi: true
+      };
+      const result = await orders_.insertOne(order);
+      for (const it of items) { const id = it._id; if (id && ObjectId.isValid(id)) await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: -Math.abs(it.quantity) } }); }
+      intent.orderResult = { orderId: String(result.insertedId), total };
+      return `🛍️ **Order placed!**\n\n${items.map(i => `• ${i.name} ×${i.quantity} — KES ${(i.price * i.quantity).toLocaleString()}`).join('\n')}\n\n**Total: KES ${total.toLocaleString()}** — pay on delivery.\n\nSay "track my order" for updates!`;
+    }
     case 'help':
     default:
       return `🤖 **BlitzMall AI Assistant**\n\n🛒 **Shopping:**\n• "Add [product] to cart"\n• "Search for [keyword]"\n• "Show me [category]"\n\n📦 **Orders:**\n• "Track my order"\n• "Cancel order"\n\n🎁 **Rewards:**\n• "My loyalty points"\n• "Show me deals"\n\n💡 **More:**\n• "Recipe ideas"\n• "Delivery info"\n• "How much is [product]"\n\nJust ask naturally! 😊`;
   }
+}
+
+function customerLlmSystem(products, history) {
+  const catalog = (products || []).slice(0, 40).map(p => `- ${p.name} (KES ${p.price})`).join('\n');
+  const hist = (Array.isArray(history) && history.length)
+    ? '\n\nRecent conversation:\n' + history.slice(-8).map(m => `${m.sender === 'user' ? 'Customer' : 'Assistant'}: ${m.text}`).join('\n')
+    : '';
+  return `You are BlitzMall's friendly AI shopping assistant for a Kenyan grocery store in Matunda, Kakamega. Customers may write in English, Swahili, or Sheng - reply in the same language they used. Help with: shopping, order tracking, cancellation, complaints, recipes, loyalty points, delivery (Mall Area free, standard KES 150, free over KES 1,500), discounts, product search, prices, stock. Be brief and warm, under 120 words. Products available:\n${catalog}${hist}`;
+}
+
+function adminLlmSystem() {
+  return `You are BlitzMall's AI Business Assistant for a Kenyan grocery store owner. The owner may ask in English or Swahili - reply in the same language. You have live store data via a built-in analytics engine covering sales, profit, expenses, inventory, orders, staff, loyalty, coupons, predictions, and cash vs M-Pesa. For anything the rules cannot compute, give practical business advice or suggest asking about specific data. Keep answers under 120 words.`;
 }
 
 app.post('/api/ai/chat', async (req, res) => {
@@ -2898,10 +3002,17 @@ app.post('/api/ai/chat', async (req, res) => {
       customerId ? loyalty_.findOne({ phone: customerId }) : null
     ]);
     const intent = detectAiIntent(text, products);
-    const response = await generateAiResponse(intent, text, { customerId, products, orders: customerOrders, loyalty: loyaltyRecord, conversationHistory });
+    let response = await generateAiResponse(intent, text, { customerId, products, orders: customerOrders, loyalty: loyaltyRecord, conversationHistory });
+    // If the rule engine could not understand, ask the local Ollama model (handles open-ended questions, Swahili and Sheng).
+    if (intent.type === 'unknown') {
+      const llm = await askOllama(customerLlmSystem(products, conversationHistory), text);
+      if (llm) response = llm;
+    }
     let action = null;
     if (intent.type === 'add_to_cart') {
       action = { type: 'add_to_cart', product: intent.product, quantity: intent.quantity };
+    } else if (intent.orderResult) {
+      action = { type: 'order_placed', orderId: intent.orderResult.orderId, total: intent.orderResult.total };
     }
     res.json({ response, action });
   } catch (err) {
@@ -2915,6 +3026,10 @@ app.post('/api/ai/chat', async (req, res) => {
 function detectAdminIntent(text) {
   const t = text.toLowerCase().trim();
   if (/\b(hello|hi|hey|help|what can you)\b/i.test(t)) return { type: 'greeting' };
+  if (/\b(restock|add stock|refill|weka stock)\b/i.test(t) && /\d/.test(t)) return { type: 'restock' };
+  if (/\b(mark|set|update|change)\b.*\b(delivered|on the way|dispatched|cancelled|cancel|pending)\b/i.test(t)) return { type: 'order_action' };
+  if (/\b(add|record|log|weka)\b.*\b(expense|cost|gharama)\b/i.test(t) && /\d/.test(t)) return { type: 'add_expense' };
+  if (/\b(anomal|unusual|drop|down|compare|insight|flag|alert)\b/i.test(t)) return { type: 'anomalies' };
   if (/\b(sale|revenue|income|earn|sold|today|this week|this month|how much|performance)\b/i.test(t)) {
     if (/\b(today|now|current)\b/i.test(t)) return { type: 'sales_today' };
     if (/\b(week|weekly)\b/i.test(t)) return { type: 'sales_week' };
@@ -2947,7 +3062,7 @@ function detectAdminIntent(text) {
   return { type: 'general' };
 }
 
-async function generateAdminAiResponse(intent, text, branchId) {
+async function generateAdminAiResponse(intent, text, branchId, userName) {
   const now = new Date();
   const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const startWeek = new Date(startToday);
@@ -3065,6 +3180,65 @@ async function generateAdminAiResponse(intent, text, branchId) {
       return '\ud83d\udcb3 **Payments:**\n\n\u2022 Today: Cash ' + money(today.cash) + ' | M-Pesa ' + money(today.mpesa) + '\n\u2022 Week: Cash ' + money(week.cash) + ' | M-Pesa ' + money(week.mpesa) + '\n\u2022 Month: Cash ' + money(month.cash) + ' | M-Pesa ' + money(month.mpesa) + (today.revenue > 0 ? '\n\nSplit: ' + pct(today.cash, today.revenue) + '% / ' + pct(today.mpesa, today.revenue) + '%' : '');
     case 'full_summary':
       return '\ud83d\udcca **Business Snapshot:**\n\n\ud83d\udcb0 Revenue: ' + money(today.revenue) + ' today | ' + money(week.revenue) + ' week | ' + money(month.revenue) + ' month\n\ud83d\udcc8 Profit: ' + money(today.profit) + ' today | ' + money(week.profit) + ' week | ' + money(month.profit) + ' month\n\ud83d\udcb8 Expenses: ' + money(today.expenses) + ' today | ' + money(week.expenses) + ' week\n\ud83d\udce6 Products: ' + allProducts.length + ' (' + outOfStock.length + ' out)\n\ud83d\uded2 Orders: ' + allOrders.length + ' (' + pendingOrders.length + ' pending)\n\ud83d\udc65 Staff: ' + allStaff.length + ' | \ud83c\udf81 Loyalty: ' + allLoyalty.length;
+    case 'restock': {
+      const m = text.match(/restock\s+(.+?)\s+(?:by|with|add)?\s*(\d+)/i);
+      if (!m) return '🤖 Say e.g. "restock Milk by 10".';
+      const qty = parseInt(m[2], 10);
+      const found = findMatchingProducts(m[1], allProducts, 1);
+      if (!found.length) return '🔍 I could not find that product in inventory.';
+      const p = found[0];
+      await products_.updateOne({ _id: p._id }, { $inc: { stock: qty } });
+      intent.didWrite = true;
+      return `✅ **Restocked:** ${p.name} +${qty} → now ${(p.stock || 0) + qty} in stock.`;
+    }
+    case 'order_action': {
+      const idMatch = text.match(/#\s*([a-zA-Z0-9]{6,})/i) || text.match(/\b([a-f0-9]{24})\b/i);
+      const target = idMatch ? idMatch[1].toLowerCase() : '';
+      const st = text.toLowerCase();
+      const status = /delivered/.test(st) ? 'delivered' : /on the way|dispatched/.test(st) ? 'on_the_way' : /cancell/.test(st) ? 'cancelled' : /pending/.test(st) ? 'pending' : '';
+      if (!target || !status) return '🤖 Say e.g. "mark order #5f3ab2 delivered".';
+      const order = allOrders.find(o => String(o._id).toLowerCase().includes(target) || String(o._id).slice(-6) === target);
+      if (!order) return '🔍 Order not found. Try its ID from the Orders tab.';
+      const update = { status };
+      if (status === 'on_the_way') update.dispatchedAt = new Date();
+      if (status === 'delivered') { update.deliveredAt = new Date(); update.deliveryProgress = 100; }
+      await orders_.updateOne({ _id: order._id }, { $set: update });
+      intent.didWrite = true;
+      return `✅ Order **#${String(order._id).slice(-6)}** marked **${status.replace('_', ' ').toUpperCase()}**.`;
+    }
+    case 'add_expense': {
+      const amtM = text.match(/(?:kes|ksh)?\s*(\d+(?:\.\d+)?)/i);
+      const amt = amtM ? parseFloat(amtM[1]) : 0;
+      if (!amt) return '🤖 Say e.g. "add expense 500 for transport".';
+      const desc = text.replace(/(add|record|log|expense|cost|gharama|kes|ksh|for|\d+(\.\d+)?)/gi, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+      if (!desc) return '🤖 Say e.g. "add expense 500 for transport".';
+      await expenses_.insertOne({ description: desc, amount: amt, createdBy: userName || 'AI Assistant', branchId: branchId || null, createdAt: new Date() });
+      intent.didWrite = true;
+      return `🧾 **Expense added:** ${desc} — KES ${amt.toLocaleString()}.`;
+    }
+    case 'anomalies': {
+      const dayRevs = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(startToday);
+        d.setDate(startToday.getDate() - i);
+        const e = new Date(d);
+        e.setDate(d.getDate() + 1);
+        let rev = 0;
+        for (const s of allSales) { if (s.createdAt >= d && s.createdAt < e) rev += s.total || 0; }
+        for (const o of allOrders) { if (o.status !== 'cancelled' && o.createdAt >= d && o.createdAt < e) rev += o.totalPrice || 0; }
+        dayRevs.push(rev);
+      }
+      const todayR = dayRevs[dayRevs.length - 1];
+      const prevAvg = dayRevs.slice(0, 6).reduce((s, x) => s + x, 0) / Math.max(1, dayRevs.length - 1);
+      const pct = prevAvg > 0 ? Math.round(((todayR - prevAvg) / prevAvg) * 100) : 0;
+      const flag = pct <= -25 ? '🚨 **ALERT:**' : pct >= 25 ? '🎉 **Strong day:**' : '📊 **Status:**';
+      let msg = `${flag} Sales today ${money(todayR)} ${pct < 0 ? '▼' : '▲'} ${Math.abs(pct)}% vs the 6-day average.\n\n`;
+      const alerts = [];
+      if (outOfStock.length) alerts.push(`• 🚫 **Out of stock (${outOfStock.length}):** ${outOfStock.slice(0, 5).join(', ')}`);
+      if (lowStock.length) alerts.push(`• ⚠️ **Low stock:** ${lowStock.slice(0, 5).join(', ')}`);
+      if (expiringSoon.length) alerts.push(`• ⏳ **Expiring in 7 days:** ${expiringSoon.slice(0, 5).join(', ')}`);
+      return msg + (alerts.length ? alerts.join('\n') : '✅ No major anomalies.');
+    }
     default:
       return '\ud83e\udd16 **I can help with your business data.**\n\nTry:\n\u2022 "How are sales today?"\n\u2022 "What\'s my profit this month?"\n\u2022 "Any out of stock items?"\n\u2022 "Show pending orders"\n\u2022 "Best selling products"\n\u2022 "Restock predictions"\n\u2022 "Cash vs M-Pesa today"\n\u2022 "Business overview"\n\nI have access to all your store data! \ud83d\udcca';
   }
@@ -3076,8 +3250,12 @@ app.post('/api/admin/ai/chat', authenticate, async (req, res) => {
   try {
     const text = message.trim();
     const intent = detectAdminIntent(text);
-    const response = await generateAdminAiResponse(intent, text, req.user.branchId || null);
-    res.json({ response });
+    let response = await generateAdminAiResponse(intent, text, req.user.branchId || null, req.user.name);
+    if (intent.type === 'general') {
+      const llm = await askOllama(adminLlmSystem(), text);
+      if (llm) response = llm;
+    }
+    res.json({ response, action: intent.didWrite ? { type: 'refresh' } : null });
   } catch (err) {
     console.error('Admin AI chat error:', err);
     res.json({ response: 'Sorry, I encountered an error processing your request.' });
