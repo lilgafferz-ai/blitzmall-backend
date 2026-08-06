@@ -2959,17 +2959,21 @@ async function generateAiResponse(intent, text, context) {
       return '📦 Check product pages for real-time stock levels!';
     case 'place_order': {
       if (!customerId) return '👤 Please log in first so I can place your order.';
-      const items = (intent.products || []).slice(0, 10).map(p => ({ _id: p._id, name: p.name, price: p.price, quantity: 1 }));
+      const inStock = (intent.products || []).filter(p => (p.stock || 0) > 0).slice(0, 10);
+      if (!inStock.length) return '😅 Sorry, those items are out of stock right now. Try something else or check back later!';
+      const items = inStock.map(p => ({ _id: p._id, name: p.name, price: p.price, quantity: 1 }));
       const total = items.reduce((s, i) => s + i.price * i.quantity, 0);
+      let cust = null;
+      try { cust = await customers_.findOne({ phone: String(customerId).replace(/[^0-9]/g, '') }); } catch (e) { cust = null; }
       const order = {
-        customerId, customerName: 'Customer', items, totalPrice: total,
+        customerId, customerName: (cust && cust.name) || 'Customer', items, totalPrice: total,
         paymentMethod: 'delivery', status: 'pending', createdAt: new Date(),
         deliveryLocation: 'Ordered via AI chat', deliveryFee: 0, gpsCoords: null,
         shopCoords: SHOP_COORDS, couponCode: null, discount: 0,
         deliveryProgress: 0, dispatchedAt: null, deliveredAt: null, viaAi: true
       };
       const result = await orders_.insertOne(order);
-      for (const it of items) { const id = it._id; if (id && ObjectId.isValid(id)) await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: -Math.abs(it.quantity) } }); }
+      for (const it of items) { if (it._id) await products_.updateOne({ _id: it._id }, { $inc: { stock: -1 } }); }
       intent.orderResult = { orderId: String(result.insertedId), total };
       return `🛍️ **Order placed!**\n\n${items.map(i => `• ${i.name} ×${i.quantity} — KES ${(i.price * i.quantity).toLocaleString()}`).join('\n')}\n\n**Total: KES ${total.toLocaleString()}** — pay on delivery.\n\nSay "track my order" for updates!`;
     }
@@ -3230,9 +3234,9 @@ async function generateAdminAiResponse(intent, text, branchId, userName) {
       }
       const todayR = dayRevs[dayRevs.length - 1];
       const prevAvg = dayRevs.slice(0, 6).reduce((s, x) => s + x, 0) / Math.max(1, dayRevs.length - 1);
-      const pct = prevAvg > 0 ? Math.round(((todayR - prevAvg) / prevAvg) * 100) : 0;
+      const deltaPct = prevAvg > 0 ? Math.round(((todayR - prevAvg) / prevAvg) * 100) : 0;
       const flag = pct <= -25 ? '🚨 **ALERT:**' : pct >= 25 ? '🎉 **Strong day:**' : '📊 **Status:**';
-      let msg = `${flag} Sales today ${money(todayR)} ${pct < 0 ? '▼' : '▲'} ${Math.abs(pct)}% vs the 6-day average.\n\n`;
+      let msg = `${flag} Sales today ${money(todayR)} ${deltaPct < 0 ? '▼' : '▲'} ${Math.abs(deltaPct)}% vs the 6-day average.\n\n`;
       const alerts = [];
       if (outOfStock.length) alerts.push(`• 🚫 **Out of stock (${outOfStock.length}):** ${outOfStock.slice(0, 5).join(', ')}`);
       if (lowStock.length) alerts.push(`• ⚠️ **Low stock:** ${lowStock.slice(0, 5).join(', ')}`);
