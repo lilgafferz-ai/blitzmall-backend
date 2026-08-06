@@ -461,7 +461,14 @@ function Admin() {
     { label: '🏆 Best sellers', text: 'Best selling products' },
     { label: '🔮 Predictions', text: 'Restock predictions' },
     { label: '📝 Restock Milk', text: 'restock Milk by 10' },
-    { label: '🚨 Anomalies', text: 'Any anomalies today?' },
+    { label: "🧾 Today's sales", text: "Today's sales list" },
+    { label: '📝 Add product', text: 'add product Milk 1L price 65 category Dairy stock 20' },
+    { label: '🏷️ Create coupon', text: 'create coupon BLITZ20 20% off' },
+    { label: '👤 Find customer', text: 'find customer 0712345678' },
+    { label: '💼 Credit owed', text: 'who owes credit?' },
+    { label: '📦 Stock value', text: 'total stock value' },
+    { label: '🕐 Working now', text: "who's working today?" },
+    { label: '📆 Sales by day', text: 'sales by day this week' },
   ];
 
   const handleAdminAiQuickAction = async (text) => {
@@ -469,7 +476,7 @@ function Admin() {
     setAdminAiLoading(true);
     try {
       const data = await (await authPost(API_URL + '/admin/ai/chat', { message: text })).json();
-      if (data.action?.type === 'refresh') { loadProducts(); loadOrders(); loadSummary(); loadExpenses(); loadSales(); }
+      if (data.action?.type === 'refresh') { loadProducts(); loadOrders(); loadSummary(); loadExpenses(); loadSales(); loadStaff(); loadCoupons(); }
       setAdminAiMessages(prev => [...prev, { sender: 'bot', text: data.response || 'Sorry, could not process that.' }]);
     } catch (e) {
       setAdminAiMessages(prev => [...prev, { sender: 'bot', text: '🤖 Sorry, I encountered an error.' }]);
@@ -813,7 +820,7 @@ function Admin() {
     try {
       const r = await authPost(API_URL + '/admin/ai/chat', { message: msg });
       const d = await r.json();
-      if (d.action?.type === 'refresh') { loadProducts(); loadOrders(); loadSummary(); loadExpenses(); loadSales(); }
+      if (d.action?.type === 'refresh') { loadProducts(); loadOrders(); loadSummary(); loadExpenses(); loadSales(); loadStaff(); loadCoupons(); }
       setAdminAiMessages(prev => [...prev, { sender: 'bot', text: d.response || 'Sorry, I could not process that.' }]);
     } catch (e) {
       console.error(e);

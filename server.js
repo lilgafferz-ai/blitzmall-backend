@@ -2992,7 +2992,7 @@ function customerLlmSystem(products, history) {
 }
 
 function adminLlmSystem() {
-  return `You are BlitzMall's AI Business Assistant for a Kenyan grocery store owner. The owner may ask in English or Swahili - reply in the same language. You have live store data via a built-in analytics engine covering sales, profit, expenses, inventory, orders, staff, loyalty, coupons, predictions, and cash vs M-Pesa. For anything the rules cannot compute, give practical business advice or suggest asking about specific data. Keep answers under 120 words.`;
+  return `You are BlitzMall's AI Business Assistant for a Kenyan grocery store owner. The owner may ask in English or Swahili - reply in the same language. You have live store data via a built-in analytics engine covering sales, profit, expenses, inventory, orders, staff, loyalty, coupons, predictions, cash vs M-Pesa, customer lookups, credit, shifts and categories. You can also carry out actions the owner requests - adding or restocking products, updating prices, setting discounts, creating or disabling coupons, adding loyalty points, adding staff, recording cash sales and refunding sales. For anything the rules cannot compute, give practical business advice or suggest asking about specific data. Keep answers under 120 words.`;
 }
 
 app.post('/api/ai/chat', async (req, res) => {
@@ -3033,7 +3033,31 @@ function detectAdminIntent(text) {
   if (/\b(restock|add stock|refill|weka stock)\b/i.test(t) && /\d/.test(t)) return { type: 'restock' };
   if (/\b(mark|set|update|change)\b.*\b(delivered|on the way|dispatched|cancelled|cancel|pending)\b/i.test(t)) return { type: 'order_action' };
   if (/\b(add|record|log|weka)\b.*\b(expense|cost|gharama)\b/i.test(t) && /\d/.test(t)) return { type: 'add_expense' };
-  if (/\b(anomal|unusual|drop|down|compare|insight|flag|alert)\b/i.test(t)) return { type: 'anomalies' };
+  if (/\b(anomal\w*|unusual|drop|down|compare|insight|flag|alert)\b/i.test(t)) return { type: 'anomalies' };
+  if (/\b(add|create|weka)\b.*\b(product|item|bidhaa)\b/i.test(t)) return { type: 'add_product' };
+  if (/\b(update|change|set|weka)\b.*\b(price|bei)\b/i.test(t) && /\d/.test(t)) return { type: 'update_price' };
+  if (/\b(discount|punguzo|reduce|cut)\b.*\b(%|percent|percentage)/i.test(t)) return { type: 'set_discount' };
+  if (/\b(add|increase|set|update|weka)\b.*\bstock\b/i.test(t) && /\d/.test(t)) return { type: 'adjust_stock' };
+  if (/\b(find|lookup|search|show|check|tafuta)\b.*\b(customer|client|mteja)\b/i.test(t)) return { type: 'customer_lookup' };
+  if (/\b(credit|owe\w*|debt|deni)\b/i.test(t) && /\b(who|list|show|all|balances|customers|how many)\b/i.test(t)) return { type: 'credit_list' };
+  if (/\b(add|give|award|bonus|weka)\b.*\b(points|pointi)\b/i.test(t) && /\d/.test(t)) return { type: 'add_points' };
+  if (/\b(create|make|new|weka)\b.*\b(coupon|kuponi|promo)\b/i.test(t)) return { type: 'create_coupon' };
+  if (/\b(disable|deactivate|stop|remove|turn off)\b.*\b(coupon|kuponi|promo)\b/i.test(t)) return { type: 'disable_coupon' };
+  if (/\b(coupon|kuponi|promo)\b.*\b(redemptions?|redeemed|used|usage|how many)\b/i.test(t)) return { type: 'coupon_redemptions' };
+  if (/\b(list|show|active|all)\b.*\b(coupons|kuponi)\b/i.test(t)) return { type: 'list_coupons' };
+  if (/\b(average|avg)\b.*\b(order|basket|purchase)\b/i.test(t)) return { type: 'avg_order' };
+  if (/\b(best|top|popular|leading)\b.*\b(categor\w*|section\w*)\b/i.test(t)) return { type: 'best_category' };
+  if (/\b(repeat|returning|frequent|regular)\b.*\b(customers?|clients?)\b/i.test(t)) return { type: 'repeat_customers' };
+  if (/\b(stock|inventory)\b.*\b(value|worth)\b/i.test(t)) return { type: 'stock_value' };
+  if (/\b(busiest|peak|best)\b.*\b(hour|time)\b/i.test(t)) return { type: 'busiest_hour' };
+  if (/\b(by day|per day|daily)\b/i.test(t) && /\b(sales|revenue|mapato)\b/i.test(t)) return { type: 'sales_by_day' };
+  if (/\b(add|register|hire|weka)\b.*\b(staff|employee|worker|cashier|mfanyakazi)\b/i.test(t)) return { type: 'add_staff' };
+  if (/\b(working|on duty|on shift|clocked)\b.*\b(today|now)\b/i.test(t)) return { type: 'working_today' };
+  if (/\b(shift|muhula)\b.*\b(summary|total|cash|reconcil|report)\b/i.test(t)) return { type: 'shift_summary' };
+  if (/\b(staff|employee|cashier)\b.*\b(performance|best|top|rank)\b/i.test(t)) return { type: 'staff_performance' };
+  if (/\b(today's|todays|recent|latest)\b.*\b(sales|transactions|receipts)\b/i.test(t)) return { type: 'sales_list' };
+  if (/\b(refund|void|reverse)\b.*\b(sale|payment|transaction)\b/i.test(t) && /#/.test(t)) return { type: 'refund_sale' };
+  if (/\b(record|log|enter|weka)\b.*\b(sale|payment)\b/i.test(t) && /\d/.test(t)) return { type: 'record_sale' };
   if (/\b(sale|revenue|income|earn|sold|today|this week|this month|how much|performance)\b/i.test(t)) {
     if (/\b(today|now|current)\b/i.test(t)) return { type: 'sales_today' };
     if (/\b(week|weekly)\b/i.test(t)) return { type: 'sales_week' };
@@ -3051,7 +3075,7 @@ function detectAdminIntent(text) {
     if (/\b(count|total|how many|number|list|show)\b/i.test(t)) return { type: 'inventory_count' };
     return { type: 'inventory_summary' };
   }
-  if (/\b(order|delivery|customer order|pending order)\b/i.test(t)) {
+  if (/\b(orders?|deliver(y|ies)|customer orders?|pending orders?)\b/i.test(t)) {
     if (/\b(pending|new|incoming|today)\b/i.test(t)) return { type: 'pending_orders' };
     if (/\b(delivered|completed|done|fulfilled)\b/i.test(t)) return { type: 'delivered_orders' };
     if (/\b(cancel)\b/i.test(t)) return { type: 'cancelled_orders' };
@@ -3089,7 +3113,7 @@ async function generateAdminAiResponse(intent, text, branchId, userName) {
 
   const calc = (start) => {
     let revenue = 0, profit = 0, cash = 0, mpesa = 0, count = 0;
-    for (const s of allSales) { if (!inP(s.createdAt, start)) continue; count++; revenue += s.total || 0; profit += s.profit || 0; if (s.paymentMethod === 'cash') cash += s.total || 0; else if (s.paymentMethod === 'mpesa') mpesa += s.total || 0; else if (s.paymentMethod === 'split') { cash += s.cashPart || 0; mpesa += s.mpesaPart || 0; } }
+    for (const s of allSales) { if (s.refunded || !inP(s.createdAt, start)) continue; count++; revenue += s.total || 0; profit += s.profit || 0; if (s.paymentMethod === 'cash') cash += s.total || 0; else if (s.paymentMethod === 'mpesa') mpesa += s.total || 0; else if (s.paymentMethod === 'split') { cash += s.cashPart || 0; mpesa += s.mpesaPart || 0; } }
     for (const o of allOrders) { if (o.status === 'cancelled' || !inP(o.createdAt, start)) continue; count++; revenue += o.totalPrice || 0; let op = 0; for (const it of (o.items || [])) { const q = it.quantity || it.qty || 0; op += ((it.price || 0) - (it.buyingPrice || 0)) * q; } profit += op; if (o.paymentMethod === 'mpesa') mpesa += o.totalPrice || 0; else cash += o.totalPrice || 0; }
     let exp = 0; for (const e of allExpenses) if (inP(e.createdAt, start)) exp += e.amount || 0;
     return { revenue, profit, expenses: exp, net: profit - exp, cash, mpesa, count };
@@ -3104,7 +3128,7 @@ async function generateAdminAiResponse(intent, text, branchId, userName) {
   const pct = (a, b) => b > 0 ? Math.round((a / b) * 100) : 0;
 
   const tally = {};
-  for (const s of allSales) for (const it of (s.items || [])) tally[it.name] = (tally[it.name] || 0) + (it.qty || 0);
+  for (const s of allSales) { if (s.refunded) continue; for (const it of (s.items || [])) tally[it.name] = (tally[it.name] || 0) + (it.qty || 0); }
   for (const o of allOrders) { if (o.status !== 'cancelled') for (const it of (o.items || [])) tally[it.name] = (tally[it.name] || 0) + (it.quantity || it.qty || 0); }
   const best = Object.entries(tally).map(([name, qty]) => ({ name, qty })).sort((a, b) => b.qty - a.qty);
   const outOfStock = allProducts.filter(p => (p.stock || 0) <= 0).map(p => p.name);
@@ -3228,7 +3252,7 @@ async function generateAdminAiResponse(intent, text, branchId, userName) {
         const e = new Date(d);
         e.setDate(d.getDate() + 1);
         let rev = 0;
-        for (const s of allSales) { if (s.createdAt >= d && s.createdAt < e) rev += s.total || 0; }
+        for (const s of allSales) { if (s.refunded) continue; if (s.createdAt >= d && s.createdAt < e) rev += s.total || 0; }
         for (const o of allOrders) { if (o.status !== 'cancelled' && o.createdAt >= d && o.createdAt < e) rev += o.totalPrice || 0; }
         dayRevs.push(rev);
       }
@@ -3243,8 +3267,240 @@ async function generateAdminAiResponse(intent, text, branchId, userName) {
       if (expiringSoon.length) alerts.push(`• ⏳ **Expiring in 7 days:** ${expiringSoon.slice(0, 5).join(', ')}`);
       return msg + (alerts.length ? alerts.join('\n') : '✅ No major anomalies.');
     }
+    case 'add_product': {
+      const m = text.match(/add\s+product\s+(.+?)\s+(?:price|bei)\s+(\d+(?:\.\d+)?)/i);
+      if (!m) return '🤖 Say e.g. "add product Milk 1L price 65 category Dairy stock 20".';
+      const name = m[1].replace(/\s+(?:category|stock|qty)\s+.*$/i, '').trim().slice(0, 60);
+      if (!name) return '🤖 Say e.g. "add product Milk 1L price 65 category Dairy stock 20".';
+      const price = parseFloat(m[2]);
+      if (!price || price <= 0) return '🤖 Price must be more than 0.';
+      const catM = text.match(/(?:category|category name)\s+([A-Za-z0-9 &-]+)/i);
+      const stM = text.match(/(?:stock|qty)\s+(\d+)/i);
+      await products_.insertOne({
+        name, price, cost: 0, stock: stM ? parseInt(stM[1], 10) : 0,
+        category: catM ? catM[1].trim() : 'General', barcode: null,
+        isFlashSale: false, flashSaleDiscount: 0, discountPercent: 0, createdAt: new Date()
+      });
+      intent.didWrite = true;
+      return `✅ **Product added:** ${name} — KES ${price.toLocaleString()}${catM ? ' in ' + catM[1].trim() : ''}, stock ${stM ? stM[1] : 0}.`;
+    }
+    case 'update_price': {
+      const m = text.match(/price\s+of\s+(.+?)\s+(?:to|at)?\s*(\d+(?:\.\d+)?)/i) || text.match(/(.+?)\s+(?:price|bei)\s+(?:to|at|=|:)?\s*(\d+(?:\.\d+)?)/i);
+      if (!m) return '🤖 Say e.g. "update Milk price to 70".';
+      const prodName = (m[1] || '').replace(/\b(update|change|set|weka|the|to|at)\b/gi, '').trim();
+      const price = parseFloat(m[2]);
+      const found = findMatchingProducts(prodName, allProducts, 1);
+      if (!found.length) return '🔍 I could not find that product.';
+      const p = found[0];
+      await products_.updateOne({ _id: p._id }, { $set: { price } });
+      intent.didWrite = true;
+      return `💰 **Price updated:** ${p.name} → KES ${price.toLocaleString()}.`;
+    }
+    case 'set_discount': {
+      const m = text.match(/(?:discount|punguzo|reduce|cut)\s+(.+?)\s+by\s+(\d+(?:\.\d+)?)/i);
+      if (!m) return '🤖 Say e.g. "discount Milk by 10%".';
+      const found = findMatchingProducts(m[1].trim(), allProducts, 1);
+      if (!found.length) return '🔍 I could not find that product.';
+      const p = found[0];
+      const pct = Math.min(90, Math.max(0, parseFloat(m[2])));
+      await products_.updateOne({ _id: p._id }, { $set: { flashSale: true, flashSaleDiscount: pct, discountPercent: pct, flashSaleExpires: new Date(Date.now() + 24 * 3600 * 1000) } });
+      intent.didWrite = true;
+      return `🏷️ **Discount set:** ${p.name} — ${pct}% off for 24 hours.`;
+    }
+    case 'adjust_stock': {
+      let qty = 0, name = '', absolute = false;
+      let m = text.match(/add\s+(\d+)\s+to\s+(.+?)\s+stock/i);
+      if (m) { qty = parseInt(m[1], 10); name = m[2].trim(); }
+      else { m = text.match(/(?:set|update|weka)\s+(.+?)\s+stock\s+(?:to|by)?\s*(\d+)/i); if (m) { name = m[1].trim(); qty = parseInt(m[2], 10); absolute = true; } }
+      if (!name || !qty) return '🤖 Say e.g. "add 5 to Milk stock" or "set Milk stock to 20".';
+      const found = findMatchingProducts(name, allProducts, 1);
+      if (!found.length) return '🔍 I could not find that product.';
+      const p = found[0];
+      await products_.updateOne({ _id: p._id }, absolute ? { $set: { stock: qty } } : { $inc: { stock: qty } });
+      intent.didWrite = true;
+      return absolute ? `📦 **Stock set:** ${p.name} → ${qty}.` : `📦 **Stock updated:** ${p.name} +${qty} → now ${(p.stock || 0) + qty}.`;
+    }
+    case 'customer_lookup': {
+      const phoneM = text.match(/(\d{9,12})/);
+      if (!phoneM) return '🤖 Say e.g. "find customer 0712345678".';
+      const phone = phoneM[1];
+      const [cust, loyalty] = await Promise.all([customers_.findOne({ phone }), loyalty_.findOne({ phone })]);
+      const credits = await credit_.find({ phone }).toArray();
+      const orderCount = cust ? (cust.orderCount || 0) : await orders_.countDocuments({ customerId: phone });
+      const totalSpent = cust ? (cust.totalSpent || 0) : 0;
+      const owed = credits.filter(c => !c.paid).reduce((s, c) => s + (c.amount || 0), 0);
+      const name = (cust && cust.name) || (loyalty && loyalty.customerName) || '—';
+      return `👤 **${name}** (${phone})\n\n• Orders: ${orderCount}\n• Total spent: KES ${totalSpent.toLocaleString()}\n• Loyalty: ${loyalty ? loyalty.points : 0} pts (${loyalty ? loyalty.tier : 'None'})\n• Credit owed: KES ${owed.toLocaleString()}\n• Last order: ${cust && cust.lastOrderAt ? new Date(cust.lastOrderAt).toLocaleDateString() : '—'}`;
+    }
+    case 'credit_list': {
+      const owed = await credit_.find({ paid: { $ne: true } }).toArray();
+      if (!owed.length) return '✅ No one owes credit right now. 🎉';
+      const grouped = {};
+      for (const c of owed) { const key = c.phone || c.customerName || 'Unknown'; grouped[key] = (grouped[key] || 0) + (c.amount || 0); }
+      const total = owed.reduce((s, c) => s + (c.amount || 0), 0);
+      const rows = Object.entries(grouped).sort((a, b) => b[1] - a[1]).slice(0, 10);
+      return `💼 **Credit owed — KES ${total.toLocaleString()} (${owed.length} entries):**\n\n${rows.map(([k, v]) => `• ${k} — KES ${v.toLocaleString()}`).join('\n')}\n\nSay "find customer [phone]" for details.`;
+    }
+    case 'add_points': {
+      const m = text.match(/(\d+)\s*(?:points|pointi)/i);
+      const phoneM = text.match(/(\d{9,12})/);
+      if (!m || !phoneM) return '🤖 Say e.g. "add 100 loyalty points to 0712345678".';
+      const points = parseInt(m[1], 10);
+      if (points > 10000) return "⚠️ That's a lot - max 10,000 points per add.";
+      const phone = phoneM[1];
+      const existing = await loyalty_.findOne({ phone });
+      if (existing) await loyalty_.updateOne({ phone }, { $inc: { points }, $set: { updatedAt: new Date() } });
+      else await loyalty_.insertOne({ phone, customerName: '', totalSpent: 0, points, tier: 'Bronze', createdAt: new Date(), updatedAt: new Date() });
+      intent.didWrite = true;
+      return `⭐ **Points added:** +${points} to ${phone} → now ${(existing ? (existing.points || 0) + points : points)} pts.`;
+    }
+    case 'create_coupon': {
+      const m = text.match(/create\s+coupon\s+([A-Z0-9]+)\s+(\d+(?:\.\d+)?)\s*(%|percent|percentage|kes|ksh|sh)?/i);
+      if (!m) return '🤖 Say e.g. "create coupon BLITZ20 20% off".';
+      const code = m[1].toUpperCase();
+      const isPct = m[3] && /%|percent|percentage/i.test(m[3]);
+      const value = parseFloat(m[2]);
+      if (value <= 0) return '🤖 Coupon value must be greater than 0.';
+      if (isPct && value > 90) return '⚠️ Percent discounts are capped at 90%.';
+      const existing = await coupons_.findOne({ code });
+      if (existing) return `⚠️ Coupon **${code}** already exists.`;
+      await coupons_.insertOne({ code, type: isPct ? 'percent' : 'fixed', value, minPurchase: 0, expiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000), maxUses: 0, usedCount: 0, active: true, createdAt: new Date() });
+      intent.didWrite = true;
+      return `🎟️ **Coupon created:** ${code} — ${isPct ? value + '% off' : 'KES ' + value} (30 days, unlimited uses).`;
+    }
+    case 'disable_coupon': {
+      const m = text.match(/(?:disable|deactivate|stop|remove|turn off)\s+coupon\s+([A-Z0-9]+)/i) || text.match(/coupon\s+([A-Z0-9]+)\s+(?:disable|deactivate|stop|remove|off)/i);
+      if (!m) return '🤖 Say e.g. "disable coupon BLITZ20".';
+      const code = m[1].toUpperCase();
+      const r = await coupons_.updateOne({ code }, { $set: { active: false } });
+      if (!r.matchedCount) return `🔍 Coupon **${code}** not found.`;
+      intent.didWrite = true;
+      return `🚫 **Coupon disabled:** ${code} can no longer be used.`;
+    }
+    case 'coupon_redemptions': {
+      const todayReds = await redemptions_.find({ createdAt: { $gte: startToday } }).toArray();
+      const totalReds = await redemptions_.countDocuments({});
+      const redByCoupon = {};
+      for (const r of todayReds) { const k = r.couponCode || r.rewardName || 'reward'; redByCoupon[k] = (redByCoupon[k] || 0) + 1; }
+      const lines = Object.entries(redByCoupon).slice(0, 8).map(([k, v]) => `• ${k} — ${v}×`).join('\n');
+      return `🎟️ **Redemptions today:** ${todayReds.length}${lines ? '\n\n' + lines : ''}\n\nAll-time: ${totalReds}. Active coupons: ${allCoupons.filter(c => c.active).length}.`;
+    }
+    case 'list_coupons': {
+      const active = allCoupons.filter(c => c.active);
+      if (!active.length) return '🎟️ No active coupons. Say "create coupon CODE 20% off" to make one.';
+      return `🎟️ **Active coupons (${active.length}):**\n\n${active.slice(0, 10).map(c => `• **${c.code}** — ${c.type === 'percent' ? c.value + '% off' : 'KES ' + c.value}${c.minPurchase ? ' (min KES ' + c.minPurchase + ')' : ''}${c.usedCount ? ' — ' + c.usedCount + ' uses' : ''}${c.expiresAt ? ' — expires ' + new Date(c.expiresAt).toLocaleDateString() : ''}`).join('\n')}`;
+    }
+    case 'avg_order': {
+      const valid = allOrders.filter(o => o.status !== 'cancelled');
+      if (!valid.length) return '📊 No orders yet to calculate an average.';
+      const avg = valid.reduce((s, o) => s + (o.totalPrice || 0), 0) / valid.length;
+      const todayOrders = allOrders.filter(o => o.status !== 'cancelled' && o.createdAt >= startToday);
+      const avgToday = todayOrders.length ? todayOrders.reduce((s, o) => s + (o.totalPrice || 0), 0) / todayOrders.length : 0;
+      return `🛒 **Average order value:** KES ${Math.round(avg).toLocaleString()} across ${valid.length} orders.\n• Today: KES ${Math.round(avgToday).toLocaleString()} (${todayOrders.length} orders)`;
+    }
+    case 'best_category': {
+      const prodCat = {};
+      for (const p of allProducts) prodCat[String(p._id)] = p.category || 'Uncategorised';
+      const catMap = {};
+      for (const s of allSales) { if (s.refunded) continue; for (const it of (s.items || [])) { const cat = it.category || prodCat[String(it.productId)] || 'Uncategorised'; catMap[cat] = (catMap[cat] || 0) + ((it.price || 0) * (it.qty || 1)); } }
+      for (const o of allOrders) { if (o.status === 'cancelled') continue; for (const it of (o.items || [])) { const cat = it.category || prodCat[String(it._id)] || prodCat[String(it.productId)] || 'Uncategorised'; catMap[cat] = (catMap[cat] || 0) + ((it.price || 0) * (it.quantity || it.qty || 1)); } }
+      const rows = Object.entries(catMap).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      if (!rows.length) return '📊 No sales data for categories yet.';
+      return `🏅 **Top categories:**\n\n${rows.map(([c, v], i) => `${i + 1}. **${c}** — KES ${v.toLocaleString()}`).join('\n')}`;
+    }
+    case 'repeat_customers': {
+      const counts = {};
+      for (const o of allOrders) { if (o.status === 'cancelled' || !o.customerId) continue; counts[o.customerId] = (counts[o.customerId] || 0) + 1; }
+      const repeat = Object.entries(counts).filter(([, c]) => c > 1).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      if (!repeat.length) return '👥 No repeat customers yet — all single purchases so far.';
+      return `👥 **Repeat customers (${Object.values(counts).filter(c => c > 1).length}):**\n\n${repeat.map(([ph, c]) => `• ${ph} — ${c} orders`).join('\n')}\n\nSay "find customer [phone]" for details.`;
+    }
+    case 'stock_value': {
+      const retail = allProducts.reduce((s, p) => s + ((p.stock || 0) * (p.price || 0)), 0);
+      const cost = allProducts.reduce((s, p) => s + ((p.stock || 0) * (p.cost || p.buyingPrice || 0)), 0);
+      return `📦 **Stock value:**\n• At retail: KES ${retail.toLocaleString()}\n• At cost: KES ${cost.toLocaleString()}\n• ${allProducts.length} products tracked`;
+    }
+    case 'busiest_hour': {
+      const hourMap = {};
+      for (const s of allSales) { if (s.refunded || !s.createdAt) continue; const h = new Date(s.createdAt).getHours(); hourMap[h] = (hourMap[h] || 0) + (s.total || 0); }
+      const rows = Object.entries(hourMap).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      if (!rows.length) return '🕐 No sales data yet.';
+      const fmt = h => new Date(new Date().setHours(parseInt(h, 10), 0, 0, 0)).toLocaleTimeString([], { hour: 'numeric' });
+      return `🕐 **Busiest hours:**\n\n${rows.map(([h, v]) => `• ${fmt(h)} — KES ${v.toLocaleString()}`).join('\n')}`;
+    }
+    case 'sales_by_day': {
+      const days = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(startToday); d.setDate(startToday.getDate() - i);
+        const e = new Date(d); e.setDate(d.getDate() + 1);
+        let rev = 0, n = 0;
+        for (const s of allSales) { if (s.refunded) continue; if (s.createdAt >= d && s.createdAt < e) { rev += s.total || 0; n++; } }
+        for (const o of allOrders) { if (o.status !== 'cancelled' && o.createdAt >= d && o.createdAt < e) { rev += o.totalPrice || 0; n++; } }
+        days.push({ d, rev, n });
+      }
+      return `📆 **Sales — last 7 days:**\n\n${days.map(x => `• ${x.d.toLocaleDateString([], { weekday: 'short', day: 'numeric' })} — KES ${x.rev.toLocaleString()} (${x.n})`).join('\n')}`;
+    }
+    case 'add_staff': {
+      const m = text.match(/add\s+(?:staff|employee|worker|cashier|mfanyakazi)\s+([A-Za-z .'-]+)(?:\s+as\s+([A-Za-z]+))?/i);
+      if (!m) return '🤖 Say e.g. "add staff John as Cashier".';
+      const name = m[1].trim().slice(0, 60);
+      const role = (m[2] || 'Cashier').trim();
+      await staff_.insertOne({ name, role, branchId: branchId || null, createdAt: new Date() });
+      intent.didWrite = true;
+      return `👥 **Staff added:** ${name} (${role}).`;
+    }
+    case 'working_today': {
+      const open = await shifts_.find({ status: 'open' }).toArray();
+      if (!open.length) return '🕐 No one is on shift right now.';
+      return `🕐 **On shift now (${open.length}):**\n\n${open.map(sh => `• ${sh.cashierName || sh.cashierId} — since ${new Date(sh.startTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${sh.startingCash ? ' (start KES ' + sh.startingCash.toLocaleString() + ')' : ''}`).join('\n')}`;
+    }
+    case 'shift_summary': {
+      const todayShifts = await shifts_.find({ startTime: { $gte: startToday } }).toArray();
+      const open = todayShifts.filter(s => s.status === 'open');
+      const closed = todayShifts.filter(s => s.status === 'closed');
+      if (!open.length && !closed.length) return '🕐 No shifts opened yet today.';
+      let msg = `🕐 **Shifts today (${todayShifts.length}):**\n`;
+      if (open.length) msg += `\n**Open now:**\n${open.map(sh => `• ${sh.cashierName || sh.cashierId} — KES ${(sh.cashSales || 0).toLocaleString()} cash / ${(sh.mpesaSales || 0).toLocaleString()} M-Pesa`).join('\n')}`;
+      if (closed.length) msg += `\n\n**Closed:**\n${closed.slice(0, 5).map(sh => `• ${sh.cashierName || sh.cashierId} — ${sh.salesCount || 0} sales, KES ${(sh.cashSales || 0).toLocaleString()} cash + ${(sh.mpesaSales || 0).toLocaleString()} M-Pesa${sh.difference != null ? ', diff ' + (sh.difference >= 0 ? '+' : '') + sh.difference.toLocaleString() : ''}`).join('\n')}`;
+      return msg;
+    }
+    case 'staff_performance': {
+      const byStaff = {};
+      for (const s of allSales) { if (s.refunded || !(s.createdAt >= startWeek)) continue; const k = s.staff || 'Unknown'; byStaff[k] = (byStaff[k] || 0) + (s.total || 0); }
+      const rows = Object.entries(byStaff).sort((a, b) => b[1] - a[1]).slice(0, 6);
+      if (!rows.length) return '👥 No staff sales recorded this week yet.';
+      return `🏆 **Staff performance — this week:**\n\n${rows.map(([n, v], i) => `${i + 1}. **${n}** — KES ${v.toLocaleString()}`).join('\n')}`;
+    }
+    case 'sales_list': {
+      const recent = allSales.slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 8);
+      if (!recent.length) return '🧾 No sales recorded yet.';
+      return `🧾 **Recent sales:**\n\n${recent.map(s => `• ${new Date(s.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} — KES ${(s.total || 0).toLocaleString()} (${s.paymentMethod || 'cash'})${s.staff ? ' · ' + s.staff : ''}${s.refunded ? ' ↩️ REFUNDED' : ''}`).join('\n')}`;
+    }
+    case 'refund_sale': {
+      const idM = text.match(/#\s*([a-zA-Z0-9]{6,})/i) || text.match(/\b([a-f0-9]{24})\b/i);
+      if (!idM) return '🤖 Say e.g. "refund sale #5f3ab2".';
+      const target = idM[1].toLowerCase();
+      const sale = allSales.find(s => String(s._id).toLowerCase().includes(target) || String(s._id).slice(-6) === target);
+      if (!sale) return '🔍 Sale not found. Try its ID from "recent sales".';
+      if (sale.refunded) return `⚠️ Sale #${String(sale._id).slice(-6)} is already refunded.`;
+      await sales_.updateOne({ _id: sale._id }, { $set: { refunded: true, refundedAt: new Date(), refundedBy: userName || null } });
+      for (const it of (sale.items || [])) { if (it.productId && ObjectId.isValid(it.productId)) await products_.updateOne({ _id: new ObjectId(it.productId) }, { $inc: { stock: Math.abs(it.qty || 1) } }); }
+      intent.didWrite = true;
+      return `↩️ **Sale refunded:** #${String(sale._id).slice(-6)} — KES ${(sale.total || 0).toLocaleString()} (${sale.paymentMethod}). Stock restored.`;
+    }
+    case 'record_sale': {
+      const amtM = text.match(/(\d+(?:\.\d+)?)/);
+      if (!amtM) return '🤖 Say e.g. "record cash sale 500".';
+      const total = parseFloat(amtM[1]);
+      if (!total || total <= 0 || total > 1000000) return '🤖 That amount looks invalid - enter between 1 and 1,000,000.';
+      const paymentMethod = /mpesa|m-pesa/i.test(text) ? 'mpesa' : 'cash';
+      const desc = text.replace(/(record|log|enter|weka|cash sale|manual sale|payment|mpesa|m-pesa|for|note|kes|ksh|\d+(\.\d+)?)/gi, ' ').replace(/\s+/g, ' ').trim().slice(0, 50);
+      await sales_.insertOne({ items: [{ name: desc || 'Manual sale', price: total, qty: 1, productId: null, buyingPrice: 0 }], total, profit: 0, paymentMethod, amountGiven: paymentMethod === 'cash' ? total : 0, cashPart: paymentMethod === 'cash' ? total : 0, mpesaPart: paymentMethod === 'mpesa' ? total : 0, change: 0, staff: userName || 'Owner', cashierUserId: null, customerPhone: '', channel: 'ai', branchId: branchId || null, createdAt: new Date() });
+      intent.didWrite = true;
+      return `🧾 **Sale recorded:** KES ${total.toLocaleString()} (${paymentMethod})${desc ? ' — ' + desc : ''}.`;
+    }
     default:
-      return '\ud83e\udd16 **I can help with your business data.**\n\nTry:\n\u2022 "How are sales today?"\n\u2022 "What\'s my profit this month?"\n\u2022 "Any out of stock items?"\n\u2022 "Show pending orders"\n\u2022 "Best selling products"\n\u2022 "Restock predictions"\n\u2022 "Cash vs M-Pesa today"\n\u2022 "Business overview"\n\nI have access to all your store data! \ud83d\udcca';
+      return '\ud83e\udd16 **I can help with your business data.**\n\nTry:\n\u2022 "How are sales today?"\n\u2022 "What\'s my profit this month?"\n\u2022 "Any out of stock items?"\n\u2022 "Show pending orders"\n\u2022 "Best selling products"\n\u2022 "Restock predictions"\n\u2022 "Cash vs M-Pesa today"\n\u2022 "Business overview"\n\nI have access to all your store data! \ud83d\udcca\n\n\u26a1 **Try:** "add product [name] price [amount]", "update [product] price to [amount]", "discount [product] by 10%", "add 5 to [product] stock", "create coupon [CODE] 20% off", "find customer [phone]", "who owes credit?", "add staff [name] as [role]", "refund sale #[id]", "record cash sale 500", "any anomalies?"';
   }
 }
 
@@ -3254,6 +3510,11 @@ app.post('/api/admin/ai/chat', authenticate, async (req, res) => {
   try {
     const text = message.trim();
     const intent = detectAdminIntent(text);
+    // Write commands require owner/manager access - mirrors the role gates on the admin UI.
+    const AI_WRITE_INTENTS = new Set(['add_product','update_price','set_discount','adjust_stock','add_points','create_coupon','disable_coupon','add_staff','refund_sale','record_sale','restock','order_action','add_expense']);
+    if (AI_WRITE_INTENTS.has(intent.type) && req.user.role !== 'owner' && req.user.role !== 'manager') {
+      return res.status(403).json({ response: '🔒 That action needs **owner or manager** access. Please ask the shop owner to do it.', action: null });
+    }
     let response = await generateAdminAiResponse(intent, text, req.user.branchId || null, req.user.name);
     if (intent.type === 'general') {
       const llm = await askOllama(adminLlmSystem(), text);
