@@ -76,6 +76,7 @@ const client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
 let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_, categories_;
+let customers_, promo_claims_;
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   console.error('FATAL ERROR: JWT_SECRET environment variable is not defined.');
@@ -285,6 +286,8 @@ async function connectDb() {
   saved_baskets_ = db.collection('saved_baskets');
   banners_ = db.collection('banners');
   categories_ = db.collection('categories');
+  customers_ = db.collection('customers');
+  promo_claims_ = db.collection('promo_claims');
 
   try {
     const bannerCount = await banners_.countDocuments();
@@ -297,6 +300,34 @@ async function connectDb() {
     }
   } catch (err) {
     console.error('Failed to seed banners:', err);
+  }
+
+  // Seed the public marketing coupons referenced by the home-screen ads, so
+  // those voucher codes actually work at checkout (they were previously shown
+  // in the UI but never existed in the coupons collection).
+  try {
+    const seedCoupons = [
+      { code: 'BLITZ10', type: 'percent', value: 10, minPurchase: 1000, maxUses: 0, note: 'Weekend Special banner code' },
+      { code: 'SHAKE15', type: 'percent', value: 15, minPurchase: 500, maxUses: 0, note: 'Scratch campaign code' },
+      { code: 'SPIN50', type: 'fixed', value: 50, minPurchase: 500, maxUses: 0, note: 'Legacy wheel code' },
+      { code: 'SPINFREE', type: 'free_delivery', value: 0, minPurchase: 300, maxUses: 0, note: 'Legacy wheel code' },
+      { code: 'LUCKY30', type: 'fixed', value: 30, minPurchase: 300, maxUses: 0, note: 'Legacy scratch code' },
+      { code: 'LUCKY50', type: 'fixed', value: 50, minPurchase: 500, maxUses: 0, note: 'Legacy scratch code' },
+      { code: 'LUCKYDEL', type: 'free_delivery', value: 0, minPurchase: 300, maxUses: 0, note: 'Legacy scratch code' },
+    ];
+    for (const sc of seedCoupons) {
+      const exists = await coupons_.findOne({ code: sc.code });
+      if (!exists) {
+        await coupons_.insertOne({
+          code: sc.code, type: sc.type, value: sc.value,
+          minPurchase: sc.minPurchase, expiresAt: null,
+          maxUses: sc.maxUses, usedCount: 0, usedBy: [], ownerPhone: null,
+          active: true, createdAt: new Date(), note: sc.note || ''
+        });
+      }
+    }
+  } catch (err) {
+    console.error('Failed to seed marketing coupons:', err);
   }
 
   await seedRewards();
@@ -381,14 +412,30 @@ app.get('/api/admin/products', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch products' });
   }
 });
+// Customer sign-in is keyed by PHONE NUMBER: every account's shopping record,
+// loyalty points, vouchers and debts live under the phone they sign in with.
 app.post('/api/auth', authLimiter, async (req, res) => {
   const { name, phone } = req.body;
   if (!name || !phone) return res.status(400).json({ error: 'Name and phone required' });
   try {
-    const existingOrder = await orders_.findOne({ customerId: phone });
-    res.json({ success: true, customerId: phone, returning: !!existingOrder, message: `Welcome ${name}!` });
+    const phoneClean = String(phone).replace(/[^0-9]/g, '');
+    const existingCust = await customers_.findOne({ phone: phoneClean });
+    if (existingCust) {
+      await customers_.updateOne(
+        { phone: phoneClean },
+        { $set: { name: (name || existingCust.name || '').trim(), lastLoginAt: new Date() } }
+      );
+    } else {
+      await customers_.insertOne({
+        phone: phoneClean, name: (name || '').trim(),
+        createdAt: new Date(), lastLoginAt: new Date(),
+        orderCount: 0, totalSpent: 0
+      });
+    }
+    const orders = await orders_.find({ customerId: phoneClean }).toArray();
+    res.json({ success: true, customerId: phoneClean, returning: !!existingCust || orders.length > 0, message: `Welcome ${name}!` });
   } catch (err) {
-    res.json({ success: true, customerId: phone, returning: false, message: `Welcome ${name}!` });
+    res.json({ success: true, customerId: String(phone).replace(/[^0-9]/g, ''), returning: false, message: `Welcome ${name}!` });
   }
 });
 app.post('/api/orders', async (req, res) => {
@@ -396,7 +443,33 @@ app.post('/api/orders', async (req, res) => {
   if (!customerId || !items || !items.length) return res.status(400).json({ error: 'Missing data' });
   try {
     const fee = parseFloat(deliveryFee) || 0;
-    const discountAmt = parseFloat(discount) || 0;
+    // Never trust the client's discount amount — recompute it from the coupon
+    // on the server so promo discounts can't be faked, AND re-run the full
+    // eligibility check (owner phone, already used, expiry, limit) so a used
+    // or foreign voucher can never be re-granted at order time.
+    let safeDiscount = 0;
+    let couponEligible = false;
+    if (couponCode) {
+      try {
+        const cc = String(couponCode).toUpperCase();
+        const coupon = await coupons_.findOne({ code: cc, active: true });
+        if (coupon) {
+          const phoneClean = String(customerId).replace(/[^0-9]/g, '');
+          const expired = coupon.expiresAt && new Date(coupon.expiresAt) < new Date();
+          const alreadyUsedByMe = Array.isArray(coupon.usedBy) && coupon.usedBy.includes(customerId);
+          const foreign = coupon.ownerPhone && String(coupon.ownerPhone) !== phoneClean;
+          const limitReached = coupon.maxUses > 0 && (coupon.usedCount || 0) >= coupon.maxUses;
+          if (!expired && !alreadyUsedByMe && !foreign && !limitReached) {
+            couponEligible = true;
+            const itemsTotal = items.reduce((s, i) => s + i.price * i.quantity, 0);
+            if (coupon.type === 'percent') safeDiscount = itemsTotal * (coupon.value || 0) / 100;
+            else if (coupon.type === 'fixed') safeDiscount = coupon.value || 0;
+            safeDiscount = Math.min(safeDiscount, itemsTotal + fee);
+          }
+        }
+      } catch (e) { console.error('Failed to recompute discount:', e); }
+    }
+    const discountAmt = Math.round(safeDiscount * 100) / 100;
     const order = {
       customerId, customerName, items,
       totalPrice: Math.max(0, items.reduce((s, i) => s + i.price * i.quantity, 0) + fee - discountAmt),
@@ -414,6 +487,47 @@ app.post('/api/orders', async (req, res) => {
     };
     const result = await orders_.insertOne(order);
     for (const it of items) { const id = it._id || it.id; if (id && ObjectId.isValid(id)) await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: -Math.abs(it.quantity) } }); }
+
+    // Keep the customer's shopping record (keyed by phone) up to date.
+    try {
+      const cust = await customers_.findOne({ phone: String(customerId).replace(/[^0-9]/g, '') });
+      if (cust) {
+        await customers_.updateOne(
+          { phone: cust.phone },
+          { $set: {
+              orderCount: (cust.orderCount || 0) + 1,
+              totalSpent: Math.round(((cust.totalSpent || 0) + order.totalPrice) * 100) / 100,
+              lastOrderAt: new Date(),
+              lastLoginAt: new Date()
+            } }
+        );
+      } else {
+        await customers_.insertOne({
+          phone: String(customerId).replace(/[^0-9]/g, ''), customerName: customerName || '',
+          orderCount: 1, totalSpent: order.totalPrice, lastOrderAt: new Date(),
+          createdAt: new Date(), lastLoginAt: new Date()
+        });
+      }
+    } catch (e) { console.error('Failed to update customer record:', e); }
+
+    // Consume the voucher so a promo/discount code can only be used once per
+    // customer (one-time personal vouchers from the spin wheel / scratch card).
+    // Only consumed when the coupon actually qualified for this order.
+    if (couponCode && couponEligible) {
+      try {
+        const cc = String(couponCode).toUpperCase();
+        const coupon = await coupons_.findOne({ code: cc });
+        if (coupon) {
+          const usedBy = Array.isArray(coupon.usedBy) && !coupon.usedBy.includes(customerId)
+            ? [...coupon.usedBy, customerId]
+            : (coupon.usedBy || []);
+          await coupons_.updateOne({ code: cc }, {
+            $set: { usedBy, usedCount: (coupon.usedCount || 0) + 1 }
+          });
+        }
+      } catch (e) { console.error('Failed to mark coupon used:', e); }
+    }
+
     console.log('🔔 NEW ORDER:', order.customerName, 'KES', order.totalPrice);
     res.json({ success: true, orderId: result.insertedId, message: 'Order placed! Pay on delivery.' });
   } catch (e) { console.error('Failed to place order:', e); res.status(500).json({ error: 'Failed to place order' }); }
@@ -1315,22 +1429,243 @@ app.get('/api/admin/coupons', authenticate, async (req, res) => { try { res.json
 app.put('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await coupons_.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { active: req.body.active } }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
 app.delete('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await coupons_.deleteOne({ _id: new ObjectId(req.params.id) }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
 app.post('/api/coupons/validate', async (req, res) => {
-  const { code, total } = req.body;
+  const { code, total, phone } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
   try {
-    if (code.toUpperCase() === 'SHAKE15') {
-      const discount = Math.min(total * 0.15, total);
-      return res.json({ valid: true, code: 'SHAKE15', type: 'percent', value: 15, discount: Math.round(discount * 100) / 100 });
-    }
+    const phoneClean = String(phone || '').replace(/[^0-9]/g, '');
     const coupon = await coupons_.findOne({ code: code.toUpperCase(), active: true });
     if (!coupon) return res.status(404).json({ error: 'Invalid coupon code', valid: false });
     if (coupon.expiresAt && new Date(coupon.expiresAt) < new Date()) return res.json({ valid: false, error: 'Coupon expired' });
+    // Personal vouchers (spin wheel / scratch card / loyalty) are bound to the
+    // phone that won them — they must not work for anyone else.
+    if (coupon.ownerPhone && String(coupon.ownerPhone) !== phoneClean) {
+      return res.json({ valid: false, error: 'This voucher is linked to a different account' });
+    }
+    if (Array.isArray(coupon.usedBy) && (coupon.usedBy.includes(phone) || coupon.usedBy.includes(phoneClean))) {
+      return res.json({ valid: false, error: 'This voucher was already used' });
+    }
     if (coupon.maxUses > 0 && coupon.usedCount >= coupon.maxUses) return res.json({ valid: false, error: 'Coupon usage limit reached' });
     if (total < coupon.minPurchase) return res.json({ valid: false, error: `Minimum purchase KES ${coupon.minPurchase} required` });
-    let discount = coupon.type === 'percent' ? (total * coupon.value / 100) : coupon.value;
+    let discount = 0;
+    if (coupon.type === 'percent') discount = total * coupon.value / 100;
+    else if (coupon.type === 'fixed') discount = coupon.value;
+    else if (coupon.type === 'free_delivery') discount = 0; // frontend zeroes the delivery fee
     discount = Math.min(discount, total);
-    res.json({ valid: true, code: coupon.code, type: coupon.type, value: coupon.value, discount: Math.round(discount * 100) / 100, campaignId: coupon._id });
+    res.json({ valid: true, code: coupon.code, type: coupon.type, value: coupon.value, discount: Math.round(discount * 100) / 100, campaignId: coupon._id, minPurchase: coupon.minPurchase || 0 });
   } catch (e) { console.error('Failed to validate coupon:', e); res.status(500).json({ error: 'Failed to validate' }); }
+});
+
+// ===== CUSTOMER ACCOUNT (keyed by phone number) =====
+// A customer's shopping record, debts and vouchers all live under the phone
+// they sign in with — no separate accounts, no way to game the system.
+app.get('/api/customers/:phone', async (req, res) => {
+  try {
+    const phone = String(req.params.phone || '').replace(/[^0-9]/g, '');
+    if (!phone) return res.status(400).json({ error: 'Phone required' });
+    const cust = await customers_.findOne({ phone });
+    const orders = await orders_.find({ customerId: phone }).toArray();
+    const active = orders.filter(o => o.status !== 'cancelled');
+    const totalSpent = active.reduce((s, o) => s + (o.totalPrice || 0), 0);
+    const credits = await credit_.find({ phone }).toArray();
+    const outstandingDebt = credits.filter(c => !c.paid).reduce((s, c) => s + (c.amount || 0), 0);
+    const loyalty = await loyalty_.findOne({ phone });
+    const vouchers = await coupons_.find({ ownerPhone: phone, active: true }).toArray();
+    const tier = customerTier(active.length, totalSpent);
+    res.json({
+      exists: !!cust || active.length > 0,
+      phone,
+      name: (cust && cust.name) || (active.length ? active[active.length - 1].customerName : '') || '',
+      memberSince: cust && cust.createdAt ? cust.createdAt : null,
+      orderCount: active.length,
+      totalSpent: Math.round(totalSpent * 100) / 100,
+      outstandingDebt: Math.round(outstandingDebt * 100) / 100,
+      loyaltyPoints: loyalty ? loyalty.points || 0 : 0,
+      loyaltyTier: loyalty ? loyalty.tier : tier,
+      tier,
+      vouchers: vouchers.map(v => ({
+        code: v.code, type: v.type, value: v.value, minPurchase: v.minPurchase || 0,
+        used: (Array.isArray(v.usedBy) && v.usedBy.includes(phone)),
+        expiresAt: v.expiresAt || null
+      }))
+    });
+  } catch (e) { console.error('Failed to load customer profile:', e); res.status(500).json({ error: 'Failed to load profile' }); }
+});
+
+// ===== PROMOS: SPIN WHEEL + SCRATCH CARD =====
+// Everything is decided server-side so the odds can't be cheated, discounts
+// are only handed to real shoppers (tier is derived from the phone-number
+// shopping record), and every voucher is bound to the winning phone, valid for
+// a single use. Codes issued here therefore ALWAYS work at checkout.
+const customerTier = (orderCount, totalSpent) => {
+  if (totalSpent >= 10000 || orderCount >= 15) return 'Gold';
+  if (totalSpent >= 3000 || orderCount >= 5) return 'Silver';
+  if (orderCount >= 1) return 'Bronze';
+  return 'Visitor';
+};
+
+// "Once per day" follows the shop's local day (Africa/Nairobi), matching the
+// messages the app shows customers.
+const promoDayKey = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' });
+
+// 8 wheel sectors. Weights are per customer tier: visitors can only win
+// points / retries (no real money off until they actually shop), and loyal
+// customers get better odds on the bigger prizes.
+const WHEEL_SECTORS = [
+  { label: '10% OFF', color: '#ff2d55', prize: 'pct10', type: 'percent', value: 10, minPurchase: 500, title: '10% Off Your Order', message: 'You won 10% off! Valid on orders over KES 500.', sectorIndex: 0, weight: { Visitor: 0, Bronze: 10, Silver: 15, Gold: 20 } },
+  { label: 'TRY AGAIN', color: '#3a3a46', prize: 'again', title: 'So Close!', message: 'No luck today — come back tomorrow for another spin.', sectorIndex: 1, weight: { Visitor: 40, Bronze: 25, Silver: 15, Gold: 10 } },
+  { label: 'KES 100 OFF', color: '#ff9f0a', prize: 'fixed100', type: 'fixed', value: 100, minPurchase: 1000, title: 'KES 100 Off Unlocked!', message: 'You won KES 100 off! Valid on orders over KES 1,000.', sectorIndex: 2, weight: { Visitor: 0, Bronze: 5, Silver: 10, Gold: 15 } },
+  { label: '50 POINTS', color: '#30d158', prize: 'points50', points: 50, title: '50 Loyalty Points!', message: 'You won 50 loyalty points — they were added to your account.', sectorIndex: 3, weight: { Visitor: 30, Bronze: 20, Silver: 15, Gold: 10 } },
+  { label: 'FREE DELIVERY', color: '#64d2ff', prize: 'delivery', type: 'free_delivery', value: 0, minPurchase: 300, title: 'Free Delivery!', message: 'You won free delivery on your next order (over KES 300).', sectorIndex: 4, weight: { Visitor: 0, Bronze: 5, Silver: 10, Gold: 15 } },
+  { label: 'TRY AGAIN', color: '#3a3a46', prize: 'again', title: 'So Close!', message: 'No luck today — come back tomorrow for another spin.', sectorIndex: 5, weight: { Visitor: 40, Bronze: 25, Silver: 15, Gold: 10 } },
+  { label: '5% OFF', color: '#ffd60a', prize: 'pct5', type: 'percent', value: 5, minPurchase: 300, title: '5% Off Your Order', message: 'You won 5% off! Valid on orders over KES 300.', sectorIndex: 6, weight: { Visitor: 0, Bronze: 10, Silver: 10, Gold: 10 } },
+  { label: 'KES 50 OFF', color: '#bf5af2', prize: 'fixed50', type: 'fixed', value: 50, minPurchase: 500, title: 'KES 50 Off Unlocked!', message: 'You won KES 50 off! Valid on orders over KES 500.', sectorIndex: 7, weight: { Visitor: 0, Bronze: 10, Silver: 10, Gold: 10 } },
+];
+
+// Scratch card outcomes (server decides the prize under the foil).
+const SCRATCH_OUTCOMES = [
+  { prize: 'lose', label: 'NO LUCK', title: 'Better Luck Tomorrow!', message: 'No discount today. Scratch again tomorrow!', weight: { Visitor: 45, Bronze: 30, Silver: 20, Gold: 12 } },
+  { prize: 'fixed20', type: 'fixed', value: 20, minPurchase: 200, label: 'KES 20 OFF', title: 'KES 20 Discount Unlocked!', message: 'You won KES 20 off! Valid on orders over KES 200.', weight: { Visitor: 0, Bronze: 20, Silver: 25, Gold: 25 } },
+  { prize: 'pct5', type: 'percent', value: 5, minPurchase: 300, label: '5% OFF', title: '5% Off Your Order', message: 'You won 5% off! Valid on orders over KES 300.', weight: { Visitor: 0, Bronze: 15, Silver: 15, Gold: 15 } },
+  { prize: 'fixed50', type: 'fixed', value: 50, minPurchase: 500, label: 'KES 50 OFF', title: 'KES 50 Discount Unlocked!', message: 'You won KES 50 off! Valid on orders over KES 500.', weight: { Visitor: 0, Bronze: 15, Silver: 20, Gold: 22 } },
+  { prize: 'delivery', type: 'free_delivery', value: 0, minPurchase: 300, label: 'FREE DELIVERY', title: 'Free Delivery Unlocked!', message: 'You won free delivery on your next order (over KES 300).', weight: { Visitor: 0, Bronze: 5, Silver: 10, Gold: 16 } },
+  { prize: 'points30', points: 30, label: '30 POINTS', title: '30 Loyalty Points!', message: 'You won 30 loyalty points — they were added to your account.', weight: { Visitor: 25, Bronze: 15, Silver: 10, Gold: 10 } },
+];
+
+function pickWeighted(list, tier) {
+  const weighted = list
+    .map((item, index) => ({ item, index, w: (item.weight && item.weight[tier]) || 0 }))
+    .filter(x => x.w > 0);
+  const total = weighted.reduce((s, x) => s + x.w, 0);
+  if (!total) return list[0];
+  let roll = Math.random() * total;
+  for (const x of weighted) {
+    roll -= x.w;
+    if (roll <= 0) return { ...x.item, sectorIndex: x.index };
+  }
+  return weighted[weighted.length - 1].item;
+}
+
+async function addLoyaltyPoints(phone, points) {
+  if (!points) return;
+  try {
+    const existing = await loyalty_.findOne({ phone });
+    if (existing) {
+      await loyalty_.updateOne({ phone }, { $set: { points: (existing.points || 0) + points, updatedAt: new Date() } });
+    } else {
+      await loyalty_.insertOne({ phone, customerName: '', totalSpent: 0, points, tier: 'Bronze', createdAt: new Date(), updatedAt: new Date() });
+    }
+  } catch (e) { console.error('Failed to add loyalty points:', e); }
+}
+
+async function issueVoucher({ phone, type, value, minPurchase, prefix }) {
+  const code = (prefix || 'PROMO') + '-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+  await coupons_.insertOne({
+    code,
+    type: type || 'fixed',
+    value: value || 0,
+    minPurchase: minPurchase || 0,
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days
+    maxUses: 1,
+    usedCount: 0,
+    usedBy: [],
+    ownerPhone: String(phone).replace(/[^0-9]/g, ''),
+    active: true,
+    createdAt: new Date(),
+    source: 'promo'
+  });
+  return code;
+}
+
+async function runPromo({ phone, name, type }) {
+  const phoneClean = String(phone || '').replace(/[^0-9]/g, '');
+  if (!phoneClean) return { success: false, error: 'Phone required' };
+  const day = promoDayKey();
+  const claimed = await promo_claims_.findOne({ phone: phoneClean, type, day });
+  if (claimed) {
+    return {
+      success: false, alreadyUsed: true, day,
+      tier: claimed.tier || 'Bronze',
+      prizeName: claimed.prizeName || 'again',
+      title: claimed.title || '', message: claimed.message || 'Already claimed today — come back tomorrow!',
+      code: claimed.code || '', pointsAdded: claimed.pointsAdded || 0,
+      sectorIndex: claimed.sectorIndex !== undefined ? claimed.sectorIndex : 1
+    };
+  }
+
+  const orders = await orders_.find({ customerId: phoneClean }).toArray();
+  const active = orders.filter(o => o.status !== 'cancelled');
+  const totalSpent = active.reduce((s, o) => s + (o.totalPrice || 0), 0);
+  const tier = customerTier(active.length, totalSpent);
+
+  const picked = type === 'spin' ? pickWeighted(WHEEL_SECTORS, tier) : pickWeighted(SCRATCH_OUTCOMES, tier);
+  let code = '', pointsAdded = 0;
+  let title = picked.title || '', message = picked.message || '';
+
+  if (picked.prize === 'again' || picked.prize === 'lose') {
+    if (tier === 'Visitor') message = message + ' Start shopping to unlock real discounts!';
+  } else if (picked.points) {
+    pointsAdded = picked.points;
+    await addLoyaltyPoints(phoneClean, pointsAdded);
+  } else {
+    code = await issueVoucher({ phone: phoneClean, type: picked.type, value: picked.value, minPurchase: picked.minPurchase, prefix: type === 'spin' ? 'SPIN' : 'SCR' });
+  }
+
+  try {
+    await promo_claims_.insertOne({
+      phone: phoneClean, name: (name || '').trim(), type, day, tier,
+      prizeName: picked.prize, title, message, code, pointsAdded,
+      sectorIndex: picked.sectorIndex !== undefined ? picked.sectorIndex : null,
+      createdAt: new Date()
+    });
+  } catch (e) { console.error('Failed to record promo claim:', e); }
+
+  return {
+    success: true, alreadyUsed: false, day, tier,
+    prizeName: picked.prize, title, message,
+    code, type: picked.type || '', value: picked.value || 0,
+    minPurchase: picked.minPurchase || 0, pointsAdded, sectorIndex: picked.sectorIndex
+  };
+}
+
+app.post('/api/promos/spin', async (req, res) => {
+  try {
+    const r = await runPromo({ phone: req.body.phone, name: req.body.name, type: 'spin' });
+    res.json(r);
+  } catch (e) { console.error('Spin failed:', e); res.status(500).json({ error: 'Failed to spin' }); }
+});
+
+app.post('/api/promos/scratch', async (req, res) => {
+  try {
+    const r = await runPromo({ phone: req.body.phone, name: req.body.name, type: 'scratch' });
+    res.json(r);
+  } catch (e) { console.error('Scratch failed:', e); res.status(500).json({ error: 'Failed to scratch' }); }
+});
+
+// Today's promo status for a phone — lets the UI show "come back tomorrow"
+// and the prize won even after an app restart.
+app.get('/api/promos/status/:phone', async (req, res) => {
+  try {
+    const phone = String(req.params.phone || '').replace(/[^0-9]/g, '');
+    const day = promoDayKey();
+    const [spin, scratch, orders, loyalty] = await Promise.all([
+      promo_claims_.findOne({ phone, type: 'spin', day }),
+      promo_claims_.findOne({ phone, type: 'scratch', day }),
+      orders_.find({ customerId: phone }).toArray(),
+      loyalty_.findOne({ phone })
+    ]);
+    const active = orders.filter(o => o.status !== 'cancelled');
+    const totalSpent = active.reduce((s, o) => s + (o.totalPrice || 0), 0);
+    const tier = customerTier(active.length, totalSpent);
+    res.json({
+      phone,
+      tier,
+      loyaltyPoints: loyalty ? loyalty.points || 0 : 0,
+      orderCount: active.length,
+      totalSpent: Math.round(totalSpent * 100) / 100,
+      spin: spin ? { used: true, day, prizeName: spin.prizeName, code: spin.code || '', title: spin.title || '', message: spin.message || '' } : { used: false, day },
+      scratch: scratch ? { used: true, day, prizeName: scratch.prizeName, code: scratch.code || '', title: scratch.title || '', message: scratch.message || '' } : { used: false, day }
+    });
+  } catch (e) { console.error('Promo status failed:', e); res.status(500).json({ error: 'Failed' }); }
 });
 
 // ===== M-PESA STK PUSH =====
@@ -2839,4 +3174,4 @@ app.use((err, req, res, next) => {
 });
 const PORT = process.env.PORT || 5000;
 
-module.exports = { app, connectDb, client };
+module.exports = { app, connectDb, client, _test: { customerTier, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey } };

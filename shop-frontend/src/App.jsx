@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import ErrorBoundary from './ErrorBoundary';
 import { SplashScreen } from '@capacitor/splash-screen';
+import { Capacitor } from '@capacitor/core';
 const Admin = React.lazy(() => import('./Admin'));
 
 const getDefaultApiUrl = () => {
@@ -84,6 +85,148 @@ const DEFAULT_BANNERS = [
   { id: 3, title: "💳 INSTANT PAY", text: "Scan & Pay with secure M-Pesa STK push!", code: "", gradient: "linear-gradient(135deg, #38ef7d, #11998e)" },
 ];
 
+// The 8 sectors of the prize wheel (colors must match the server's sector order).
+const WHEEL_SECTORS = [
+  { label: '10% OFF', color: '#ff2d55' },
+  { label: 'TRY AGAIN', color: '#3a3a46' },
+  { label: 'KES 100 OFF', color: '#ff9f0a' },
+  { label: '50 POINTS', color: '#30d158' },
+  { label: 'FREE DELIVERY', color: '#64d2ff' },
+  { label: 'TRY AGAIN', color: '#3a3a46' },
+  { label: '5% OFF', color: '#ffd60a' },
+  { label: 'KES 50 OFF', color: '#bf5af2' },
+];
+
+const TIER_LABELS = { Visitor: '🆕 New Shopper', Bronze: '🥉 Bronze Shopper', Silver: '🥈 Silver Shopper', Gold: '🥇 Gold Shopper' };
+
+// Screens that auto-redirect themselves (never recorded in the back stack).
+const TRANSIENT_SCREENS = ['splash', 'welcome'];
+
+// Exit the native app. Works in the Capacitor Android app, plain WebViews and
+// the browser (where it just closes the window).
+const exitApp = () => {
+  try {
+    const app = Capacitor && Capacitor.Plugins && Capacitor.Plugins.App;
+    if (app && app.exitApp) { app.exitApp(); return; }
+  } catch (e) {}
+  try {
+    if (window.navigator && window.navigator.app && window.navigator.app.exitApp) { window.navigator.app.exitApp(); return; }
+  } catch (e) {}
+  window.close();
+};
+
+// True scratch-to-reveal card. A canvas foil sits on top of the hidden prize;
+// rubbing it (touch or mouse) erases the foil and reveals the server-issued
+// voucher underneath once enough of it is scratched.
+function ScratchCard({ revealed, result, claiming, signedIn, onComplete, onNeedLogin, onCopy }) {
+  const canvasRef = useRef(null);
+  const pressedRef = useRef(false);
+  const doneRef = useRef(false);
+  const lastCheckRef = useRef(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || revealed || !signedIn) return;
+    doneRef.current = false;
+    const ctx = canvas.getContext('2d');
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const grad = ctx.createLinearGradient(0, 0, rect.width, rect.height);
+    grad.addColorStop(0, '#c89b3c');
+    grad.addColorStop(0.35, '#f7c945');
+    grad.addColorStop(0.7, '#d4a94e');
+    grad.addColorStop(1, '#a67c1e');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillStyle = 'rgba(110, 74, 0, 0.35)';
+    for (let x = 14; x < rect.width; x += 30) {
+      for (let y = 14; y < rect.height; y += 30) ctx.fillText('₵', x, y);
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.font = 'bold 15px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('✦ SCRATCH HERE ✦', rect.width / 2, rect.height / 2 - 8);
+    ctx.font = '11px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillText('rub with your finger to reveal', rect.width / 2, rect.height / 2 + 12);
+  }, [revealed, signedIn]);
+
+  const scratchAt = (clientX, clientY) => {
+    if (doneRef.current || !signedIn || revealed) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const ctx = canvas.getContext('2d');
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(clientX - rect.left, clientY - rect.top, 20, 0, Math.PI * 2);
+    ctx.fill();
+    // Check how much foil is left only every ~150ms — getImageData is costly on
+    // low-end devices and pointermove fires dozens of times per second.
+    const now = performance.now();
+    if (now - lastCheckRef.current < 150) return;
+    lastCheckRef.current = now;
+    try {
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let clear = 0, total = 0;
+      for (let i = 3; i < data.length; i += 80) { total++; if (data[i] === 0) clear++; }
+      if (total && clear / total > 0.45) {
+        doneRef.current = true;
+        ctx.globalCompositeOperation = 'source-over';
+        onComplete();
+      }
+    } catch (e) {}
+  };
+
+  if (!signedIn) {
+    return (
+      <div className="scratch-stage" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 12, height: 'auto', minHeight: 150, padding: 20 }}>
+        <span style={{ fontSize: '2rem' }}>🎁</span>
+        <p className="muted" style={{ margin: 0, fontSize: '.8rem', textAlign: 'center' }}>Sign in with your phone number to scratch & win daily deals!</p>
+        <button className="btn-neon" onClick={onNeedLogin} style={{ padding: '8px 18px', fontSize: '.8rem' }}>Sign In</button>
+      </div>
+    );
+  }
+
+  if (revealed) {
+    const win = !!(result && result.code);
+    const title = (result && result.title) || (result && result.message) || 'Better Luck Tomorrow!';
+    const msg = (result && result.message) || (claiming ? 'Revealing your prize…' : '');
+    return (
+      <div className="scratch-result">
+        <div className="scratch-emoji">{claiming ? '🔄' : win ? '🎉' : '😢'}</div>
+        <h4>{claiming ? 'Revealing…' : title}</h4>
+        <p>{claiming ? 'Hang tight — unlocking your prize…' : msg}</p>
+        {claiming && (
+          <div className="spinner" style={{ width: 28, height: 28, margin: '0 auto', borderRadius: '50%', border: '3px solid rgba(255,255,255,0.1)', borderTopColor: 'var(--gold)', animation: 'spin 1s linear infinite' }} />
+        )}
+        {win && !claiming && (
+          <div className="scratch-code" onClick={() => onCopy(result.code)} style={{ cursor: 'pointer' }}>
+            {result.code}
+            <small style={{ fontSize: '0.6rem', display: 'block', color: 'var(--muted)' }}>(tap to copy · use at checkout)</small>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="scratch-stage" onPointerDown={e => { pressedRef.current = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {} scratchAt(e.clientX, e.clientY); }} onPointerMove={e => { if (pressedRef.current) scratchAt(e.clientX, e.clientY); }} onPointerUp={() => { pressedRef.current = false; }} onPointerLeave={() => { pressedRef.current = false; }}>
+      <div className="scratch-under">
+        <div className="scratch-emoji">🎁</div>
+        <h4>Scratch & Win Daily!</h4>
+        <p>Scratch the foil to reveal today's lucky deal</p>
+      </div>
+      <canvas ref={canvasRef} className="scratch-canvas" />
+      <div className="scratch-hint">✦ rub to reveal ✦</div>
+    </div>
+  );
+}
+
 function FlashSaleCountdown({ expires }) {
   const [timeLeft, setTimeLeft] = useState('...');
   useEffect(() => {
@@ -149,14 +292,14 @@ function App() {
     } catch (e) {}
   }, [perfMode, isAdmin]);
 
-  // Futuristic addictive features
+  // Futuristic addictive features — prizes are decided SERVER-SIDE so the
+  // odds can't be cheated, every voucher is bound to the winning phone number
+  // and actually works at checkout, and daily limits survive app restarts.
   const [showSpinWheel, setShowSpinWheel] = useState(false);
   const [wheelSpinning, setWheelSpinning] = useState(false);
   const [wheelPrize, setWheelPrize] = useState(null);
   const [wheelRotation, setWheelRotation] = useState(0);
-  const [lastSpinDate, setLastSpinDate] = useState(() => {
-    try { return localStorage.getItem('last_spin_date') || ''; } catch { return ''; }
-  });
+  const [promoStatus, setPromoStatus] = useState(null);
 
   const [showAiBot, setShowAiBot] = useState(false);
   const [aiMessages, setAiMessages] = useState([
@@ -209,12 +352,8 @@ function App() {
   }, [aiMessages, aiLoading]);
 
   const [banners, setBanners] = useState(DEFAULT_BANNERS);
-  const [lastScratchDate, setLastScratchDate] = useState(() => {
-    try { return localStorage.getItem('last_scratch_date') || ''; } catch { return ''; }
-  });
-  const [scratchResult, setScratchResult] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('scratch_result')); } catch { return null; }
-  });
+  const [scratchResult, setScratchResult] = useState(null);
+  const [scratchRevealed, setScratchRevealed] = useState(false);
 
   const [customer, setCustomer] = useState(() => {
     try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
@@ -251,8 +390,8 @@ function App() {
   const [basketNameInput, setBasketNameInput] = useState('');
   const [showBasketSaveForm, setShowBasketSaveForm] = useState(false);
   const [loyaltyRewards, setLoyaltyRewards] = useState([]);
-  const scratchRevealed = lastScratchDate === new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' });
   const [scratchRevealing, setScratchRevealing] = useState(false);
+  const [custAccount, setCustAccount] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [custLoyalty, setCustLoyalty] = useState(null);
   const [stkCheckoutId, setStkCheckoutId] = useState(null);
@@ -378,6 +517,70 @@ function App() {
       const t = setTimeout(() => setScreen('home'), 1500);
       return () => clearTimeout(t);
     }
+  }, [screen]);
+
+  // Load the signed-in phone's promo status (daily spins/scratch) + account.
+  useEffect(() => {
+    if (!customer?.customerId) return;
+    loadPromoStatus();
+    loadCustLoyalty();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customer?.customerId]);
+
+  // ---- Android back-swipe protection ----
+  // Every real screen change pushes a history entry; a back-swipe (or back
+  // button) pops it like an in-app "back" instead of exiting the app. At the
+  // root a single back just shows a hint — the app only exits on a deliberate
+  // second back press, or via the explicit Exit App button in the profile.
+  const navStackRef = useRef([]);
+  const backHandlingRef = useRef(false);
+  const lastBackPressRef = useRef(0);
+
+  useEffect(() => {
+    try { window.history.replaceState({ screen: 'splash' }, ''); } catch (e) {}
+    const onPop = () => {
+      if (showSpinWheel) {
+        // Never let a back-swipe kill the wheel mid-animation (the voucher was
+        // already issued server-side and would be lost).
+        if (wheelSpinning) { try { window.history.pushState({ spinning: 1 }, ''); } catch (e) {} return; }
+        setShowSpinWheel(false);
+        try { window.history.pushState({ modal: 1 }, ''); } catch (e) {}
+        return;
+      }
+      if (showAiBot) {
+        setShowAiBot(false);
+        try { window.history.pushState({ modal: 1 }, ''); } catch (e) {}
+        return;
+      }
+      const stack = navStackRef.current;
+      if (stack.length > 1) {
+        stack.pop();
+        // Skip transient screens (splash/welcome auto-redirect themselves).
+        while (stack.length > 1 && TRANSIENT_SCREENS.includes(stack[stack.length - 1])) stack.pop();
+        backHandlingRef.current = true;
+        setScreen(stack[stack.length - 1]);
+      } else {
+        const now = Date.now();
+        if (now - lastBackPressRef.current < 3000) { exitApp(); return; }
+        lastBackPressRef.current = now;
+        showToast('Press back again to exit the app');
+        try { window.history.pushState({ root: 1 }, ''); } catch (e) {}
+      }
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showSpinWheel, showAiBot, wheelSpinning]);
+
+  useEffect(() => {
+    if (backHandlingRef.current) { backHandlingRef.current = false; return; }
+    if (TRANSIENT_SCREENS.includes(screen)) return; // never record splash/welcome
+    const stack = navStackRef.current;
+    if (stack[stack.length - 1] !== screen) {
+      stack.push(screen);
+      try { window.history.pushState({ screen }, ''); } catch (e) {}
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen]);
 
   useEffect(() => {
@@ -513,39 +716,68 @@ function App() {
     }
   };
 
-  const scratchCoupon = () => {
-    if (scratchRevealed || scratchRevealing) return;
-    setScratchRevealing(true);
-    const todayStr = new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' });
-    
-    // Choose result: 80% lose, 10% lucky30, 7% lucky50, 3% free delivery
-    const rand = Math.random();
-    let prize;
-    if (rand < 0.80) {
-      prize = { name: 'lose', message: 'Ah, no discount today. Try again tomorrow!', code: '', title: 'Better Luck Tomorrow!' };
-    } else if (rand < 0.90) {
-      prize = { name: 'lucky30', message: 'You won KES 30 off! Code: LUCKY30', code: 'LUCKY30', title: 'KES 30 Discount Unlocked!' };
-    } else if (rand < 0.97) {
-      prize = { name: 'lucky50', message: 'You won KES 50 off! Code: LUCKY50', code: 'LUCKY50', title: 'KES 50 Discount Unlocked!' };
-    } else {
-      prize = { name: 'delivery', message: 'You won Free Delivery! Code: LUCKYDEL', code: 'LUCKYDEL', title: 'Free Delivery Unlocked!' };
-    }
-
-    setTimeout(() => {
-      setScratchRevealing(false);
-      setLastScratchDate(todayStr);
-      setScratchResult(prize);
-      try {
-        localStorage.setItem('last_scratch_date', todayStr);
-        localStorage.setItem('scratch_result', JSON.stringify(prize));
-      } catch {}
-      if (prize.code) {
-        setCouponInput(prize.code);
-        showToast(`🎁 ${prize.title}`);
-      } else {
-        showToast(`😢 ${prize.title}`);
+  // Today's spin + scratch status (and tier) for the signed-in phone.
+  const loadPromoStatus = async () => {
+    if (!customer?.customerId) return;
+    try {
+      const r = await fetch(`${API_URL}/promos/status/${customer.customerId}`);
+      const d = await r.json();
+      if (!d || d.error) return;
+      setPromoStatus(d);
+      if (d.scratch && d.scratch.used) {
+        setScratchResult({ title: d.scratch.title, message: d.scratch.message, code: d.scratch.code, alreadyUsed: true });
+        setScratchRevealed(true);
       }
-    }, 1200);
+    } catch (e) { console.warn('Failed to load promo status'); }
+  };
+
+  // Customer account is keyed by the phone they signed in with.
+  const loadCustLoyalty = async () => {
+    if (!customer?.customerId) return;
+    try {
+      const r = await fetch(`${API_URL}/customers/${customer.customerId}`);
+      const d = await r.json();
+      if (d && !d.error) {
+        setCustAccount(d);
+        setCustLoyalty({ tier: d.loyaltyTier || d.tier, points: d.loyaltyPoints || 0, totalSpent: d.totalSpent || 0 });
+      }
+    } catch (e) { console.error('Failed to load customer account:', e); }
+  };
+
+  // Scratch completed → ask the SERVER for the prize (fair, once per day, and
+  // the voucher it issues is bound to this phone so it works at checkout).
+  const claimScratch = async () => {
+    if (scratchRevealing || !customer?.customerId) return;
+    setScratchRevealing(true);
+    try {
+      const r = await fetch(`${API_URL}/promos/scratch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: customer.customerId, name: customer.name })
+      });
+      const d = await r.json();
+      setScratchRevealing(false);
+      setScratchResult(d);
+      setScratchRevealed(true);
+      setPromoStatus(s => ({ ...(s || {}), tier: d.tier || s?.tier, scratch: { used: true, code: d.code, title: d.title, message: d.message } }));
+      if (d.code) {
+        setCouponInput(d.code);
+        showToast(`🎁 ${d.title}`);
+      } else {
+        showToast(d.alreadyUsed ? `🔒 ${d.title || 'Already claimed today'}` : `😢 ${d.title}`);
+      }
+    } catch (e) {
+      setScratchRevealing(false);
+      setScratchResult(null);
+      setScratchRevealed(false); // put the foil back so they can retry today
+      showToast('Network error — please try again');
+    }
+  };
+
+  const onScratchComplete = () => {
+    if (scratchRevealed || scratchRevealing) return;
+    setScratchRevealed(true); // lift the foil, reveal while the server decides
+    claimScratch();
   };
 
   const showToast = (message) => {
@@ -794,7 +1026,7 @@ function App() {
       const r = await fetch(`${API_URL}/coupons/validate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: couponInput.trim().toUpperCase(), total })
+        body: JSON.stringify({ code: couponInput.trim().toUpperCase(), total, phone: customer?.customerId || customer?.phone || '' })
       });
       const d = await r.json();
       if (d.valid) {
@@ -869,57 +1101,57 @@ function App() {
     setScreen('cart');
   };
 
-  const loadCustLoyalty = async () => {
-    if (!customer?.customerId) return;
-    try {
-      const r = await fetch(`${API_URL}/admin/loyalty/${customer.customerId}`);
-      const d = await r.json();
-      if (d.exists) {
-        setCustLoyalty(d);
-      }
-    } catch (e) { console.error('Failed to load customer loyalty:', e); }
-  };
-
-  const spinTheWheel = () => {
+  const spinTheWheel = async () => {
     if (wheelSpinning) return;
+    if (!customer?.customerId) {
+      alert('Please sign in with your phone number to spin!');
+      setShowSpinWheel(false);
+      setScreen('login');
+      return;
+    }
     setWheelSpinning(true);
     setWheelPrize(null);
-    
-    // Choose prize with hard probabilities: 70% lose, 20% points, 7% free delivery, 3% KES 50 discount
-    const rand = Math.random();
-    let selected;
-    if (rand < 0.70) {
-      selected = { name: 'again', message: 'Ah, so close! Try again tomorrow.', code: '', rotationAngle: 135 };
-    } else if (rand < 0.90) {
-      selected = { name: 'points', message: 'You won 100 loyalty points! Added to your profile.', code: '', rotationAngle: 225 };
-    } else if (rand < 0.97) {
-      selected = { name: 'delivery', message: 'You won Free Delivery on your next order! Code: SPINFREE', code: 'SPINFREE', rotationAngle: 315 };
-    } else {
-      selected = { name: 'discount', message: 'You won KES 50 Off on your next order! Code: SPIN50', code: 'SPIN50', rotationAngle: 45 };
-    }
-
-    // Spin smoothly by adding rotation
-    const newRotation = wheelRotation + 1800 + selected.rotationAngle - (wheelRotation % 360);
-    setWheelRotation(newRotation);
-    
-    setTimeout(async () => {
-      setWheelSpinning(false);
-      setWheelPrize(selected);
-      const today = new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' });
-      setLastSpinDate(today);
-      try { localStorage.setItem('last_spin_date', today); } catch {}
-      
-      if (selected.name === 'points' && customer?.phone) {
-        try {
-          await fetch(`${API_URL}/admin/loyalty/add-points`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: customer.phone, points: 100 })
-          });
-          loadCustLoyalty();
-        } catch (e) { console.error(e); }
+    try {
+      const r = await fetch(`${API_URL}/promos/spin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: customer.customerId, name: customer.name })
+      });
+      const d = await r.json();
+      if (d.alreadyUsed) {
+        setWheelSpinning(false);
+        setWheelPrize({ alreadyUsed: true, title: d.title || 'Already Spun Today!', message: d.message || 'Come back tomorrow for another spin!', code: d.code || '' });
+        setPromoStatus(s => ({ ...(s || {}), spin: { used: true, code: d.code, title: d.title, message: d.message } }));
+        return;
       }
-    }, 3000);
+      if (!d.success) {
+        setWheelSpinning(false);
+        showToast(d.error || 'Something went wrong — please try again');
+        return;
+      }
+      // Spin to land the winning sector under the pointer (8 sectors of 45°).
+      const sectorIdx = typeof d.sectorIndex === 'number' ? d.sectorIndex : 1;
+      const target = ((360 - (sectorIdx + 0.5) * 45) + 360) % 360;
+      const current = ((wheelRotation % 360) + 360) % 360;
+      const delta = (target - current + 360) % 360;
+      setWheelRotation(wheelRotation + 360 * 5 + delta);
+
+      setTimeout(() => {
+        setWheelSpinning(false);
+        setWheelPrize(d);
+        setPromoStatus(s => ({ ...(s || {}), tier: d.tier || s?.tier, spin: { used: true, code: d.code, title: d.title, message: d.message } }));
+        if (d.pointsAdded) loadCustLoyalty();
+        if (d.code) {
+          setCouponInput(d.code);
+          showToast(`🎁 ${d.title}`);
+        } else {
+          showToast(`😢 ${d.title}`);
+        }
+      }, 4200);
+    } catch (e) {
+      setWheelSpinning(false);
+      showToast('Network error — please try again');
+    }
   };
 
   const sendAiMessage = async (e) => {
@@ -1145,7 +1377,7 @@ function App() {
         <div className="promo-banner-slider">
           <div className="promo-banner-track" style={{ transform: `translateX(-${bannerIndex * 100}%)` }}>
             {banners.map(b => (
-              <div className="promo-banner-slide" key={b._id || b.id} style={{ background: b.gradient }}>
+              <div className="promo-banner-slide" key={b._id || b.id} style={{ background: b.gradient, cursor: 'pointer' }} onClick={() => { setActiveCategory('All'); setScreen('offers'); }}>
                 <div className="promo-slide-decorations">
                   <div className="promo-slide-circle" />
                   <div className="promo-slide-triangle" />
@@ -1158,9 +1390,10 @@ function App() {
                   <button className="promo-copy-btn" onClick={(e) => {
                     e.stopPropagation();
                     navigator.clipboard.writeText(b.code);
-                    alert(`Code ${b.code} copied! Use it at checkout.`);
+                    showToast(`Code ${b.code} copied! Use it at checkout.`);
                   }}>Copy Code: {b.code}</button>
                 )}
+                <button className="promo-view-deals" onClick={(e) => { e.stopPropagation(); setScreen('offers'); }}>View today's deals →</button>
               </div>
             ))}
           </div>
@@ -1223,78 +1456,30 @@ function App() {
           );
         })()}
 
-        {/* SHAKE-TO-REVEAL SCRATCH CARD */}
-        <div style={{
-          margin: '16px',
-          background: 'var(--card)',
-          borderRadius: 20,
-          border: '2px dashed var(--orange)',
-          padding: '20px',
-          position: 'relative',
-          overflow: 'hidden',
-          boxShadow: 'var(--shadow)',
-          textAlign: 'center'
-        }}>
-          {!scratchRevealed ? (
-            <div 
-              onClick={scratchCoupon}
-              className={scratchRevealing ? 'shake-animation' : ''}
-              style={{
-                cursor: 'pointer',
-                background: 'linear-gradient(135deg, #ffd24a, #ff7a1a)',
-                borderRadius: 12,
-                padding: '30px 20px',
-                color: '#000',
-                fontWeight: 'bold',
-                fontFamily: 'Unbounded, sans-serif',
-                position: 'relative',
-                boxShadow: '0 8px 20px rgba(255, 122, 26, 0.3)',
-                userSelect: 'none'
-              }}
-            >
-              <div style={{fontSize: '2rem', marginBottom: 8}}>🎁</div>
-              <div style={{fontSize: '1rem'}}>SHAKE OR CLICK TO SCRATCH</div>
-              <div style={{fontSize: '0.75rem', opacity: 0.8, marginTop: 4}}>Reveal your daily lucky coupon!</div>
-            </div>
-          ) : (
-            <div style={{
-              background: scratchResult?.name === 'lose' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(54, 211, 153, 0.1)',
-              border: scratchResult?.name === 'lose' ? '1px dashed var(--muted)' : '1px solid var(--green)',
-              borderRadius: 12,
-              padding: '24px 20px',
-              animation: 'fadeIn 0.5s ease'
-            }}>
-              <span style={{fontSize: '2rem'}}>{scratchResult?.name === 'lose' ? '😢' : '🎉'}</span>
-              <h4 style={{margin: '8px 0 4px 0', color: scratchResult?.name === 'lose' ? 'var(--muted)' : 'var(--green)', fontFamily: 'Unbounded, sans-serif'}}>
-                {scratchResult?.title || 'Better Luck Tomorrow!'}
-              </h4>
-              <p className="muted" style={{fontSize: '0.8rem', marginBottom: 12}}>
-                {scratchResult?.name === 'lose' ? 'Try scratching again tomorrow to win.' : 'Use code at checkout to claim your deal.'}
-              </p>
-              {scratchResult?.code && (
-                <div style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  background: 'var(--bg-2)',
-                  border: '1px solid var(--line)',
-                  borderRadius: 8,
-                  padding: '8px 16px',
-                  fontFamily: 'monospace',
-                  fontSize: '1.1rem',
-                  fontWeight: 'bold',
-                  color: 'var(--gold)',
-                  cursor: 'pointer'
-                }} onClick={() => {
-                  navigator.clipboard.writeText(scratchResult.code);
-                  alert('Copied to clipboard!');
-                }}>
-                  {scratchResult.code} <small style={{fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 'normal'}}>(Tap to copy)</small>
-                </div>
-              )}
+        {/* SCRATCH & WIN CARD — rub the foil to reveal today's deal */}
+        <div className="scratch-card-wrap">
+          {(promoStatus?.tier) && (
+            <div className="wheel-tier-badge" style={{ margin: '12px 12px 0 12px' }}>
+              {TIER_LABELS[promoStatus.tier] || promoStatus.tier} · better deals as you shop more
             </div>
           )}
+          <ScratchCard
+            revealed={scratchRevealed}
+            result={scratchResult}
+            claiming={scratchRevealing}
+            signedIn={!!customer?.customerId}
+            onComplete={onScratchComplete}
+            onNeedLogin={() => setScreen('login')}
+            onCopy={(code) => { navigator.clipboard.writeText(code); showToast('Voucher code copied! Use it at checkout.'); }}
+          />
         </div>
+
+        {/* One-tap entry to Today's Deals when items are on offer */}
+        {products.some(p => p.isFlashSale || (p.discountApplied && p.originalPrice && p.originalPrice > p.price)) && (
+          <button className="deal-banner-chip" onClick={() => setScreen('offers')} style={{ cursor: 'pointer', width: 'calc(100% - 32px)', display: 'flex', justifyContent: 'center', margin: '0 16px 6px 16px' }}>
+            🔥 Today's Deals — tap to see what's on offer right now →
+          </button>
+        )}
 
         <div className="home-layout">
           <aside className="cat-rail">
@@ -1335,43 +1520,51 @@ function App() {
             <div className="futuristic-modal-card wheel-card" onClick={e => e.stopPropagation()}>
               <button className="modal-close-btn" onClick={() => setShowSpinWheel(false)} disabled={wheelSpinning}>✕</button>
               <h2 className="modal-title">🎡 Daily Spin & Win</h2>
-              <p className="modal-subtitle">Spin once a day to win points or discount codes!</p>
-              
-              <div className="wheel-container">
-                <div className="wheel-pointer">⚡</div>
-                <div className="neon-wheel" style={{
-                  transform: `rotate(${wheelRotation}deg)`,
-                  transition: 'transform 3s cubic-bezier(0.1, 0.8, 0.1, 1)'
-                }}>
-                  <div className="wheel-sector sec-1"><span>🎁 KES 50</span></div>
-                  <div className="wheel-sector sec-2"><span>🚚 FREE DEL</span></div>
-                  <div className="wheel-sector sec-3"><span>⭐ 100 PTS</span></div>
-                  <div className="wheel-sector sec-4"><span>😢 TRY LATER</span></div>
+              <p className="modal-subtitle">Spin once a day — loyal shoppers win bigger prizes!</p>
+
+              {(promoStatus?.tier || wheelPrize?.tier) && (
+                <div className="wheel-tier-badge">
+                  {TIER_LABELS[promoStatus?.tier || wheelPrize?.tier] || promoStatus?.tier || wheelPrize?.tier}
                 </div>
-                <div className="wheel-center-hub">BLITZ</div>
+              )}
+
+              <div className="wheel-container">
+                <div className="wheel-pointer" />
+                <div className="wheel-face" style={{
+                  background: `conic-gradient(${WHEEL_SECTORS.map(s => s.color).join(', ')})`,
+                  transform: `rotate(${wheelRotation}deg)`,
+                  transition: wheelSpinning ? 'transform 4.2s cubic-bezier(0.12, 0.75, 0.05, 1)' : 'none'
+                }}>
+                  {WHEEL_SECTORS.map((s, i) => (
+                    <span key={i} className="wheel-label" style={{
+                      transform: `translate(-50%, -50%) rotate(${(i + 0.5) * 45}deg) translateY(-84px) rotate(${-(i + 0.5) * 45}deg)`
+                    }}>{s.label}</span>
+                  ))}
+                </div>
+                <div className="wheel-center-hub">SPIN</div>
               </div>
 
               {wheelPrize && (
-                <div className="wheel-prize-announcement animate-prize">
-                  <h4>🎉 Congratulations!</h4>
+                <div className={`wheel-prize-announcement animate-prize ${wheelPrize.code ? 'win' : ''}`}>
+                  <h4>{wheelPrize.alreadyUsed ? '🔒 ' : wheelPrize.code ? '🎉 ' : '😢 '}{wheelPrize.title}</h4>
                   <p>{wheelPrize.message}</p>
                   {wheelPrize.code && (
                     <div className="wheel-coupon-box" onClick={() => {
                       navigator.clipboard.writeText(wheelPrize.code);
-                      alert('Coupon code copied!');
+                      showToast('Voucher code copied! Use it at checkout.');
                     }}>
-                      {wheelPrize.code} <small>(Tap to copy)</small>
+                      {wheelPrize.code} <small>(tap to copy · use at checkout)</small>
                     </div>
                   )}
                 </div>
               )}
 
-              <button 
-                className="btn-neon spin-action-btn" 
-                onClick={spinTheWheel} 
-                disabled={wheelSpinning || lastSpinDate === new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}
+              <button
+                className="btn-neon spin-action-btn"
+                onClick={spinTheWheel}
+                disabled={wheelSpinning || promoStatus?.spin?.used}
               >
-                {wheelSpinning ? '🌀 Spinning...' : lastSpinDate === new Date().toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) ? '🔒 Come Back Tomorrow' : '🔥 Spin Now!'}
+                {wheelSpinning ? '🌀 Spinning...' : promoStatus?.spin?.used ? '🔒 Come Back Tomorrow' : '🔥 Spin Now!'}
               </button>
             </div>
           </div>
@@ -1787,6 +1980,55 @@ function App() {
           </div>
         )}
 
+        {/* Account summary — everything keyed by the phone number they signed in with */}
+        {custAccount && (
+          <div style={{ margin: '16px 14px', background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: 16 }}>
+            <h3 style={{ margin: '0 0 10px 0', fontSize: '.95rem', fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)' }}>👤 My Account</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div style={{ background: 'var(--bg-2)', borderRadius: 10, padding: '10px 12px' }}>
+                <div className="muted" style={{ fontSize: '.68rem' }}>Orders placed</div>
+                <b style={{ fontSize: '1.05rem' }}>{custAccount.orderCount || 0}</b>
+              </div>
+              <div style={{ background: 'var(--bg-2)', borderRadius: 10, padding: '10px 12px' }}>
+                <div className="muted" style={{ fontSize: '.68rem' }}>Total spent</div>
+                <b style={{ fontSize: '1.05rem' }}>KES {(custAccount.totalSpent || 0).toLocaleString('en-KE')}</b>
+              </div>
+              <div style={{ background: custAccount.outstandingDebt > 0 ? 'rgba(255,45,85,0.12)' : 'var(--bg-2)', borderRadius: 10, padding: '10px 12px', border: custAccount.outstandingDebt > 0 ? '1px solid rgba(255,45,85,0.5)' : 'none' }}>
+                <div className="muted" style={{ fontSize: '.68rem' }}>Outstanding balance</div>
+                <b style={{ fontSize: '1.05rem', color: custAccount.outstandingDebt > 0 ? '#ff6b81' : 'var(--text)' }}>KES {(custAccount.outstandingDebt || 0).toLocaleString('en-KE')}</b>
+              </div>
+              <div style={{ background: 'var(--bg-2)', borderRadius: 10, padding: '10px 12px' }}>
+                <div className="muted" style={{ fontSize: '.68rem' }}>Shopper tier</div>
+                <b style={{ fontSize: '.95rem', color: 'var(--gold)' }}>{TIER_LABELS[custAccount.tier] || custAccount.tier || 'New'}</b>
+              </div>
+            </div>
+            {custAccount.memberSince && (
+              <div className="muted" style={{ fontSize: '.7rem', marginTop: 10 }}>
+                📅 Member since {new Date(custAccount.memberSince).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}
+              </div>
+            )}
+            {custAccount.outstandingDebt > 0 && (
+              <div style={{ fontSize: '.72rem', color: '#ff6b81', marginTop: 8, background: 'rgba(255,45,85,0.08)', padding: '8px 10px', borderRadius: 8 }}>
+                ⚠️ You have an outstanding balance of KES {custAccount.outstandingDebt.toLocaleString('en-KE')} — please clear it at the counter to keep your account active.
+              </div>
+            )}
+            {custAccount.vouchers && custAccount.vouchers.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: '.78rem', color: 'var(--green)', marginBottom: 6 }}>🎟️ My vouchers:</div>
+                {custAccount.vouchers.filter(v => !v.used).map((v, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-2)', border: '1px dashed var(--gold)', borderRadius: 8, padding: '8px 10px', marginBottom: 6, fontSize: '.78rem' }}>
+                    <b style={{ fontFamily: 'monospace', color: 'var(--gold)' }}>{v.code}</b>
+                    <span className="muted">{v.type === 'percent' ? `${v.value}% off` : v.type === 'free_delivery' ? 'Free delivery' : `KES ${v.value} off`}{v.minPurchase ? ` · min KES ${v.minPurchase}` : ''}</span>
+                  </div>
+                ))}
+                {custAccount.vouchers.filter(v => !v.used).length === 0 && (
+                  <div className="muted" style={{ fontSize: '.72rem' }}>All your vouchers have been used 🎉</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {custLoyalty && loyaltyRewards.length > 0 && (
           <div style={{margin: '16px 14px', background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '16px'}}>
             <h3 style={{margin: '0 0 10px 0', fontSize: '.95rem', fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)'}}>🎁 Points Redemption Store</h3>
@@ -1864,6 +2106,7 @@ function App() {
         <button className="row-btn" onClick={() => setScreen('cart')}>🛒 My cart<span>›</span></button>
         <button className="row-btn" onClick={() => setScreen('share')}>📲 Share / Download App<span>›</span></button>
         <button className="row-btn" onClick={() => { setReviewStars(0); setReviewMsg(''); setReviewSent(false); setScreen('review'); }}>⭐ Rate us / Feedback<span>›</span></button>
+        <button className="row-btn danger" onClick={() => { if (window.confirm('Exit BlitzMall app?')) exitApp(); }}>🚪 Exit App<span>›</span></button>
         <button className="row-btn danger" onClick={handleLogout}>↩️ Logout<span>›</span></button>
       </div>
       <BottomNav />
@@ -1925,6 +2168,82 @@ function App() {
       {renderToasts()}
     </div>
   );
+
+  // TODAY'S DEALS — opens when a customer taps any top ad banner.
+  if (screen === 'offers') {
+    const flashSaleProducts = products.filter(p => p.isFlashSale);
+    const discounted = products.filter(p => p.discountApplied && p.originalPrice && p.originalPrice > p.price && !p.isFlashSale);
+    const activeBanner = (banners && banners.length ? banners[bannerIndex % banners.length] : null) || banners[0] || null;
+    return (
+      <div className="screen with-nav">
+        <header className="topbar">
+          <button className="icon-btn back" onClick={() => setScreen('home')}>‹</button>
+          <h2 className="topbar-title">Today's Deals</h2>
+          <button className="icon-btn cart-icon" onClick={() => setScreen('cart')}>🛒{cartCount > 0 && <span className="cart-badge">{cartCount}</span>}</button>
+        </header>
+        <div className="scroll">
+          <div className="offers-hero">
+            <h2>🔥 Today's Deals</h2>
+            <p>{flashSaleProducts.length + discounted.length} items on offer right now — grab them before they're gone!</p>
+          </div>
+
+          {activeBanner && activeBanner.code && (
+            <div className="deal-banner-chip">
+              🎟️ {activeBanner.title}: use code <b>{activeBanner.code}</b> at checkout
+              <button onClick={() => { navigator.clipboard.writeText(activeBanner.code); showToast('Code copied! Use it at checkout.'); }} style={{ marginLeft: 4, background: 'none', border: 'none', color: 'var(--gold)', fontWeight: 'bold', cursor: 'pointer', fontSize: '0.72rem' }}>Copy</button>
+            </div>
+          )}
+
+          {flashSaleProducts.length === 0 && discounted.length === 0 && (
+            <div className="empty-cart"><span>🎈</span><p>No offers right now — check back soon!</p>
+              <button className="btn-ghost" onClick={() => setScreen('home')}>Back to shop</button></div>
+          )}
+
+          {flashSaleProducts.length > 0 && (
+            <>
+              <div className="offer-section-title">⚡ Flash Sale <span className="deal-countdown-chip">ends soon</span></div>
+              <div className="flash-sale-card" style={{ margin: '0 16px' }}>
+                <div className="flash-sale-items">
+                  {flashSaleProducts.map(p => {
+                    const origPrice = p.originalPrice || p.price;
+                    const discPrice = p.price;
+                    const pct = p.flashSaleDiscount || Math.round((1 - discPrice / origPrice) * 100);
+                    return (
+                      <div className="flash-item" key={`deal-flash-${p._id || p.id}`} onClick={() => openProduct(p)}>
+                        <span className="flash-badge">-{pct}%</span>
+                        <div className="flash-item-img">
+                          {p.image ? <img src={firstImage(p.image)} alt={p.name} className="product-img-element" loading="lazy"/> : '🛍️'}
+                        </div>
+                        <div className="flash-item-info">
+                          <span className="flash-item-name">{p.name}</span>
+                          <div className="flash-price-row">
+                            <span className="flash-price-disc">KES {discPrice}</span>
+                            <span className="flash-price-orig">KES {origPrice}</span>
+                          </div>
+                        </div>
+                        <button className="flash-add-btn" onClick={(e) => { e.stopPropagation(); addToCart(p, 1); }}>+</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          )}
+
+          {discounted.length > 0 && (
+            <>
+              <div className="offer-section-title">🏷️ Discounted Goods</div>
+              <div className="prod-grid" style={{ padding: '0 16px' }}>
+                {discounted.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} />)}
+              </div>
+            </>
+          )}
+        </div>
+        <BottomNav />
+        {renderToasts()}
+      </div>
+    );
+  }
 
   // REVIEW
   if (screen === 'review') return (

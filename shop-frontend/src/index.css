@@ -86,7 +86,9 @@ body.perf-mode .loyalty-card-wrapper {
 
 /* Disable active shake or rotation animations */
 body.perf-mode .shake-animation,
-body.perf-mode .neon-wheel {
+body.perf-mode .neon-wheel,
+body.perf-mode .wheel-face,
+body.perf-mode .wheel-pointer {
   animation: none !important;
 }
 
