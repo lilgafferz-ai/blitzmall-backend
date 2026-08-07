@@ -1308,3 +1308,31 @@ input, textarea {
 .gallery-slide{flex:0 0 100%;scroll-snap-align:center;display:flex;align-items:center;justify-content:center;padding:18px;box-sizing:border-box;}
 .gallery-slide img{width:100%;max-height:72vh;object-fit:contain;background:#fff;border-radius:14px;}
 .gallery-hint{color:rgba(255,255,255,.72);font-size:.85rem;margin-top:18px;letter-spacing:.3px;}
+
+/* ===== FAVORITES ===== */
+.prod-card{position:relative}
+.prod-fav{position:absolute;top:8px;right:8px;background:rgba(10,10,14,.65);border:1px solid var(--line);border-radius:50%;width:34px;height:34px;font-size:15px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;backdrop-filter:blur(4px);transition:transform .15s ease,border-color .15s ease}
+.prod-fav:hover{transform:scale(1.12)}
+.prod-fav.on{border-color:var(--red);background:rgba(255,45,85,.15)}
+.detail-name-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.detail-fav{background:var(--bg-2);border:1px solid var(--line);border-radius:12px;width:42px;height:42px;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:transform .15s ease,border-color .15s ease}
+.detail-fav:hover{transform:scale(1.1)}
+.detail-fav.on{border-color:var(--red);background:rgba(255,45,85,.12)}
+
+/* ===== LIVE DELIVERY MAP ===== */
+.order-map-wrap{margin:10px 0 4px 0;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.order-map-wrap .leaflet-container{background:#0d0f14;font-family:inherit}
+.order-map-wrap .leaflet-popup-content-wrapper{background:var(--card);color:var(--text);border:1px solid var(--line)}
+.order-map-wrap .leaflet-popup-tip{background:var(--card)}
+
+/* ===== REFERRAL ===== */
+.referral-hero{background:var(--card);border:1px solid var(--gold);border-radius:16px;margin:16px;padding:22px;display:flex;flex-direction:column;align-items:center;text-align:center;box-shadow:0 10px 30px rgba(255,200,50,.08)}
+.referral-code-box{background:var(--bg-2);border:2px dashed var(--gold);border-radius:12px;padding:14px;margin-top:14px;width:100%;cursor:pointer;transition:background-color .2s}
+.referral-code-box:hover{background:var(--line)}
+.referral-code-box small{display:block;font-size:.62rem;letter-spacing:1.5px;color:var(--muted)}
+.referral-code-box b{display:block;font-size:1.25rem;font-family:'Unbounded',sans-serif;color:var(--gold);margin:4px 0}
+.referral-code-box span{font-size:.68rem;color:var(--muted)}
+.referral-stats{display:flex;gap:14px;justify-content:center;margin-top:18px;width:100%}
+.referral-stats div{flex:1;background:var(--bg-2);border:1px solid var(--line);border-radius:12px;padding:12px}
+.referral-stats b{display:block;font-size:1.15rem;color:var(--gold);font-family:'Unbounded',sans-serif}
+.referral-stats small{font-size:.68rem;color:var(--muted)}

@@ -4,6 +4,8 @@ import './App.css';
 import ErrorBoundary from './ErrorBoundary';
 import { SplashScreen } from '@capacitor/splash-screen';
 import { Capacitor } from '@capacitor/core';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 const Admin = React.lazy(() => import('./Admin'));
 
 const getDefaultApiUrl = () => {
@@ -20,6 +22,8 @@ const PRODUCTS_CACHE_KEY = 'blitz_products_cache';
 const ORDERS_CACHE_KEY = 'blitz_orders_cache';
 const OFFLINE_ORDERS_KEY = 'blitz_offline_orders';
 const CUSTOMER_KEY = 'blitz_customer';
+const FAVORITES_KEY = 'blitz_favorites';
+const SHOP_COORDS = { lat: 0.8273, lng: 35.1207 }; // Blitz Mall, Matunda
 
 // Built-in avatars (served from public/avatars/). Upload-your-own also supported.
 const AVATARS = [
@@ -260,6 +264,69 @@ function FlashSaleCountdown({ expires }) {
   return <span>{timeLeft}</span>;
 }
 
+// Live delivery map — real OpenStreetMap view of the shop and the customer's
+// pinned drop-off point, connected by a dashed route line. Uses Leaflet with
+// emoji div-markers (no image assets to bundle, works offline-first).
+function LiveMap({ from, to, height = 180 }) {
+  const ref = useRef(null);
+  const mapRef = useRef(null);
+  const layerRef = useRef(null);
+
+  useEffect(() => {
+    if (!ref.current || mapRef.current) return;
+    const map = L.map(ref.current, { zoomControl: true });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+    mapRef.current = map;
+    layerRef.current = L.layerGroup().addTo(map);
+    return () => {
+      try { map.remove(); } catch (e) {}
+      mapRef.current = null;
+      layerRef.current = null;
+    };
+  }, []);
+
+  // Only re-draw when the coordinates actually change (the orders screen
+  // re-renders on its 15s auto-refresh, and we don't want to reset the user's
+  // zoom/pan every time).
+  const lastCoordsRef = useRef('');
+  useEffect(() => {
+    const map = mapRef.current;
+    const layer = layerRef.current;
+    if (!map || !layer) return;
+    const key = `${from && from.lat}|${from && from.lng}|${to && to.lat}|${to && to.lng}`;
+    if (key === lastCoordsRef.current) return;
+    lastCoordsRef.current = key;
+    layer.clearLayers();
+    const pts = [];
+    if (from && from.lat && from.lng) {
+      pts.push(L.latLng(from.lat, from.lng));
+      L.marker([from.lat, from.lng], {
+        icon: L.divIcon({ className: '', html: '<div style="font-size:24px;line-height:1">🏪</div>', iconSize: [28, 28], iconAnchor: [14, 14] })
+      }).addTo(layer).bindPopup('Blitz Mall Shop');
+    }
+    if (to && to.lat && to.lng) {
+      pts.push(L.latLng(to.lat, to.lng));
+      L.marker([to.lat, to.lng], {
+        icon: L.divIcon({ className: '', html: '<div style="font-size:24px;line-height:1">📍</div>', iconSize: [28, 28], iconAnchor: [14, 28] })
+      }).addTo(layer).bindPopup('Your delivery location');
+    }
+    if (from && from.lat && from.lng && to && to.lat && to.lng) {
+      L.polyline([[from.lat, from.lng], [to.lat, to.lng]], {
+        color: '#ff7a1a', weight: 3, dashArray: '6 6', opacity: 0.9
+      }).addTo(layer);
+    }
+    try {
+      if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.25));
+      else map.setView([SHOP_COORDS.lat, SHOP_COORDS.lng], 13);
+    } catch (e) {}
+  }, [from, to]);
+
+  return <div ref={ref} style={{ height, width: '100%', borderRadius: 12, zIndex: 0, position: 'relative' }} />;
+}
+
 function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [screen, setScreen] = useState('splash');
@@ -371,6 +438,10 @@ function App() {
       return Array.isArray(c) && c.length ? c : []; } catch { return []; }
   });
   const [cart, setCart] = useState([]);
+  const [favorites, setFavorites] = useState(() => {
+    try { const f = JSON.parse(localStorage.getItem(FAVORITES_KEY)); return Array.isArray(f) ? f : []; } catch { return []; }
+  });
+  const [referralCode, setReferralCode] = useState('');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
@@ -875,7 +946,7 @@ function App() {
   }, [customer]);
 
   useEffect(() => {
-    if (screen === 'profile') {
+    if (screen === 'profile' || screen === 'referral') {
       loadCustLoyalty();
       loadLoyaltyRewards();
     }
@@ -944,6 +1015,16 @@ function App() {
 
   const openProduct = useCallback((p) => { setActiveProduct(p); setDetailQty(1); setScreen('product'); }, []);
 
+  const isFavorite = useCallback((id) => favorites.some(f => productId(f) === id), [favorites]);
+  const toggleFavorite = useCallback((p) => {
+    setFavorites(prev => {
+      const id = productId(p);
+      const next = prev.some(f => productId(f) === id) ? prev.filter(f => productId(f) !== id) : [...prev, p];
+      try { localStorage.setItem(FAVORITES_KEY, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  }, []);
+
   if (isAdmin) {
     return (
       <div className="app-container">
@@ -992,7 +1073,7 @@ function App() {
     e.preventDefault();
     if (!validatePhone(phone)) { alert('Please enter a valid phone number (at least 10 digits, e.g. 0712345678)'); return; }
     try {
-      const r = await fetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone }) });
+      const r = await fetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone, referralCode }) });
       if (!r.ok) {
         if (r.status === 429) { alert('Too many attempts. Please try again later.'); return; }
       }
@@ -1001,9 +1082,10 @@ function App() {
         const isReturning = !!d.returning;
         const cust = { customerId: d.customerId, name, phone };
         setCustomer(cust);
+        if (d.referralBonus) showToast(`🎁 Welcome bonus: +${d.referralBonus} loyalty points — thanks for using a friend's code!`);
         try { localStorage.setItem(CUSTOMER_KEY, JSON.stringify(cust)); } catch {}
         if (!profile) saveProfile({ name, phone, avatarId: 'cat', photo: null });
-        setName(''); setPhone('');
+        setName(''); setPhone(''); setReferralCode('');
         setWelcomeMsg({ name, returning: isReturning });
         setScreen('welcome');
       } else {
@@ -1338,6 +1420,7 @@ function App() {
         <form onSubmit={handleLogin}>
           <input className="field" placeholder="Your name" value={name} onChange={e => setName(e.target.value)} required />
           <input className="field" type="tel" placeholder="Phone (07xx xxx xxx)" value={phone} onChange={e => setPhone(e.target.value)} required />
+          <input className="field" placeholder="Referral code (optional) — got invited? 🎁" value={referralCode} onChange={e => setReferralCode(e.target.value)} />
           <button className="btn-neon login-cta" type="submit">Enter Blitz Mall</button>
         </form>
         <button className="owner-link" onClick={() => setIsAdmin(true)}>Owner login</button>
@@ -1503,7 +1586,7 @@ function App() {
             <h3 className="section-h">{term ? `Results for “${searchTerm}”` : activeCategory === 'All' ? '🔥 Trending now' : activeCategory}</h3>
             {trending.length === 0 ? <p className="empty">Nothing to show yet.</p> : (
               <div className="prod-grid">
-                {trending.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} />)}
+                {trending.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(p))} onFav={toggleFavorite} />)}
               </div>
             )}
           </main>
@@ -1670,7 +1753,12 @@ function App() {
           </div>
           <div className="detail-body">
             <span className="detail-cat">{categoryOf(p)}</span>
-            <h1 className="detail-name">{p.name}</h1>
+            <div className="detail-name-row">
+              <h1 className="detail-name">{p.name}</h1>
+              <button className={`detail-fav ${isFavorite(productId(p)) ? 'on' : ''}`} onClick={() => toggleFavorite(p)} aria-label="Toggle favorite">
+                {isFavorite(productId(p)) ? '❤️' : '🤍'}
+              </button>
+            </div>
             <div className="detail-price">KES {p.price}</div>
             {p.description && <p className="detail-desc">{p.description}</p>}
             <div className="qty-row"><span>Quantity</span>
@@ -2109,7 +2197,9 @@ function App() {
         </div>
 
         <h3 className="section-h">Account</h3>
+        <button className="row-btn" onClick={() => setScreen('favorites')}>❤️ My favorites<span>›</span></button>
         <button className="row-btn" onClick={() => { loadMyOrders(); setScreen('orders'); }}>📦 My orders<span>›</span></button>
+        <button className="row-btn" onClick={() => setScreen('referral')}>🎁 Invite friends & earn points<span>›</span></button>
         <button className="row-btn" onClick={() => setScreen('cart')}>🛒 My cart<span>›</span></button>
         <button className="row-btn" onClick={() => setScreen('share')}>📲 Share / Download App<span>›</span></button>
         <button className="row-btn" onClick={() => { setReviewStars(0); setReviewMsg(''); setReviewSent(false); setScreen('review'); }}>⭐ Rate us / Feedback<span>›</span></button>
@@ -2160,6 +2250,15 @@ function App() {
                 <div className="bike-delivered-badge">✅ Delivered successfully!</div>
               )}
 
+              {o.gpsCoords && o.gpsCoords.lat && o.gpsCoords.lng && (
+                <div className="order-map-wrap">
+                  <LiveMap
+                    from={{ lat: o.shopCoords?.lat || SHOP_COORDS.lat, lng: o.shopCoords?.lng || SHOP_COORDS.lng }}
+                    to={{ lat: o.gpsCoords.lat, lng: o.gpsCoords.lng }}
+                  />
+                </div>
+              )}
+
               <div className="tracker">{steps.map((s, i) => (
                 <div className={`t-step ${i <= idx ? 'done' : ''} ${i === idx ? 'now' : ''}`} key={s}><i /><small>{stepLabel[s]}</small></div>
               ))}</div>
@@ -2170,6 +2269,28 @@ function App() {
             </div>
           );
         })}
+      </div>
+      <BottomNav />
+      {renderToasts()}
+    </div>
+  );
+
+  // FAVORITES — products the shopper hearted on the grid or detail page.
+  if (screen === 'favorites') return (
+    <div className="screen with-nav">
+      <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('profile')}>‹</button><h2 className="topbar-title">❤️ My Favorites</h2></header>
+      <div className="scroll">
+        <div className="offers-hero">
+          <h2>❤️ Your favorites</h2>
+          <p>{favorites.length} item{favorites.length === 1 ? '' : 's'} saved — tap 🤍 to remove one.</p>
+        </div>
+        {favorites.length === 0 ? (
+          <div className="empty-cart"><span>🤍</span><p>No favorites yet</p><button className="btn-ghost" onClick={() => setScreen('home')}>Browse products</button></div>
+        ) : (
+          <div className="prod-grid" style={{ padding: '0 16px' }}>
+            {favorites.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} fav onFav={toggleFavorite} />)}
+          </div>
+        )}
       </div>
       <BottomNav />
       {renderToasts()}
@@ -2241,7 +2362,7 @@ function App() {
             <>
               <div className="offer-section-title">🏷️ Discounted Goods</div>
               <div className="prod-grid" style={{ padding: '0 16px' }}>
-                {discounted.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} />)}
+                {discounted.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(p))} onFav={toggleFavorite} />)}
               </div>
             </>
           )}
@@ -2334,12 +2455,58 @@ function App() {
     );
   }
 
+  // REFERRAL — share your phone code so friends get a welcome bonus and you
+  // earn loyalty points every time someone new signs up with your code.
+  if (screen === 'referral') {
+    const myCode = customer?.customerId || '';
+    const refCount = custAccount?.referralCount || 0;
+    const waMsg = encodeURIComponent(`Hey! 👋 Shop at Blitz Mall and we BOTH earn bonus loyalty points. Use my referral code when signing in: ${myCode} — download the app: https://blitzmall-backend.onrender.com/apk/blitzmall-v2.apk`);
+    return (
+      <div className="screen with-nav">
+        <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('profile')}>‹</button><h2 className="topbar-title">Invite Friends</h2></header>
+        <div className="scroll">
+          <div className="referral-hero">
+            <span style={{ fontSize: '3rem', display: 'block' }}>🎁</span>
+            <h3 style={{ fontFamily: 'Unbounded, sans-serif', margin: '10px 0 6px 0', color: 'var(--gold)' }}>Invite & Earn Points</h3>
+            <p className="muted" style={{ fontSize: '.82rem', lineHeight: 1.6 }}>
+              When a friend signs in with <b>your code</b>, you earn <b style={{ color: 'var(--orange)' }}>+100 points</b> and they get a <b style={{ color: 'var(--green)' }}>+50 welcome bonus</b>. Points unlock vouchers in your Points Redemption Store!
+            </p>
+            <div className="referral-code-box" onClick={() => { navigator.clipboard.writeText(myCode); showToast('Referral code copied! Send it to a friend 🎉'); }}>
+              <small>YOUR REFERRAL CODE</small>
+              <b>{myCode}</b>
+              <span>tap to copy</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 16, width: '100%' }}>
+              <a className="btn-neon" style={{ textAlign: 'center', textDecoration: 'none', color: '#000' }} href={`https://wa.me/?text=${waMsg}`} target="_blank" rel="noreferrer">💬 Share on WhatsApp</a>
+              <button className="btn-ghost" onClick={() => { navigator.clipboard.writeText(myCode); showToast('Code copied!'); }}>📋 Copy my code</button>
+            </div>
+            <div className="referral-stats">
+              <div><b>{refCount}</b><small>friends invited</small></div>
+              <div><b>{custLoyalty?.points || 0}</b><small>my points</small></div>
+            </div>
+          </div>
+        </div>
+        <BottomNav />
+        {renderToasts()}
+      </div>
+    );
+  }
+
   return null;
 }
 
-const ProductCard = React.memo(function ProductCard({ p, onOpen, onAdd }) {
+const ProductCard = React.memo(function ProductCard({ p, onOpen, onAdd, fav, onFav }) {
   return (
     <div className="prod-card" onClick={() => onOpen(p)}>
+      {onFav && (
+        <button
+          className={`prod-fav ${fav ? 'on' : ''}`}
+          onClick={e => { e.stopPropagation(); onFav(p); }}
+          aria-label={fav ? 'Remove from favorites' : 'Add to favorites'}
+        >
+          {fav ? '❤️' : '🤍'}
+        </button>
+      )}
       <div className="prod-img">{p.image ? <img src={firstImage(p.image)} alt={p.name} className="product-img-element" loading="lazy"/> : <div className="noimg">🛍️</div>}</div>
       <div className="prod-meta"><span className="prod-name">{p.name}</span><span className="prod-price">KES {p.price}</span></div>
       <button className="prod-add" onClick={e => { e.stopPropagation(); onAdd(p, 1); }}>+</button>

@@ -417,6 +417,7 @@ app.get('/api/admin/products', authenticate, async (req, res) => {
 app.post('/api/auth', authLimiter, async (req, res) => {
   const { name, phone } = req.body;
   if (!name || !phone) return res.status(400).json({ error: 'Name and phone required' });
+  let referralBonus = 0;
   try {
     const phoneClean = String(phone).replace(/[^0-9]/g, '');
     const existingCust = await customers_.findOne({ phone: phoneClean });
@@ -426,16 +427,37 @@ app.post('/api/auth', authLimiter, async (req, res) => {
         { $set: { name: (name || existingCust.name || '').trim(), lastLoginAt: new Date() } }
       );
     } else {
-      await customers_.insertOne({
+      const newCust = {
         phone: phoneClean, name: (name || '').trim(),
         createdAt: new Date(), lastLoginAt: new Date(),
         orderCount: 0, totalSpent: 0
-      });
+      };
+      // Referral: when a new shopper signs in with a friend's phone code, BOTH
+      // earn bonus loyalty points (once per referred phone — no double dips).
+      const refCode = String(req.body.referralCode || '').replace(/[^0-9]/g, '');
+      if (refCode && refCode !== phoneClean) {
+        try {
+          const referrer = await customers_.findOne({ phone: refCode });
+          if (referrer && !(Array.isArray(referrer.referrals) && referrer.referrals.includes(phoneClean))) {
+            newCust.referredBy = refCode;
+            await addLoyaltyPoints(refCode, REFERRER_BONUS_POINTS);
+            await customers_.updateOne(
+              { phone: refCode },
+              { $push: { referrals: phoneClean }, $inc: { referralCount: 1 } }
+            );
+          }
+        } catch (e) { console.error('Referral award failed:', e); }
+      }
+      await customers_.insertOne(newCust);
+      if (newCust.referredBy) {
+        await addLoyaltyPoints(phoneClean, REFEREE_BONUS_POINTS);
+        referralBonus = REFEREE_BONUS_POINTS;
+      }
     }
     const orders = await orders_.find({ customerId: phoneClean }).toArray();
-    res.json({ success: true, customerId: phoneClean, returning: !!existingCust || orders.length > 0, message: `Welcome ${name}!` });
+    res.json({ success: true, customerId: phoneClean, returning: !!existingCust || orders.length > 0, message: `Welcome ${name}!`, referralBonus });
   } catch (err) {
-    res.json({ success: true, customerId: String(phone).replace(/[^0-9]/g, ''), returning: false, message: `Welcome ${name}!` });
+    res.json({ success: true, customerId: String(phone).replace(/[^0-9]/g, ''), returning: false, message: `Welcome ${name}!`, referralBonus });
   }
 });
 app.post('/api/orders', async (req, res) => {
@@ -1329,6 +1351,11 @@ app.get('/api/admin/export', authenticate, async (req, res) => {
 });
 
 // ===== LOYALTY & REWARDS =====
+// Referral rewards — a shopper who brings a friend earns bonus loyalty points
+// for BOTH of them, once per new friend (see /api/auth).
+const REFERRER_BONUS_POINTS = 100;
+const REFEREE_BONUS_POINTS = 50;
+
 const earnPoints = async (phone, saleTotal) => {
   if (!phone || !saleTotal || saleTotal <= 0) return;
   try {
@@ -1474,6 +1501,9 @@ app.get('/api/customers/:phone', async (req, res) => {
     res.json({
       exists: !!cust || active.length > 0,
       phone,
+      referralCode: phone,
+      referralCount: cust ? cust.referralCount || 0 : 0,
+      referredBy: cust ? cust.referredBy || null : null,
       name: (cust && cust.name) || (active.length ? active[active.length - 1].customerName : '') || '',
       memberSince: cust && cust.createdAt ? cust.createdAt : null,
       orderCount: active.length,

@@ -1,6 +1,6 @@
 {
   "name": "shop-frontend",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "private": true,
   "main": "main.js",
   "homepage": "./",
@@ -17,6 +17,7 @@
     "electron-updater": "^6.8.9",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
+    "leaflet": "^1.9.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-scripts": "5.0.1",

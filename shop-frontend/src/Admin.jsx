@@ -383,6 +383,8 @@ function Admin() {
   const [crShowPaid, setCrShowPaid] = useState(false);
   const [reviews, setReviews] = useState([]);
   const [alerts, setAlerts] = useState({ low: [], out: [], expiringSoon: [], expired: [] });
+  const [importingExcel, setImportingExcel] = useState(false);
+  const importExcelInputRef = useRef(null);
   const [muted, setMuted] = useState(false);
   const [showBanner, setShowBanner] = useState(true);
   const [users, setUsers] = useState([]);
@@ -1573,6 +1575,75 @@ const loadStockTransfers = async () => {
     } catch (e) { console.error('PDF export error:', e); alert('Failed to generate PDF'); }
   };
 
+  // Normalise a spreadsheet date cell (Date object, Excel serial, or a
+  // dd/mm/yyyy string) into the ISO yyyy-mm-dd the API expects.
+  const parseExcelDate = (v) => {
+    if (!v) return '';
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    if (typeof v === 'number') {
+      const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+      return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+    }
+    const s = String(v).trim();
+    const m = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})/);
+    if (m) {
+      const d1 = m[1].padStart(2, '0');
+      const d2 = m[2].padStart(2, '0');
+      const y = m[3].length === 2 ? '20' + m[3] : m[3];
+      return `${y}-${d2}-${d1}`;
+    }
+    return s.slice(0, 10);
+  };
+
+  // Bulk-add products from an .xlsx/.xls file. Expected columns (matching the
+  // 📊 Excel export): Name, Category, Barcode, Buying Price, Selling Price,
+  // Stock, Expiry Date. Rows without a name + selling price are skipped.
+  const handleImportExcel = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!window.confirm(`Import products from "${file.name}"?\n\nRows with a Name and Selling Price will be added to inventory.`)) return;
+    setImportingExcel(true);
+    try {
+      const data = await file.arrayBuffer();
+      const wb = XLSX.read(data, { type: 'array', cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      if (!rows.length) { alert('⚠️ That file has no data rows.'); return; }
+      let added = 0, failed = 0, skipped = 0;
+      for (const row of rows) {
+        const name = String(row.Name || row.name || '').trim();
+        const price = parseFloat(row['Selling Price'] || row.price || row.Price || row['selling price']);
+        if (!name || isNaN(price)) { skipped++; continue; }
+        // Don't create duplicates: skip names already in inventory.
+        if (products.some(p => String(p.name || '').trim().toLowerCase() === name.toLowerCase())) { skipped++; continue; }
+        const payload = {
+          ...BLANK,
+          name,
+          category: String(row.Category || row.category || '').trim() || 'Other',
+          barcode: String(row.Barcode || row.barcode || '').trim(),
+          buyingPrice: parseFloat(row['Buying Price'] || row.buyingPrice || row['buying price'] || 0) || 0,
+          price,
+          stock: parseInt(row.Stock || row.stock || 0, 10) || 0,
+          description: String(row.Description || row.description || '').trim(),
+          expiryDate: parseExcelDate(row['Expiry Date'] || row.expiryDate || row['expiry date'])
+        };
+        try {
+          const r = await authPost(API_URL + '/admin/products', payload);
+          const d = await r.json().catch(() => ({}));
+          if (d && d.success) added++; else failed++;
+        } catch (err) { failed++; }
+      }
+      loadProducts();
+      alert(`✅ Excel import complete!\n\nAdded: ${added}\nFailed: ${failed}\nSkipped (missing name/price): ${skipped}`);
+    } catch (err) {
+      console.error('Excel import error:', err);
+      alert('❌ Could not read that file. Use a valid .xlsx/.xls with columns like: Name, Category, Barcode, Buying Price, Selling Price, Stock, Expiry Date.');
+    } finally {
+      setImportingExcel(false);
+    }
+  };
+
   const exportInventoryExcel = () => {
     try {
       const rows = (products||[]).map(p => ({
@@ -2035,7 +2106,7 @@ ${div}
 
       {safeTab === "inventory" && (
         <div className="blitz-admin-body">
-          <div className="blitz-admin-row-between"><h2>Inventory</h2><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="blitz-admin-btn small" onClick={exportInventoryExcel}>📊 Excel</button><button className="blitz-admin-btn small" onClick={() => setShowCategoriesModal(true)}>📂 Manage Categories</button><button className="blitz-admin-btn small" onClick={() => { if (showForm) { resetForm(); } else { setForm(f => ({ ...f, category: inventoryCategory || f.category })); setShowForm(true); } }}>{showForm ? "✕ Cancel" : "➕ Add stock"}</button></div></div>
+          <div className="blitz-admin-row-between"><h2>Inventory</h2><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="blitz-admin-btn small" onClick={exportInventoryExcel}>📊 Excel</button><button className="blitz-admin-btn small" onClick={() => importExcelInputRef.current && importExcelInputRef.current.click()} disabled={importingExcel}>{importingExcel ? "⏳ Importing…" : "📥 Import"}</button><input ref={importExcelInputRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={handleImportExcel} /><button className="blitz-admin-btn small" onClick={() => setShowCategoriesModal(true)}>📂 Manage Categories</button><button className="blitz-admin-btn small" onClick={() => { if (showForm) { resetForm(); } else { setForm(f => ({ ...f, category: inventoryCategory || f.category })); setShowForm(true); } }}>{showForm ? "✕ Cancel" : "➕ Add stock"}</button></div></div>
           <div className="inv-cats">
             <button className={!inventoryCategory ? 'on' : ''} onClick={() => setInventoryCategory('')} title="Show all stock">📦 All <span className="cnt">({products.length})</span></button>
             {inventoryCats.map(c => (
