@@ -3841,10 +3841,16 @@ app.get('/api/app-info', (req, res) => {
   try {
     const fs = require('fs');
     const dir = path.join(__dirname, 'shop-frontend/downloads');
+    // Pick by filename version first (blitzmall-v5.apk → 5), mtime second.
+    // On a fresh CI/Render checkout every file shares the deploy mtime, so
+    // sorting by mtime alone can serve an OLD apk as "latest".
     const apks = fs.readdirSync(dir)
       .filter(f => f.toLowerCase().endsWith('.apk'))
-      .map(f => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
-      .sort((a, b) => b.t - a.t);
+      .map(f => {
+        const m = f.match(/[vV](\d+)/);
+        return { f, t: fs.statSync(path.join(dir, f)).mtimeMs, v: m ? parseInt(m[1], 10) : 0 };
+      })
+      .sort((a, b) => (b.v - a.v) || (b.t - a.t));
     if (!apks.length) return res.json({ apkUrl: null });
     const latest = apks[0];
     const base = `${req.protocol}://${req.get('host')}`;
