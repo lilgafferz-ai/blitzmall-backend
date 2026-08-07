@@ -498,6 +498,7 @@ function App() {
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [pointsToConvert, setPointsToConvert] = useState('');
   const [useWalletPayment, setUseWalletPayment] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [deliveryArea, setDeliveryArea] = useState('mall'); // 'mall' | 'standard'
   const [deliveryLocation, setDeliveryLocation] = useState('');
   const [gpsCoords, setGpsCoords] = useState(null);
@@ -1199,6 +1200,50 @@ function App() {
     setMyOrders([]);
     try { localStorage.removeItem(CUSTOMER_KEY); } catch {}
     setScreen('login');
+  };
+
+  const handleManualUpdateCheck = async () => {
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
+    showToast('Checking for updates...');
+    try {
+      const res = await fetch(`${API_URL}/native-update`);
+      const latest = await res.json();
+      if (!latest || !latest.version || !latest.url) {
+        showToast('Already up to date! (no updates on server)');
+        setCheckingUpdate(false);
+        return;
+      }
+      
+      const isNative = typeof window !== 'undefined' && !!window.Capacitor?.isNativePlatform?.();
+      if (isNative) {
+        const { CapacitorUpdater } = await import('@capgo/capacitor-updater');
+        const cur = await CapacitorUpdater.current();
+        if (cur && cur.bundle && cur.bundle.version === latest.version) {
+          showToast(`App is up to date! (v${latest.version.slice(0,7)})`);
+          setCheckingUpdate(false);
+          return;
+        }
+        showToast('Downloading new update...');
+        const bundle = await CapacitorUpdater.download({ url: latest.url, version: latest.version });
+        await CapacitorUpdater.next({ id: bundle.id });
+        showToast('⚡ Update applied! Reloading...');
+        setTimeout(() => {
+          CapacitorUpdater.reload();
+        }, 1500);
+      } else {
+        // Web / PC
+        showToast('Updating components and reloading...');
+        setTimeout(() => {
+          window.location.reload(true);
+        }, 1500);
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('Update check failed');
+    } finally {
+      setCheckingUpdate(false);
+    }
   };
 
   const validateCoupon = async () => {
@@ -2614,6 +2659,29 @@ function App() {
             }}
           >
             {perfMode ? 'ON (Fast)' : 'OFF (Rich)'}
+          </button>
+        </div>
+
+        <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <b style={{ fontSize: '.88rem', color: '#fff' }}>🔄 Check for Updates</b>
+            <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>Sync changes & download new features</div>
+          </div>
+          <button 
+            className="btn-neon" 
+            onClick={handleManualUpdateCheck}
+            disabled={checkingUpdate}
+            style={{
+              padding: '6px 12px', 
+              fontSize: '.75rem',
+              background: checkingUpdate ? 'var(--line)' : 'var(--grad)',
+              color: checkingUpdate ? 'var(--text)' : '#000',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: 'pointer'
+            }}
+          >
+            {checkingUpdate ? 'Checking...' : 'Check'}
           </button>
         </div>
 
