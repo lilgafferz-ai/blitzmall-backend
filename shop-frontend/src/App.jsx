@@ -92,18 +92,24 @@ const DEFAULT_BANNERS = [
 ];
 
 // The 8 sectors of the prize wheel (colors must match the server's sector order).
+// Wheel slices must match the server's WHEEL_SECTORS outcome list (labels &
+// colors only — the SERVER decides the prize, the wheel is pure theatre).
 const WHEEL_SECTORS = [
-  { label: '10% OFF', color: '#ff2d55' },
   { label: 'TRY AGAIN', color: '#3a3a46' },
-  { label: 'KES 100 OFF', color: '#ff9f0a' },
-  { label: '50 POINTS', color: '#30d158' },
-  { label: 'FREE DELIVERY', color: '#64d2ff' },
   { label: 'TRY AGAIN', color: '#3a3a46' },
-  { label: '5% OFF', color: '#ffd60a' },
-  { label: 'KES 50 OFF', color: '#bf5af2' },
+  { label: '1 PT', color: '#30d158' },
+  { label: '2 PTS', color: '#30d158' },
+  { label: '3 PTS', color: '#30d158' },
+  { label: '5 PTS', color: '#30d158' },
+  { label: 'KES 50', color: '#bf5af2' },
+  { label: '10 PTS', color: '#ffd60a' },
+  { label: 'FREE DEL', color: '#64d2ff' },
+  { label: 'KES 100', color: '#ff9f0a' },
+  { label: '25 PTS', color: '#30d158' },
+  { label: 'JACKPOT', color: '#ff2d55' },
 ];
 
-const TIER_LABELS = { Visitor: '🆕 New Shopper', Bronze: '🥉 Bronze Shopper', Silver: '🥈 Silver Shopper', Gold: '🥇 Gold Shopper' };
+const TIER_LABELS = { Bronze: '🥉 Bronze Shopper', Silver: '🥈 Silver Shopper', Gold: '🥇 Gold Shopper', Platinum: '💎 Platinum Shopper' };
 
 // Screens that auto-redirect themselves (never recorded in the back stack).
 const TRANSIENT_SCREENS = ['splash', 'welcome'];
@@ -838,6 +844,13 @@ function App() {
       });
       const d = await r.json();
       setScratchRevealing(false);
+      if (!d.success) {
+        // Gate (need 2 purchases) or cooldown — put the foil back + explain.
+        setScratchResult(null);
+        setScratchRevealed(false);
+        showToast(d.error || (d.alreadyUsed ? (d.message || 'Scratch again later!') : 'Could not scratch — try again'));
+        return;
+      }
       setScratchResult(d);
       setScratchRevealed(true);
       setPromoStatus(s => ({ ...(s || {}), tier: d.tier || s?.tier, scratch: { used: true, code: d.code, title: d.title, message: d.message } }));
@@ -850,7 +863,7 @@ function App() {
     } catch (e) {
       setScratchRevealing(false);
       setScratchResult(null);
-      setScratchRevealed(false); // put the foil back so they can retry today
+      setScratchRevealed(false); // put the foil back so they can retry
       showToast('Network error — please try again');
     }
   };
@@ -1221,9 +1234,9 @@ function App() {
         showToast(d.error || 'Something went wrong — please try again');
         return;
       }
-      // Spin to land the winning sector under the pointer (8 sectors of 45°).
+      // Spin to land the winning sector under the pointer (12 sectors of 30°).
       const sectorIdx = typeof d.sectorIndex === 'number' ? d.sectorIndex : 1;
-      const target = ((360 - (sectorIdx + 0.5) * 45) + 360) % 360;
+      const target = ((360 - (sectorIdx + 0.5) * (360 / WHEEL_SECTORS.length)) + 360) % 360;
       const current = ((wheelRotation % 360) + 360) % 360;
       const delta = (target - current + 360) % 360;
       setWheelRotation(wheelRotation + 360 * 5 + delta);
@@ -1729,7 +1742,7 @@ function App() {
                 }}>
                   {WHEEL_SECTORS.map((s, i) => (
                     <span key={i} className="wheel-label" style={{
-                      transform: `translate(-50%, -50%) rotate(${(i + 0.5) * 45}deg) translateY(-84px) rotate(${-(i + 0.5) * 45}deg)`
+                      transform: `translate(-50%, -50%) rotate(${(i + 0.5) * (360 / WHEEL_SECTORS.length)}deg) translateY(-84px) rotate(${-(i + 0.5) * (360 / WHEEL_SECTORS.length)}deg)`
                     }}>{s.label}</span>
                   ))}
                 </div>
@@ -1754,9 +1767,9 @@ function App() {
               <button
                 className="btn-neon spin-action-btn"
                 onClick={spinTheWheel}
-                disabled={wheelSpinning || promoStatus?.spin?.used}
+                disabled={wheelSpinning || promoStatus?.spin?.used || promoStatus?.promosLocked}
               >
-                {wheelSpinning ? '🌀 Spinning...' : promoStatus?.spin?.used ? '🔒 Come Back Tomorrow' : '🔥 Spin Now!'}
+                {wheelSpinning ? '🌀 Spinning...' : promoStatus?.spin?.used ? '🔒 Come Back Soon' : promoStatus?.promosLocked ? '🔒 Complete 2 purchases to unlock' : '🔥 Spin Now!'}
               </button>
             </div>
           </div>
@@ -2528,7 +2541,7 @@ function App() {
   if (screen === 'share') {
     // Prefer the live "latest APK" reported by the server; fall back to the
     // known URL if the server can't be reached.
-    const apkUrl = appInfo?.apkUrl || 'https://blitzmall-backend.onrender.com/apk/blitzmall-v2.apk';
+    const apkUrl = appInfo?.apkUrl || 'https://blitzmall-backend.onrender.com/apk/blitzmall-v3.apk';
     const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(apkUrl)}`;
     
     return (
@@ -2585,7 +2598,7 @@ function App() {
   if (screen === 'referral') {
     const myCode = customer?.customerId || '';
     const refCount = custAccount?.referralCount || 0;
-    const waMsg = encodeURIComponent(`Hey! 👋 Shop at Blitz Mall and we BOTH earn bonus loyalty points. Use my referral code when signing in: ${myCode} — download the app: https://blitzmall-backend.onrender.com/apk/blitzmall-v2.apk`);
+    const waMsg = encodeURIComponent(`Hey! 👋 Shop at Blitz Mall and we BOTH earn bonus loyalty points. Use my referral code when signing in: ${myCode} — download the app: https://blitzmall-backend.onrender.com/apk/blitzmall-v3.apk`);
     return (
       <div className="screen with-nav">
         <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('profile')}>‹</button><h2 className="topbar-title">Invite Friends</h2></header>

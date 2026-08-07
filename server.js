@@ -76,7 +76,7 @@ const client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
 let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_, categories_;
-let customers_, promo_claims_, notification_tokens_;
+let customers_, promo_claims_, notification_tokens_, notifications_feed_, loyalty_settings_;
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   console.error('FATAL ERROR: JWT_SECRET environment variable is not defined.');
@@ -297,6 +297,8 @@ async function connectDb() {
   customers_ = db.collection('customers');
   promo_claims_ = db.collection('promo_claims');
   notification_tokens_ = db.collection('notification_tokens');
+  notifications_feed_ = db.collection('notifications_feed');
+  loyalty_settings_ = db.collection('loyalty_settings');
 
   try {
     const bannerCount = await banners_.countDocuments();
@@ -340,6 +342,11 @@ async function connectDb() {
   }
 
   await seedRewards();
+
+  // Seed the loyalty economy defaults (earn rate, tiers, redeem tiers, promo
+  // odds) so the Admin → Loyalty Controls tab has a real document to edit —
+  // without this the settings UI silently fails to persist.
+  await seedLoyaltySettings();
 
   // Seed categories if empty
   try {
@@ -560,6 +567,10 @@ app.post('/api/orders', async (req, res) => {
     }
 
     console.log('🔔 NEW ORDER:', order.customerName, 'KES', order.totalPrice);
+    // Native toasts for the shop PC (Electron) — polled via /api/notifications/feed.
+    // No customer name/payment method here — the feed endpoint is unauthenticated
+    // (the shop PC polls it), so the body stays free of personally identifying data.
+    addFeedEvent({ audience: 'admin', title: '🛒 New Order', body: `New order received — KES ${order.totalPrice}` });
     res.json({ success: true, orderId: result.insertedId, message: 'Order placed! Pay on delivery.' });
   } catch (e) { console.error('Failed to place order:', e); res.status(500).json({ error: 'Failed to place order' }); }
 });
@@ -1067,7 +1078,15 @@ app.put('/api/admin/orders/:orderId', authenticate, async (req, res) => {
       const updated = await orders_.findOne({ _id: new ObjectId(req.params.orderId) });
       if (updated && updated.customerId) {
         if (updated.status === 'on_the_way') sendPushToPhone(updated.customerId, '🛵 On the way!', 'Your BlitzMall order is out for delivery — it will arrive soon.');
-        else if (updated.status === 'delivered') sendPushToPhone(updated.customerId, '✅ Delivered!', 'Your BlitzMall order has been delivered. Enjoy!');
+        else if (updated.status === 'delivered') {
+          sendPushToPhone(updated.customerId, '✅ Delivered!', 'Your BlitzMall order has been delivered. Enjoy!');
+          // Loyalty points: 1 pt per KES 200 of net paid spend, awarded ONCE per
+          // completed (delivered) order. Cancelled orders never earn points.
+          if (!updated.pointsAwardedAt && (updated.totalPrice || 0) > 0) {
+            await earnPoints(updated.customerId, updated.totalPrice);
+            await orders_.updateOne({ _id: new ObjectId(req.params.orderId) }, { $set: { pointsAwardedAt: new Date() } });
+          }
+        }
         else if (updated.status === 'cancelled') sendPushToPhone(updated.customerId, '❌ Order cancelled', 'Your BlitzMall order was cancelled.');
       }
     } catch (e) { console.error('Order status push failed:', e.message); }
@@ -1148,6 +1167,8 @@ app.delete('/api/admin/sales/:saleId', authenticate, authorize('owner', 'manager
     const sale = await sales_.findOne({ _id: new ObjectId(req.params.saleId) });
     if (!sale) return res.status(404).json({ error: 'Sale not found' });
     for (const it of sale.items) if (it.productId && ObjectId.isValid(it.productId)) await products_.updateOne({ _id: new ObjectId(it.productId) }, { $inc: { stock: Math.abs(it.qty) } });
+    // Voiding a sale reverses any loyalty points it earned (anti-abuse).
+    if (sale.customerPhone && sale.total) reversePoints(sale.customerPhone, sale.total);
     await sales_.deleteOne({ _id: new ObjectId(req.params.saleId) });
     res.json({ success: true });
   } catch (e) { console.error('Failed to void sale:', e); res.status(500).json({ error: 'Failed to void sale' }); }
@@ -1374,29 +1395,112 @@ app.get('/api/admin/export', authenticate, async (req, res) => {
 const REFERRER_BONUS_POINTS = 100;
 const REFEREE_BONUS_POINTS = 50;
 
-const earnPoints = async (phone, saleTotal) => {
-  if (!phone || !saleTotal || saleTotal <= 0) return;
+// ===== LOYALTY ENGINE (business-first, settings-driven) =====
+// Every rate/threshold/probability below lives in loyalty_settings_ so the
+// owner can retune the economics from the Admin → Loyalty Controls tab without
+// a code change. Defaults match the owner's spec:
+//   - 1 point per KES 200 of NET paid spend, floored (KES 199 = 0 pts)
+//   - 100 points redeem for KES 100 (higher tiers slightly better value)
+//   - Tiers by points: Bronze 0-199 / Silver 200-599 / Gold 600-1499 / Platinum 1500+
+//   - Spin: 2 paid orders gate, 1 spin / 24h; Scratch: 2 orders, 1 / 48h
+const LOYALTY_SETTINGS_DEFAULTS = {
+  earnRate: 200, // KES spent per 1 point
+  tierThresholds: { silver: 200, gold: 600, platinum: 1500 },
+  redeemTiers: [
+    { points: 100, value: 100 },
+    { points: 250, value: 250 },
+    { points: 500, value: 600 },
+    { points: 1000, value: 1300 }
+  ],
+  jackpotEnabled: true,
+  spinCooldownHours: 24,
+  scratchCooldownHours: 48,
+  minOrdersForPromo: 2,
+  seasonalEvents: [] // { name, pointsMultiplier, active }
+};
+
+let loyaltySettingsCache = null;
+async function getLoyaltySettings() {
+  if (loyaltySettingsCache) return loyaltySettingsCache;
   try {
-    const points = Math.floor(saleTotal / 100);
-    if (points <= 0) return;
+    const doc = loyalty_settings_ ? await loyalty_settings_.findOne({ key: 'default' }) : null;
+    const stored = (doc && doc.value) || {};
+    loyaltySettingsCache = {
+      ...LOYALTY_SETTINGS_DEFAULTS,
+      ...stored,
+      // Probabilities are owner-editable: fall back to the code constants when
+      // the stored settings don't carry a weight table yet.
+      spinWeights: Array.isArray(stored.spinWeights) ? stored.spinWeights : WHEEL_SECTORS.map(o => ({ prize: o.prize, weight: o.weight })),
+      scratchWeights: Array.isArray(stored.scratchWeights) ? stored.scratchWeights : SCRATCH_OUTCOMES.map(o => ({ prize: o.prize, weight: o.weight }))
+    };
+  } catch (e) { loyaltySettingsCache = { ...LOYALTY_SETTINGS_DEFAULTS }; }
+  return loyaltySettingsCache;
+}
+const saveLoyaltySettings = async (value) => {
+  loyaltySettingsCache = null;
+  if (!loyalty_settings_) return;
+  // findOne → insertOne fallback keeps saves working even in offline mock mode,
+  // where updateOne's upsert option is not supported (silent no-op otherwise).
+  const existing = await loyalty_settings_.findOne({ key: 'default' });
+  if (existing) await loyalty_settings_.updateOne({ key: 'default' }, { $set: { value, updatedAt: new Date() } });
+  else await loyalty_settings_.insertOne({ key: 'default', value, updatedAt: new Date() });
+};
+const seedLoyaltySettings = async () => {
+  try {
+    if (!loyalty_settings_) return;
+    const exists = await loyalty_settings_.findOne({ key: 'default' });
+    if (!exists) await loyalty_settings_.insertOne({ key: 'default', value: LOYALTY_SETTINGS_DEFAULTS, updatedAt: new Date() });
+  } catch (e) { console.error('Failed to seed loyalty settings:', e); }
+};
+
+// Tier is driven by the POINTS balance (never by spend, so tiers can't be
+// gamed by high-value single orders). Kept as a named export for the tests.
+const tierFromPoints = (points) => {
+  const p = points || 0;
+  if (p >= 1500) return 'Platinum';
+  if (p >= 600) return 'Gold';
+  if (p >= 200) return 'Silver';
+  return 'Bronze';
+};
+const customerTier = tierFromPoints;
+
+// Core award — 1 point per earnRate KES of NET paid spend, floored.
+// ONLY call for completed + paid transactions (delivered orders, POS sales).
+// Cancelled/refunded orders never reach here, and refunds call reversePoints.
+async function earnPoints(phone, netSpent) {
+  if (!phone || !netSpent || netSpent <= 0) return 0;
+  try {
+    const s = await getLoyaltySettings();
+    let pts = Math.floor(netSpent / (s.earnRate || 200));
+    // Seasonal event multiplier (e.g. 2x promo weekend) — off by default.
+    const events = (s.seasonalEvents || []).filter(e => e && e.active && parseFloat(e.pointsMultiplier) > 1);
+    for (const ev of events) pts = Math.floor(pts * parseFloat(ev.pointsMultiplier));
+    if (pts <= 0) return 0;
     const existing = await loyalty_.findOne({ phone });
     if (existing) {
-      const newTotal = existing.totalSpent + saleTotal;
-      const newPoints = existing.points + points;
-      let tier = 'Bronze';
-      if (newTotal >= 500000) tier = 'Platinum';
-      else if (newTotal >= 100000) tier = 'Gold';
-      else if (newTotal >= 25000) tier = 'Silver';
-      await loyalty_.updateOne({ phone }, { $set: { totalSpent: newTotal, points: newPoints, tier, updatedAt: new Date() } });
+      const newTotal = (existing.totalSpent || 0) + netSpent;
+      const newPoints = (existing.points || 0) + pts;
+      await loyalty_.updateOne({ phone }, { $set: { totalSpent: newTotal, points: newPoints, tier: tierFromPoints(newPoints), updatedAt: new Date() } });
     } else {
-      let tier = 'Bronze';
-      if (saleTotal >= 500000) tier = 'Platinum';
-      else if (saleTotal >= 100000) tier = 'Gold';
-      else if (saleTotal >= 25000) tier = 'Silver';
-      await loyalty_.insertOne({ phone, customerName: '', totalSpent: saleTotal, points, tier, createdAt: new Date(), updatedAt: new Date() });
+      await loyalty_.insertOne({ phone, customerName: '', totalSpent: netSpent, points: pts, tier: tierFromPoints(pts), createdAt: new Date(), updatedAt: new Date() });
     }
-  } catch (e) { console.error('Loyalty error:', e); }
-};
+    return pts;
+  } catch (e) { console.error('Loyalty error:', e); return 0; }
+}
+
+// Reverse points earned on a refund/void (never below zero — no farming).
+async function reversePoints(phone, netSpent) {
+  if (!phone || !netSpent || netSpent <= 0) return;
+  try {
+    const s = await getLoyaltySettings();
+    const pts = Math.floor(netSpent / (s.earnRate || 200));
+    if (pts <= 0) return;
+    const existing = await loyalty_.findOne({ phone });
+    if (!existing) return;
+    const newPoints = Math.max(0, (existing.points || 0) - pts);
+    await loyalty_.updateOne({ phone }, { $set: { points: newPoints, tier: tierFromPoints(newPoints), updatedAt: new Date() } });
+  } catch (e) { console.error('Reverse loyalty error:', e); }
+}
 
 app.get('/api/admin/loyalty/:phone', authenticate, async (req, res) => {
   try {
@@ -1419,15 +1523,27 @@ app.get('/api/admin/loyalty', authenticate, async (req, res) => {
 });
 
 app.post('/api/admin/loyalty/redeem', authenticate, async (req, res) => {
-  const { phone, points } = req.body;
-  if (!phone || !points) return res.status(400).json({ error: 'Phone and points required' });
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ error: 'Phone required' });
   try {
-    const entry = await loyalty_.findOne({ phone });
+    const entry = await loyalty_.findOne({ phone: String(phone).replace(/[^0-9]/g, '') });
     if (!entry) return res.status(404).json({ error: 'Customer not found' });
-    if (entry.points < points) return res.status(400).json({ error: 'Not enough points' });
-    const cashback = Math.round(points * 5);
-    await loyalty_.updateOne({ phone }, { $inc: { points: -points }, $set: { updatedAt: new Date() } });
-    res.json({ success: true, cashback, message: `${cashback} KES cashback applied!` });
+    const s = await getLoyaltySettings();
+    const tiers = (s.redeemTiers || []).slice().sort((a, b) => a.points - b.points);
+    // Pick the biggest tier the member's balance covers (min redemption = 100).
+    const chosen = [...tiers].reverse().find(t => (entry.points || 0) >= t.points);
+    if (!chosen) return res.status(400).json({ error: 'Not enough points — minimum redemption is 100 points' });
+    const remaining = (entry.points || 0) - chosen.points;
+    await loyalty_.updateOne({ phone: entry.phone }, { $inc: { points: -chosen.points }, $set: { tier: tierFromPoints(remaining), updatedAt: new Date() } });
+    const code = 'LOYALTY_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+    await coupons_.insertOne({
+      code, type: 'fixed', value: chosen.value, minPurchase: 0,
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      maxUses: 1, usedCount: 0, usedBy: [], ownerPhone: entry.phone,
+      active: true, createdAt: new Date(), source: 'loyalty'
+    });
+    await redemptions_.insertOne({ customerId: entry.phone, rewardName: `KES ${chosen.value} Discount Coupon`, pointsSpent: chosen.points, rewardValue: chosen.value, redeemedAt: new Date() });
+    res.json({ success: true, code, pointsSpent: chosen.points, message: `Redeemed ${chosen.points} points for a KES ${chosen.value} coupon!` });
   } catch (e) { console.error('Failed to redeem:', e); res.status(500).json({ error: 'Failed to redeem' }); }
 });
 
@@ -1437,16 +1553,16 @@ app.post('/api/admin/loyalty/add-points', async (req, res) => {
   try {
     const existing = await loyalty_.findOne({ phone });
     if (existing) {
-      const newPoints = (existing.points || 0) + parseInt(points);
-      await loyalty_.updateOne({ phone }, { $set: { points: newPoints, updatedAt: new Date() } });
+      const newPoints = Math.max(0, (existing.points || 0) + parseInt(points));
+      await loyalty_.updateOne({ phone }, { $set: { points: newPoints, tier: tierFromPoints(newPoints), updatedAt: new Date() } });
       res.json({ success: true, points: newPoints });
     } else {
       await loyalty_.insertOne({
         phone,
         customerName: '',
         totalSpent: 0,
-        points: parseInt(points),
-        tier: 'Bronze',
+        points: Math.max(0, parseInt(points)),
+        tier: tierFromPoints(parseInt(points)),
         createdAt: new Date(),
         updatedAt: new Date()
       });
@@ -1503,6 +1619,95 @@ app.post('/api/coupons/validate', async (req, res) => {
 // ===== CUSTOMER ACCOUNT (keyed by phone number) =====
 // A customer's shopping record, debts and vouchers all live under the phone
 // they sign in with — no separate accounts, no way to game the system.
+// ===== LOYALTY ADMIN CONTROLS (owner/manager) =====
+// Owner can retune the whole loyalty economy, award or claw back points, and
+// watch the business maths (reward cost vs sales) without a code deploy.
+app.get('/api/admin/loyalty/settings', authenticate, async (req, res) => {
+  try { res.json(await getLoyaltySettings()); }
+  catch (e) { console.error('Failed to load loyalty settings:', e); res.status(500).json({ error: 'Failed' }); }
+});
+
+app.put('/api/admin/loyalty/settings', authenticate, authorize('owner', 'manager'), async (req, res) => {
+  try {
+    const current = await getLoyaltySettings();
+    const next = { ...current, ...(req.body || {}) };
+    // Basic sanity: earnRate and thresholds must be positive numbers.
+    if (!(parseFloat(next.earnRate) > 0)) return res.status(400).json({ error: 'earnRate must be a positive number' });
+    next.earnRate = parseFloat(next.earnRate);
+    next.jackpotEnabled = !!next.jackpotEnabled;
+    if (next.tierThresholds) {
+      const t = next.tierThresholds;
+      if (!(parseFloat(t.silver) > 0 && parseFloat(t.gold) > parseFloat(t.silver) && parseFloat(t.platinum) > parseFloat(t.gold))) {
+        return res.status(400).json({ error: 'Tier thresholds must be ascending' });
+      }
+    }
+    // Sanitise the owner-editable odds tables (fall back to defaults if broken).
+    for (const key of ['spinWeights', 'scratchWeights']) {
+      if (Array.isArray(next[key])) {
+        next[key] = next[key]
+          .filter(x => x && typeof x.weight === 'number' && x.weight >= 0)
+          .map(x => ({ prize: String(x.prize), weight: x.weight }));
+      } else {
+        delete next[key];
+      }
+    }
+    await saveLoyaltySettings(next);
+    res.json({ success: true, settings: next });
+  } catch (e) { console.error('Failed to save loyalty settings:', e); res.status(500).json({ error: 'Failed' }); }
+});
+
+// Manual bonus points OR claw-back (negative points, e.g. removing fraud).
+app.post('/api/admin/loyalty/manual-points', authenticate, authorize('owner', 'manager'), async (req, res) => {
+  const { phone, points, reason } = req.body;
+  const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '') : '';
+  const pts = parseInt(points, 10);
+  if (!cleanPhone || !pts) return res.status(400).json({ error: 'Phone and points (positive or negative) required' });
+  try {
+    const existing = await loyalty_.findOne({ phone: cleanPhone });
+    if (!existing && pts < 0) return res.status(404).json({ error: 'No loyalty record to claw back from' });
+    const newPoints = Math.max(0, (existing ? existing.points || 0 : 0) + pts);
+    if (existing) {
+      await loyalty_.updateOne({ phone: cleanPhone }, { $set: { points: newPoints, tier: tierFromPoints(newPoints), updatedAt: new Date() } });
+    } else {
+      await loyalty_.insertOne({ phone: cleanPhone, customerName: '', totalSpent: 0, points: newPoints, tier: tierFromPoints(newPoints), createdAt: new Date(), updatedAt: new Date() });
+    }
+    await redemptions_.insertOne({ customerId: cleanPhone, rewardName: `Manual ${pts > 0 ? 'bonus' : 'adjustment'} — ${(reason || '').slice(0, 120)}`, pointsSpent: 0, rewardValue: 0, manualPoints: pts, reason: reason || '', redeemedAt: new Date() });
+    res.json({ success: true, points: newPoints });
+  } catch (e) { console.error('Failed to adjust points:', e); res.status(500).json({ error: 'Failed' }); }
+});
+
+// Loyalty economics: redemption stats, reward cost vs sales, customer LTV.
+app.get('/api/admin/loyalty/stats', authenticate, async (req, res) => {
+  try {
+    const members = await loyalty_.find().toArray();
+    const redemptions = await redemptions_.find().sort({ redeemedAt: -1 }).toArray();
+    const since30 = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    const recentRedemptions = redemptions.filter(r => r.redeemedAt && new Date(r.redeemedAt) >= since30);
+    const rewardCost30d = recentRedemptions.reduce((s, r) => s + (r.rewardValue || 0), 0);
+    const [sales30, orders30] = await Promise.all([
+      sales_.find({ createdAt: { $gte: since30 } }).toArray(),
+      orders_.find({ createdAt: { $gte: since30 } }).toArray()
+    ]);
+    const salesRevenue30d = sales30.reduce((s, x) => s + (x.total || 0), 0) +
+      orders30.filter(o => o.status !== 'cancelled').reduce((s, o) => s + (o.totalPrice || 0), 0);
+    res.json({
+      memberCount: members.length,
+      totalPointsOut: members.reduce((s, m) => s + (m.points || 0), 0),
+      redemptions: redemptions.length,
+      redemptionCount30d: recentRedemptions.length,
+      rewardCost30d: Math.round(rewardCost30d * 100) / 100,
+      salesRevenue30d: Math.round(salesRevenue30d * 100) / 100,
+      rewardCostPct: salesRevenue30d > 0 ? Math.round((rewardCost30d / salesRevenue30d) * 10000) / 100 : 0,
+      topCustomers: members.slice().sort((a, b) => (b.totalSpent || 0) - (a.totalSpent || 0)).slice(0, 10)
+        .map(m => ({ phone: m.phone, name: m.customerName || '', points: m.points || 0, totalSpent: Math.round((m.totalSpent || 0) * 100) / 100, tier: m.tier })),
+      recentRedemptions: recentRedemptions.slice(0, 20).map(r => ({
+        customerId: r.customerId, rewardName: r.rewardName, pointsSpent: r.pointsSpent, rewardValue: r.rewardValue,
+        manualPoints: r.manualPoints || 0, redeemedAt: r.redeemedAt
+      }))
+    });
+  } catch (e) { console.error('Loyalty stats failed:', e); res.status(500).json({ error: 'Failed' }); }
+});
+
 app.get('/api/customers/:phone', async (req, res) => {
   try {
     const phone = String(req.params.phone || '').replace(/[^0-9]/g, '');
@@ -1515,7 +1720,7 @@ app.get('/api/customers/:phone', async (req, res) => {
     const outstandingDebt = credits.filter(c => !c.paid).reduce((s, c) => s + (c.amount || 0), 0);
     const loyalty = await loyalty_.findOne({ phone });
     const vouchers = await coupons_.find({ ownerPhone: phone, active: true }).toArray();
-    const tier = customerTier(active.length, totalSpent);
+    const tier = loyalty ? tierFromPoints(loyalty.points) : 'Bronze';
     res.json({
       exists: !!cust || active.length > 0,
       phone,
@@ -1544,51 +1749,64 @@ app.get('/api/customers/:phone', async (req, res) => {
 // are only handed to real shoppers (tier is derived from the phone-number
 // shopping record), and every voucher is bound to the winning phone, valid for
 // a single use. Codes issued here therefore ALWAYS work at checkout.
-const customerTier = (orderCount, totalSpent) => {
-  if (totalSpent >= 10000 || orderCount >= 15) return 'Gold';
-  if (totalSpent >= 3000 || orderCount >= 5) return 'Silver';
-  if (orderCount >= 1) return 'Bronze';
-  return 'Visitor';
-};
-
 // "Once per day" follows the shop's local day (Africa/Nairobi), matching the
-// messages the app shows customers.
+// messages the app shows customers (kept for display; cooldowns are now a
+// rolling 24h/48h window, not calendar days).
 const promoDayKey = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' });
 
-// 8 wheel sectors. Weights are per customer tier: visitors can only win
-// points / retries (no real money off until they actually shop), and loyal
-// customers get better odds on the bigger prizes.
+// 12 wheel outcomes — the prize table from the owner spec. `weight` is the
+// probability out of 100. sectorIndex maps each outcome to a wheel slice for
+// the spin animation (the client renders 12 slices from the same array).
 const WHEEL_SECTORS = [
-  { label: '10% OFF', color: '#ff2d55', prize: 'pct10', type: 'percent', value: 10, minPurchase: 500, title: '10% Off Your Order', message: 'You won 10% off! Valid on orders over KES 500.', sectorIndex: 0, weight: { Visitor: 0, Bronze: 10, Silver: 15, Gold: 20 } },
-  { label: 'TRY AGAIN', color: '#3a3a46', prize: 'again', title: 'So Close!', message: 'No luck today — come back tomorrow for another spin.', sectorIndex: 1, weight: { Visitor: 40, Bronze: 25, Silver: 15, Gold: 10 } },
-  { label: 'KES 100 OFF', color: '#ff9f0a', prize: 'fixed100', type: 'fixed', value: 100, minPurchase: 1000, title: 'KES 100 Off Unlocked!', message: 'You won KES 100 off! Valid on orders over KES 1,000.', sectorIndex: 2, weight: { Visitor: 0, Bronze: 5, Silver: 10, Gold: 15 } },
-  { label: '50 POINTS', color: '#30d158', prize: 'points50', points: 50, title: '50 Loyalty Points!', message: 'You won 50 loyalty points — they were added to your account.', sectorIndex: 3, weight: { Visitor: 30, Bronze: 20, Silver: 15, Gold: 10 } },
-  { label: 'FREE DELIVERY', color: '#64d2ff', prize: 'delivery', type: 'free_delivery', value: 0, minPurchase: 300, title: 'Free Delivery!', message: 'You won free delivery on your next order (over KES 300).', sectorIndex: 4, weight: { Visitor: 0, Bronze: 5, Silver: 10, Gold: 15 } },
-  { label: 'TRY AGAIN', color: '#3a3a46', prize: 'again', title: 'So Close!', message: 'No luck today — come back tomorrow for another spin.', sectorIndex: 5, weight: { Visitor: 40, Bronze: 25, Silver: 15, Gold: 10 } },
-  { label: '5% OFF', color: '#ffd60a', prize: 'pct5', type: 'percent', value: 5, minPurchase: 300, title: '5% Off Your Order', message: 'You won 5% off! Valid on orders over KES 300.', sectorIndex: 6, weight: { Visitor: 0, Bronze: 10, Silver: 10, Gold: 10 } },
-  { label: 'KES 50 OFF', color: '#bf5af2', prize: 'fixed50', type: 'fixed', value: 50, minPurchase: 500, title: 'KES 50 Off Unlocked!', message: 'You won KES 50 off! Valid on orders over KES 500.', sectorIndex: 7, weight: { Visitor: 0, Bronze: 10, Silver: 10, Gold: 10 } },
+  { label: 'TRY AGAIN', color: '#3a3a46', prize: 'again', title: 'So Close!', message: 'No luck today — come back in 24h for another spin.', sectorIndex: 0, weight: 45 },
+  { label: 'TRY AGAIN', color: '#3a3a46', prize: 'again', title: 'So Close!', message: 'No luck today — come back in 24h for another spin.', sectorIndex: 1, weight: 20 },
+  { label: '1 POINT', color: '#30d158', prize: 'points1', points: 1, title: '1 Loyalty Point!', message: 'You won 1 loyalty point — it was added to your account.', sectorIndex: 2, weight: 10 },
+  { label: '2 POINTS', color: '#30d158', prize: 'points2', points: 2, title: '2 Loyalty Points!', message: 'You won 2 loyalty points — they were added to your account.', sectorIndex: 3, weight: 8 },
+  { label: '3 POINTS', color: '#30d158', prize: 'points3', points: 3, title: '3 Loyalty Points!', message: 'You won 3 loyalty points — they were added to your account.', sectorIndex: 4, weight: 5 },
+  { label: '5 POINTS', color: '#30d158', prize: 'points5', points: 5, title: '5 Loyalty Points!', message: 'You won 5 loyalty points — they were added to your account.', sectorIndex: 5, weight: 4 },
+  { label: 'KES 50 OFF', color: '#bf5af2', prize: 'fixed50', type: 'fixed', value: 50, minPurchase: 300, title: 'KES 50 Off Unlocked!', message: 'You won KES 50 off! Valid on orders over KES 300.', sectorIndex: 6, weight: 3 },
+  { label: '10 POINTS', color: '#ffd60a', prize: 'points10', points: 10, title: '10 Loyalty Points!', message: 'You won 10 loyalty points — they were added to your account.', sectorIndex: 7, weight: 2 },
+  { label: 'FREE DELIVERY', color: '#64d2ff', prize: 'delivery', type: 'free_delivery', value: 0, minPurchase: 300, title: 'Free Delivery!', message: 'You won free delivery on your next order (over KES 300).', sectorIndex: 8, weight: 1.5 },
+  { label: 'KES 100 OFF', color: '#ff9f0a', prize: 'fixed100', type: 'fixed', value: 100, minPurchase: 500, title: 'KES 100 Off Unlocked!', message: 'You won KES 100 off! Valid on orders over KES 500.', sectorIndex: 9, weight: 1 },
+  { label: '25 POINTS', color: '#30d158', prize: 'points25', points: 25, title: '25 Loyalty Points!', message: 'You won 25 loyalty points — they were added to your account.', sectorIndex: 10, weight: 0.4 },
+  { label: 'JACKPOT', color: '#ff2d55', prize: 'jackpot', points: 100, title: '🎰 JACKPOT — 100 Points!', message: 'You hit the jackpot! 100 loyalty points were added.', sectorIndex: 11, weight: 0.1, jackpot: true },
 ];
 
-// Scratch card outcomes (server decides the prize under the foil).
+// Scratch card outcomes (server decides what's under the foil). Mostly a miss,
+// small points, rare coupons, very rare jackpot.
 const SCRATCH_OUTCOMES = [
-  { prize: 'lose', label: 'NO LUCK', title: 'Better Luck Tomorrow!', message: 'No discount today. Scratch again tomorrow!', weight: { Visitor: 45, Bronze: 30, Silver: 20, Gold: 12 } },
-  { prize: 'fixed20', type: 'fixed', value: 20, minPurchase: 200, label: 'KES 20 OFF', title: 'KES 20 Discount Unlocked!', message: 'You won KES 20 off! Valid on orders over KES 200.', weight: { Visitor: 0, Bronze: 20, Silver: 25, Gold: 25 } },
-  { prize: 'pct5', type: 'percent', value: 5, minPurchase: 300, label: '5% OFF', title: '5% Off Your Order', message: 'You won 5% off! Valid on orders over KES 300.', weight: { Visitor: 0, Bronze: 15, Silver: 15, Gold: 15 } },
-  { prize: 'fixed50', type: 'fixed', value: 50, minPurchase: 500, label: 'KES 50 OFF', title: 'KES 50 Discount Unlocked!', message: 'You won KES 50 off! Valid on orders over KES 500.', weight: { Visitor: 0, Bronze: 15, Silver: 20, Gold: 22 } },
-  { prize: 'delivery', type: 'free_delivery', value: 0, minPurchase: 300, label: 'FREE DELIVERY', title: 'Free Delivery Unlocked!', message: 'You won free delivery on your next order (over KES 300).', weight: { Visitor: 0, Bronze: 5, Silver: 10, Gold: 16 } },
-  { prize: 'points30', points: 30, label: '30 POINTS', title: '30 Loyalty Points!', message: 'You won 30 loyalty points — they were added to your account.', weight: { Visitor: 25, Bronze: 15, Silver: 10, Gold: 10 } },
+  { prize: 'lose', label: 'TRY AGAIN', title: 'Better Luck Tomorrow!', message: 'No prize this time — scratch again in 48h.', weight: 64 },
+  { prize: 'points1', points: 1, title: '1 Loyalty Point!', message: 'You won 1 loyalty point!', weight: 10 },
+  { prize: 'points2', points: 2, title: '2 Loyalty Points!', message: 'You won 2 loyalty points!', weight: 8 },
+  { prize: 'points3', points: 3, title: '3 Loyalty Points!', message: 'You won 3 loyalty points!', weight: 6 },
+  { prize: 'points4', points: 4, title: '4 Loyalty Points!', message: 'You won 4 loyalty points!', weight: 5 },
+  { prize: 'points5', points: 5, title: '5 Loyalty Points!', message: 'You won 5 loyalty points!', weight: 3 },
+  { prize: 'fixed50', type: 'fixed', value: 50, minPurchase: 300, title: 'KES 50 Discount Unlocked!', message: 'You won KES 50 off! Valid on orders over KES 300.', weight: 1.5 },
+  { prize: 'fixed100', type: 'fixed', value: 100, minPurchase: 500, title: 'KES 100 Discount Unlocked!', message: 'You won KES 100 off! Valid on orders over KES 500.', weight: 1 },
+  { prize: 'delivery', type: 'free_delivery', value: 0, minPurchase: 300, title: 'Free Delivery Unlocked!', message: 'You won free delivery on your next order (over KES 300).', weight: 1 },
+  { prize: 'jackpot', points: 100, title: '🎰 JACKPOT — 100 Points!', message: 'Jackpot! 100 loyalty points were added.', weight: 0.5, jackpot: true },
 ];
 
-function pickWeighted(list, tier) {
+function pickWeighted(list, tier, jackpotEnabled = true) {
+  // Higher tiers get slightly better odds: the two "nothing" outcomes shrink
+  // and the weight is gifted to small-point outcomes (never increases the
+  // normal point earning rate). Jackpots can be switched off in settings.
+  const shift = tier === 'Platinum' ? 10 : tier === 'Gold' ? 6 : tier === 'Silver' ? 3 : 0;
   const weighted = list
-    .map((item, index) => ({ item, index, w: (item.weight && item.weight[tier]) || 0 }))
+    .map((item) => {
+      let w = item.weight || 0;
+      if (item.jackpot && !jackpotEnabled) w = 0;
+      else if ((item.prize === 'again' || item.prize === 'lose') && shift > 0) w = Math.max(0, w - shift);
+      else if (item.points && !item.jackpot && shift > 0) w = w + shift / 3;
+      return { item, w };
+    })
     .filter(x => x.w > 0);
   const total = weighted.reduce((s, x) => s + x.w, 0);
   if (!total) return list[0];
   let roll = Math.random() * total;
   for (const x of weighted) {
     roll -= x.w;
-    if (roll <= 0) return { ...x.item, sectorIndex: x.index };
+    if (roll <= 0) return x.item;
   }
   return weighted[weighted.length - 1].item;
 }
@@ -1598,9 +1816,10 @@ async function addLoyaltyPoints(phone, points) {
   try {
     const existing = await loyalty_.findOne({ phone });
     if (existing) {
-      await loyalty_.updateOne({ phone }, { $set: { points: (existing.points || 0) + points, updatedAt: new Date() } });
+      const newPoints = (existing.points || 0) + points;
+      await loyalty_.updateOne({ phone }, { $set: { points: newPoints, tier: tierFromPoints(newPoints), updatedAt: new Date() } });
     } else {
-      await loyalty_.insertOne({ phone, customerName: '', totalSpent: 0, points, tier: 'Bronze', createdAt: new Date(), updatedAt: new Date() });
+      await loyalty_.insertOne({ phone, customerName: '', totalSpent: 0, points, tier: tierFromPoints(points), createdAt: new Date(), updatedAt: new Date() });
     }
   } catch (e) { console.error('Failed to add loyalty points:', e); }
 }
@@ -1627,30 +1846,52 @@ async function issueVoucher({ phone, type, value, minPurchase, prefix }) {
 async function runPromo({ phone, name, type }) {
   const phoneClean = String(phone || '').replace(/[^0-9]/g, '');
   if (!phoneClean) return { success: false, error: 'Phone required' };
+  const s = await getLoyaltySettings();
+  const cooldownHours = type === 'spin' ? (s.spinCooldownHours || 24) : (s.scratchCooldownHours || 48);
+  const cooldownMs = cooldownHours * 3600 * 1000;
   const day = promoDayKey();
-  const claimed = await promo_claims_.findOne({ phone: phoneClean, type, day });
+
+  // Rolling cooldown window (24h spin / 48h scratch) — not calendar days.
+  const claimed = await promo_claims_.findOne({ phone: phoneClean, type, at: { $gt: new Date(Date.now() - cooldownMs) } });
   if (claimed) {
+    const nextAt = new Date(new Date(claimed.at).getTime() + cooldownMs);
     return {
-      success: false, alreadyUsed: true, day,
+      success: false, alreadyUsed: true, day, nextAt,
       tier: claimed.tier || 'Bronze',
       prizeName: claimed.prizeName || 'again',
-      title: claimed.title || '', message: claimed.message || 'Already claimed today — come back tomorrow!',
+      title: claimed.title || '', message: claimed.message || `Already claimed — come back in ${cooldownHours}h!`,
       code: claimed.code || '', pointsAdded: claimed.pointsAdded || 0,
       sectorIndex: claimed.sectorIndex !== undefined ? claimed.sectorIndex : 1
     };
   }
 
+  // Anti-abuse gate: at least two completed (non-cancelled) orders required.
   const orders = await orders_.find({ customerId: phoneClean }).toArray();
-  const active = orders.filter(o => o.status !== 'cancelled');
-  const totalSpent = active.reduce((s, o) => s + (o.totalPrice || 0), 0);
-  const tier = customerTier(active.length, totalSpent);
+  const completed = orders.filter(o => o.status !== 'cancelled');
+  if (completed.length < (s.minOrdersForPromo || 2)) {
+    return {
+      success: false,
+      error: type === 'spin' ? 'Complete two purchases to unlock Lucky Spin.' : 'Complete two purchases to unlock the Scratch Card.',
+      orderCount: completed.length, minOrders: s.minOrdersForPromo || 2
+    };
+  }
 
-  const picked = type === 'spin' ? pickWeighted(WHEEL_SECTORS, tier) : pickWeighted(SCRATCH_OUTCOMES, tier);
+  const loyalty = await loyalty_.findOne({ phone: phoneClean });
+  const tier = tierFromPoints(loyalty ? loyalty.points : 0);
+
+  // Build the outcome table from the owner-editable settings weights.
+  const table = type === 'spin' ? WHEEL_SECTORS : SCRATCH_OUTCOMES;
+  const weightList = type === 'spin' ? (s.spinWeights || []) : (s.scratchWeights || []);
+  const list = table.map(o => {
+    const w = (weightList.find(x => x && x.prize === o.prize) || {}).weight;
+    return { ...o, weight: typeof w === 'number' ? w : o.weight };
+  });
+  const picked = pickWeighted(list, tier, s.jackpotEnabled !== false);
   let code = '', pointsAdded = 0;
   let title = picked.title || '', message = picked.message || '';
 
   if (picked.prize === 'again' || picked.prize === 'lose') {
-    if (tier === 'Visitor') message = message + ' Start shopping to unlock real discounts!';
+    // nothing — intentionally. Most players should win nothing or very little.
   } else if (picked.points) {
     pointsAdded = picked.points;
     await addLoyaltyPoints(phoneClean, pointsAdded);
@@ -1660,7 +1901,7 @@ async function runPromo({ phone, name, type }) {
 
   try {
     await promo_claims_.insertOne({
-      phone: phoneClean, name: (name || '').trim(), type, day, tier,
+      phone: phoneClean, name: (name || '').trim(), type, day, tier, at: new Date(),
       prizeName: picked.prize, title, message, code, pointsAdded,
       sectorIndex: picked.sectorIndex !== undefined ? picked.sectorIndex : null,
       createdAt: new Date()
@@ -1695,23 +1936,31 @@ app.get('/api/promos/status/:phone', async (req, res) => {
   try {
     const phone = String(req.params.phone || '').replace(/[^0-9]/g, '');
     const day = promoDayKey();
+    const s = await getLoyaltySettings();
+    const spinCooldownMs = (s.spinCooldownHours || 24) * 3600 * 1000;
+    const scratchCooldownMs = (s.scratchCooldownHours || 48) * 3600 * 1000;
     const [spin, scratch, orders, loyalty] = await Promise.all([
-      promo_claims_.findOne({ phone, type: 'spin', day }),
-      promo_claims_.findOne({ phone, type: 'scratch', day }),
+      promo_claims_.findOne({ phone, type: 'spin', at: { $gt: new Date(Date.now() - spinCooldownMs) } }),
+      promo_claims_.findOne({ phone, type: 'scratch', at: { $gt: new Date(Date.now() - scratchCooldownMs) } }),
       orders_.find({ customerId: phone }).toArray(),
       loyalty_.findOne({ phone })
     ]);
-    const active = orders.filter(o => o.status !== 'cancelled');
-    const totalSpent = active.reduce((s, o) => s + (o.totalPrice || 0), 0);
-    const tier = customerTier(active.length, totalSpent);
+    const completed = orders.filter(o => o.status !== 'cancelled');
+    const totalSpent = completed.reduce((s, o) => s + (o.totalPrice || 0), 0);
+    const minOrders = s.minOrdersForPromo || 2;
+    const tier = tierFromPoints(loyalty ? loyalty.points : 0);
+    const spinInfo = spin ? { used: true, day, at: spin.at, nextAt: new Date(new Date(spin.at).getTime() + spinCooldownMs), prizeName: spin.prizeName, code: spin.code || '', title: spin.title || '', message: spin.message || '' } : { used: false, day };
+    const scratchInfo = scratch ? { used: true, day, at: scratch.at, nextAt: new Date(new Date(scratch.at).getTime() + scratchCooldownMs), prizeName: scratch.prizeName, code: scratch.code || '', title: scratch.title || '', message: scratch.message || '' } : { used: false, day };
     res.json({
       phone,
       tier,
       loyaltyPoints: loyalty ? loyalty.points || 0 : 0,
-      orderCount: active.length,
+      orderCount: completed.length,
+      minOrders,
+      promosLocked: completed.length < minOrders,
       totalSpent: Math.round(totalSpent * 100) / 100,
-      spin: spin ? { used: true, day, prizeName: spin.prizeName, code: spin.code || '', title: spin.title || '', message: spin.message || '' } : { used: false, day },
-      scratch: scratch ? { used: true, day, prizeName: scratch.prizeName, code: scratch.code || '', title: scratch.title || '', message: scratch.message || '' } : { used: false, day }
+      spin: spinInfo,
+      scratch: scratchInfo
     });
   } catch (e) { console.error('Promo status failed:', e); res.status(500).json({ error: 'Failed' }); }
 });
@@ -2258,18 +2507,23 @@ app.post('/api/mpesa/query', async (req, res) => {
 // Seed default loyalty rewards if collection is empty
 const seedRewards = async () => {
   try {
-    if (loyalty_rewards_) {
-      const count = await loyalty_rewards_.countDocuments();
-      if (count === 0) {
-        await loyalty_rewards_.insertMany([
-          { name: 'KES 100 Discount Coupon', pointsCost: 100, rewardType: 'coupon', rewardValue: 100, active: true },
-          { name: 'KES 250 Discount Coupon', pointsCost: 200, rewardType: 'coupon', rewardValue: 250, active: true },
-          { name: 'KES 750 Discount Coupon', pointsCost: 500, rewardType: 'coupon', rewardValue: 750, active: true },
-          { name: 'Free Blitz Drink (In-Store)', pointsCost: 50, rewardType: 'gift', rewardValue: 0, active: true }
-        ]);
-        console.log('✅ Seeded default loyalty rewards');
-      }
+    if (!loyalty_rewards_) return;
+    // Upsert (not insert-if-empty) so existing databases get the new tier
+    // table: 100→KES100, 250→KES250, 500→KES600, 1000→KES1300.
+    const tiers = [
+      { name: 'KES 100 Discount Coupon', pointsCost: 100, rewardType: 'coupon', rewardValue: 100, active: true },
+      { name: 'KES 250 Discount Coupon', pointsCost: 250, rewardType: 'coupon', rewardValue: 250, active: true },
+      { name: 'KES 600 Discount Coupon', pointsCost: 500, rewardType: 'coupon', rewardValue: 600, active: true },
+      { name: 'KES 1300 Discount Coupon', pointsCost: 1000, rewardType: 'coupon', rewardValue: 1300, active: true }
+    ];
+    for (const t of tiers) {
+      await loyalty_rewards_.updateOne({ pointsCost: t.pointsCost }, { $set: t }, { upsert: true });
     }
+    // Deactivate legacy rewards that aren't in the new tier table (old
+    // 'KES 250 @ 200 pts', 'KES 750 @ 500', 'Free Blitz Drink @ 50'...) so the
+    // customer store never shows stale, misleading or sub-100-point offers.
+    await loyalty_rewards_.updateMany({ pointsCost: { $nin: [100, 250, 500, 1000] } }, { $set: { active: false } });
+    console.log('✅ Seeded default loyalty rewards');
   } catch (err) {
     console.error('Failed to seed loyalty rewards:', err);
   }
@@ -3750,7 +4004,63 @@ async function sendToTokens(tokens, title, body, data = {}) {
   return { sent };
 }
 
+// ===== PC notification feed (Electron desktop toasts) =====
+// Real web push is unavailable inside Electron (no PushManager), so the desktop
+// app polls this small event feed and shows native Windows toasts. Events are
+// written alongside every FCM push (and for new orders) so the PC bridge works
+// even before FCM service-account credentials are configured.
+async function addFeedEvent({ audience, phone, title, body }) {
+  try {
+    if (!notifications_feed_) return;
+    const doc = {
+      audience, // 'admin' | 'customer' | 'all'
+      phone: phone ? String(phone).replace(/[^0-9]/g, '') : null,
+      title: String(title || 'BlitzMall'),
+      body: String(body || ''),
+      createdAt: new Date()
+    };
+    await notifications_feed_.insertOne(doc);
+    // Keep the feed small — anything older than 3 days is irrelevant to a poller.
+    try {
+      await notifications_feed_.deleteMany({ createdAt: { $lt: new Date(Date.now() - 3 * 24 * 3600 * 1000) } });
+    } catch (e) {}
+  } catch (e) { console.error('addFeedEvent failed:', e.message); }
+}
+
+const feedLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60, // one poller every ~20s per device — plenty of headroom
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Polled by the Electron PC app (admin=1) — returns events newer than `since`.
+// Customers can also poll with their phone number to get their own updates.
+app.get('/api/notifications/feed', feedLimiter, async (req, res) => {
+  try {
+    let since = null;
+    if (req.query.since) { const d = new Date(String(req.query.since)); if (!isNaN(d.getTime())) since = d; }
+    const phone = req.query.phone ? String(req.query.phone).replace(/[^0-9]/g, '') : null;
+    const wantAdmin = req.query.admin === '1';
+    if (!phone && !wantAdmin) return res.status(400).json({ error: 'Provide phone or admin=1' });
+    const q = { createdAt: { $gt: since || new Date(Date.now() - 7 * 24 * 3600 * 1000) } };
+    if (wantAdmin) q.audience = { $in: ['admin', 'all'] };
+    else q.$or = [{ phone }, { audience: 'all' }];
+    const items = await notifications_feed_.find(q).sort({ createdAt: 1 }).limit(100).toArray();
+    res.json(items.map(d => ({
+      id: String(d._id), title: d.title, body: d.body,
+      audience: d.audience, phone: d.phone || null, createdAt: d.createdAt
+    })));
+  } catch (e) {
+    console.error('notifications/feed error:', e);
+    res.status(500).json({ error: 'Failed to load feed' });
+  }
+});
+
 async function sendPushToPhone(phone, title, body, data = {}) {
+  // The PC feed gets the event regardless of FCM setup (fire-and-forget —
+  // addFeedEvent catches its own errors).
+  if (phone) addFeedEvent({ audience: 'customer', phone, title, body });
   if (!phone || !fcmConfigured()) return { sent: 0, skipped: 1 };
   try {
     const tokens = await notification_tokens_.find({ phone }).toArray();
@@ -3761,6 +4071,7 @@ async function sendPushToPhone(phone, title, body, data = {}) {
 }
 
 async function sendPushToAll(title, body, data = {}) {
+  await addFeedEvent({ audience: 'all', title, body });
   if (!fcmConfigured()) return { sent: 0, skipped: 1 };
   try {
     const all = await notification_tokens_.find().toArray();
@@ -3835,4 +4146,4 @@ app.use((err, req, res, next) => {
 });
 const PORT = process.env.PORT || 5000;
 
-module.exports = { app, connectDb, client, _test: { customerTier, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey } };
+module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS } };

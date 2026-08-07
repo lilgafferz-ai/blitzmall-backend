@@ -429,6 +429,11 @@ function Admin() {
   const [loyaltyPhone, setLoyaltyPhone] = useState('');
   const [loyaltyData, setLoyaltyData] = useState(null);
   const [loyaltyMembers, setLoyaltyMembers] = useState([]);
+  const [loyaltySettings, setLoyaltySettings] = useState(null);
+  const [loyaltyStats, setLoyaltyStats] = useState(null);
+  const [manualPhone, setManualPhone] = useState('');
+  const [manualAmt, setManualAmt] = useState('');
+  const [manualReason, setManualReason] = useState('');
   const [coupons, setCoupons] = useState([]);
   const [couponCode, setCouponCode] = useState('');
   const [couponType, setCouponType] = useState('percent');
@@ -955,6 +960,32 @@ const loadStockTransfers = async () => {
     catch (e) { console.error(e); } finally { setPredLoading(false); }
   };
   const loadLoyaltyMembers = async () => { try { const r = await authGet(API_URL + '/admin/loyalty'); setLoyaltyMembers(asArray(await r.json())); } catch (e) { console.error(e); } };
+  const loadLoyaltySettings = async () => { try { const r = await authGet(API_URL + '/admin/loyalty/settings'); setLoyaltySettings(await r.json()); } catch (e) { console.error(e); } };
+  const loadLoyaltyStats = async () => { try { const r = await authGet(API_URL + '/admin/loyalty/stats'); setLoyaltyStats(await r.json()); } catch (e) { console.error(e); } };
+  const saveLoyaltySettings = async () => {
+    if (!loyaltySettings) return;
+    try {
+      const r = await authPut(API_URL + '/admin/loyalty/settings', {
+        earnRate: parseFloat(loyaltySettings.earnRate) || 200,
+        jackpotEnabled: !!loyaltySettings.jackpotEnabled,
+        spinCooldownHours: parseFloat(loyaltySettings.spinCooldownHours) || 24,
+        scratchCooldownHours: parseFloat(loyaltySettings.scratchCooldownHours) || 48,
+        minOrdersForPromo: parseInt(loyaltySettings.minOrdersForPromo, 10) || 2,
+        tierThresholds: loyaltySettings.tierThresholds || { silver: 200, gold: 600, platinum: 1500 },
+        seasonalEvents: Array.isArray(loyaltySettings.seasonalEvents) ? loyaltySettings.seasonalEvents : []
+      });
+      const d = await r.json();
+      if (d.success) { alert('✅ Loyalty settings saved'); loadLoyaltySettings(); } else alert(d.error || 'Save failed');
+    } catch (e) { console.error(e); alert('Failed to save settings'); }
+  };
+  const applyManualPoints = async () => {
+    if (!manualPhone.trim() || manualAmt === '') return;
+    try {
+      const r = await authPost(API_URL + '/admin/loyalty/manual-points', { phone: manualPhone.trim(), points: parseInt(manualAmt, 10), reason: manualReason.trim() });
+      const d = await r.json();
+      if (d.success) { alert('✅ Points adjusted — balance is now ' + d.points + ' pts'); setManualPhone(''); setManualAmt(''); setManualReason(''); loadLoyaltyMembers(); loadLoyaltyStats(); } else alert(d.error || 'Failed');
+    } catch (e) { console.error(e); alert('Failed'); }
+  };
   const loadCoupons = async () => { try { const r = await authGet(API_URL + '/admin/coupons'); setCoupons(asArray(await r.json())); } catch (e) { console.error(e); } };
   const lookupLoyalty = async () => {
     if (!loyaltyPhone.trim()) return;
@@ -965,10 +996,9 @@ const loadStockTransfers = async () => {
   };
   const redeemPoints = async () => {
     if (!loyaltyData || !loyaltyData.exists || loyaltyData.points < 100) { alert('Customer needs at least 100 points to redeem'); return; }
-    const pts = parseInt(prompt('How many points to redeem? (100 pts = KES 500 cashback, available: ' + loyaltyData.points + ')', Math.min(loyaltyData.points, 100)), 10);
-    if (!pts || pts < 100) return;
+    if (!window.confirm('Redeem the best reward this balance covers?\n100 pts = KES 100 · 250 pts = KES 250 · 500 pts = KES 600 · 1000 pts = KES 1300\nAvailable: ' + loyaltyData.points + ' pts')) return;
     try {
-      const r = await authPost(API_URL + '/admin/loyalty/redeem', { phone: loyaltyData.phone, points: pts });
+      const r = await authPost(API_URL + '/admin/loyalty/redeem', { phone: loyaltyData.phone });
       const d = await r.json();
       if (d.success) { alert(d.message); lookupLoyalty(); } else alert(d.error || 'Redeem failed');
     } catch (e) { console.error(e); }
@@ -1084,7 +1114,7 @@ const loadStockTransfers = async () => {
     else if (tab === 'reviews') loadReviews();
     else if (tab === 'banners') loadBanners();
     else if (tab === 'staff') { loadStaff(); if (user?.role === 'owner') { loadUsers(); loadBranches(); loadShiftsList(); loadAuditLogs(); } }
-    else if (tab === 'loyalty') { loadLoyaltyMembers(); loadCoupons(); }
+    else if (tab === 'loyalty') { loadLoyaltyMembers(); loadCoupons(); loadLoyaltySettings(); loadLoyaltyStats(); }
     else if (tab === 'branches' && (!user || user.role === 'owner')) loadBranches();
     else if (tab === 'wipe' && user?.role === 'owner') loadRecordCounts();
     else if (tab === 'inventory') { loadProducts(); loadCategories(); loadPricingRules(); loadStockTransfers(); }
@@ -2930,7 +2960,7 @@ ${div}
       {safeTab === "loyalty" && (
         <div className="blitz-admin-body">
           <h2>🎁 Loyalty & Rewards</h2>
-          <p className="blitz-admin-muted" style={{marginBottom:16}}>Customers earn 1 point per KES 100 spent. 100 points = KES 500 cashback. Tiers: Bronze (0), Silver (25K+), Gold (100K+), Platinum (500K+).</p>
+          <p className="blitz-admin-muted" style={{marginBottom:16}}>1 point per KES 200 spent (paid, completed orders only). 100 pts = KES 100 · 250 pts = KES 250 · 500 pts = KES 600 · 1000 pts = KES 1300. Tiers by points: Bronze 0-199 · Silver 200-599 · Gold 600-1499 · Platinum 1500+. Spin/Scratch need 2 completed orders.</p>
 
           {/* Customer Lookup */}
           <div style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:'16px',marginBottom:16}}>
@@ -2956,7 +2986,7 @@ ${div}
                     <b style={{fontSize:'1.3rem',color:'var(--gold)'}}>{loyaltyData.points} pts</b>
                   </div>
                   <div style={{marginTop:8,fontSize:'.85rem',color:'var(--muted)'}}>Total spent: {money(loyaltyData.totalSpent)}</div>
-                  <div style={{marginTop:8,fontSize:'.85rem'}}>Cashback value: <b style={{color:'var(--green)'}}>{money(loyaltyData.points * 5)}</b></div>
+                  <div style={{marginTop:8,fontSize:'.85rem'}}>Redeemable for: <b style={{color:'var(--green)'}}>{loyaltyData.points >= 1000 ? 'KES 1300 coupon' : loyaltyData.points >= 500 ? 'KES 600 coupon' : loyaltyData.points >= 250 ? 'KES 250 coupon' : loyaltyData.points >= 100 ? 'KES 100 coupon' : '— need 100+ pts'}</b></div>
                   <button className="blitz-admin-btn small" style={{marginTop:10}} onClick={redeemPoints}>🎯 Redeem Points</button>
                 </div>
               ) : (
@@ -3007,6 +3037,143 @@ ${div}
               </div>
             )}
           </div>
+
+          {/* Loyalty Controls — owner/manager tune the economics without code */}
+          <div style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:16,marginBottom:16}}>
+            <h3 style={{fontSize:'.95rem',marginBottom:10}}>⚙️ Loyalty Controls</h3>
+            {loyaltySettings ? (
+              <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+                  <label style={{fontSize:'.78rem',color:'var(--muted)'}}>KES per point (earn rate)
+                    <input type="number" value={loyaltySettings.earnRate} onChange={e => setLoyaltySettings(s => ({ ...s, earnRate: e.target.value }))} />
+                  </label>
+                  <label style={{fontSize:'.78rem',color:'var(--muted)'}}>Min orders for Spin/Scratch
+                    <input type="number" value={loyaltySettings.minOrdersForPromo} onChange={e => setLoyaltySettings(s => ({ ...s, minOrdersForPromo: e.target.value }))} />
+                  </label>
+                  <label style={{fontSize:'.78rem',color:'var(--muted)'}}>Spin cooldown (hours)
+                    <input type="number" value={loyaltySettings.spinCooldownHours} onChange={e => setLoyaltySettings(s => ({ ...s, spinCooldownHours: e.target.value }))} />
+                  </label>
+                  <label style={{fontSize:'.78rem',color:'var(--muted)'}}>Scratch cooldown (hours)
+                    <input type="number" value={loyaltySettings.scratchCooldownHours} onChange={e => setLoyaltySettings(s => ({ ...s, scratchCooldownHours: e.target.value }))} />
+                  </label>
+                </div>
+                <label style={{fontSize:'.82rem',display:'flex',alignItems:'center',gap:8,cursor:'pointer'}}>
+                  <input type="checkbox" checked={!!loyaltySettings.jackpotEnabled} onChange={e => setLoyaltySettings(s => ({ ...s, jackpotEnabled: e.target.checked }))} />
+                  Enable jackpots (100-pt wheel/scratch prizes)
+                </label>
+
+                <div style={{borderTop:'1px solid var(--line)',paddingTop:10}}>
+                  <h4 style={{fontSize:'.85rem',color:'var(--muted)',marginBottom:8}}>Tier thresholds (points)</h4>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
+                    <label style={{fontSize:'.75rem',color:'var(--muted)'}}>Silver ≥
+                      <input type="number" value={loyaltySettings.tierThresholds?.silver} onChange={e => setLoyaltySettings(s => ({ ...s, tierThresholds: { ...(s.tierThresholds || {}), silver: e.target.value } }))} />
+                    </label>
+                    <label style={{fontSize:'.75rem',color:'var(--muted)'}}>Gold ≥
+                      <input type="number" value={loyaltySettings.tierThresholds?.gold} onChange={e => setLoyaltySettings(s => ({ ...s, tierThresholds: { ...(s.tierThresholds || {}), gold: e.target.value } }))} />
+                    </label>
+                    <label style={{fontSize:'.75rem',color:'var(--muted)'}}>Platinum ≥
+                      <input type="number" value={loyaltySettings.tierThresholds?.platinum} onChange={e => setLoyaltySettings(s => ({ ...s, tierThresholds: { ...(s.tierThresholds || {}), platinum: e.target.value } }))} />
+                    </label>
+                  </div>
+                </div>
+
+                <div style={{borderTop:'1px solid var(--line)',paddingTop:10}}>
+                  <h4 style={{fontSize:'.85rem',color:'var(--muted)',marginBottom:8}}>Seasonal events (bonus point multiplier)</h4>
+                  {(loyaltySettings.seasonalEvents || []).map((ev, idx) => (
+                    <div key={idx} style={{display:'flex',gap:8,alignItems:'center',marginBottom:6}}>
+                      <input value={ev.name || ''} placeholder="Event name" style={{flex:1}} onChange={e => setLoyaltySettings(s => { const evs = [...(s.seasonalEvents || [])]; evs[idx] = { ...evs[idx], name: e.target.value }; return { ...s, seasonalEvents: evs }; })} />
+                      <input type="number" step="0.1" min="1" value={ev.pointsMultiplier || 1} placeholder="x2" style={{width:70}} onChange={e => setLoyaltySettings(s => { const evs = [...(s.seasonalEvents || [])]; evs[idx] = { ...evs[idx], pointsMultiplier: e.target.value }; return { ...s, seasonalEvents: evs }; })} />
+                      <label style={{fontSize:'.75rem',display:'flex',alignItems:'center',gap:4}}><input type="checkbox" checked={!!ev.active} onChange={e => setLoyaltySettings(s => { const evs = [...(s.seasonalEvents || [])]; evs[idx] = { ...evs[idx], active: e.target.checked }; return { ...s, seasonalEvents: evs }; })} />on</label>
+                      <button className="pos-void" onClick={() => setLoyaltySettings(s => ({ ...s, seasonalEvents: (s.seasonalEvents || []).filter((_, i) => i !== idx) }))}>✕</button>
+                    </div>
+                  ))}
+                  <button className="blitz-admin-btn small" onClick={() => setLoyaltySettings(s => ({ ...s, seasonalEvents: [...(s.seasonalEvents || []), { name: '', pointsMultiplier: 2, active: true }] }))}>+ Add event</button>
+                </div>
+
+                <div style={{borderTop:'1px solid var(--line)',paddingTop:10}}>
+                  <h4 style={{fontSize:'.85rem',color:'var(--muted)',marginBottom:4}}>🎡 Spin wheel odds (out of 100)</h4>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6}}>
+                    {(loyaltySettings.spinWeights || []).map((w, idx) => (
+                      <label key={w.prize} style={{fontSize:'.7rem',color:'var(--muted)'}}>{w.prize.replace(/_/g,' ')}
+                        <input type="number" step="0.1" min="0" value={w.weight} onChange={e => setLoyaltySettings(s => { const ws = [...(s.spinWeights || [])]; ws[idx] = { ...ws[idx], weight: parseFloat(e.target.value) || 0 }; return { ...s, spinWeights: ws }; })} />
+                      </label>
+                    ))}
+                  </div>
+                  <h4 style={{fontSize:'.85rem',color:'var(--muted)',margin:'10px 0 4px'}}>🎫 Scratch odds (out of 100)</h4>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6}}>
+                    {(loyaltySettings.scratchWeights || []).map((w, idx) => (
+                      <label key={w.prize} style={{fontSize:'.7rem',color:'var(--muted)'}}>{w.prize.replace(/_/g,' ')}
+                        <input type="number" step="0.1" min="0" value={w.weight} onChange={e => setLoyaltySettings(s => { const ws = [...(s.scratchWeights || [])]; ws[idx] = { ...ws[idx], weight: parseFloat(e.target.value) || 0 }; return { ...s, scratchWeights: ws }; })} />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <button className="blitz-admin-btn small" style={{alignSelf:'flex-start'}} onClick={saveLoyaltySettings}>💾 Save Settings</button>
+              </div>
+            ) : <p className="blitz-admin-muted">Loading settings…</p>}
+
+            <div style={{borderTop:'1px solid var(--line)',marginTop:14,paddingTop:14}}>
+              <h4 style={{fontSize:'.85rem',marginBottom:8,color:'var(--muted)'}}>✏️ Manual points (bonus or claw-back)</h4>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
+                <input type="tel" value={manualPhone} onChange={e => setManualPhone(e.target.value)} placeholder="Phone" />
+                <input type="number" value={manualAmt} onChange={e => setManualAmt(e.target.value)} placeholder="+/- points" />
+              </div>
+              <div style={{display:'flex',gap:8,marginTop:8}}>
+                <input value={manualReason} onChange={e => setManualReason(e.target.value)} placeholder="Reason (e.g. fraud, birthday bonus, event)" style={{flex:1}} />
+                <button className="blitz-admin-btn small" onClick={applyManualPoints}>Apply</button>
+              </div>
+            </div>
+          </div>
+
+          {/* Loyalty Economics — reward cost vs sales, LTV */}
+          {loyaltyStats && (
+            <div style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:16,marginBottom:16}}>
+              <h3 style={{fontSize:'.95rem',marginBottom:10}}>📊 Loyalty Economics (30 days)</h3>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(130px,1fr))',gap:10}}>
+                <div style={{background:'var(--bg-2)',borderRadius:12,padding:12}}>
+                  <div style={{fontSize:'.72rem',color:'var(--muted)'}}>Members</div>
+                  <b>{loyaltyStats.memberCount}</b>
+                </div>
+                <div style={{background:'var(--bg-2)',borderRadius:12,padding:12}}>
+                  <div style={{fontSize:'.72rem',color:'var(--muted)'}}>Points outstanding</div>
+                  <b>{loyaltyStats.totalPointsOut}</b>
+                </div>
+                <div style={{background:'var(--bg-2)',borderRadius:12,padding:12}}>
+                  <div style={{fontSize:'.72rem',color:'var(--muted)'}}>Reward cost (30d)</div>
+                  <b style={{color:'var(--orange)'}}>{money(loyaltyStats.rewardCost30d)}</b>
+                </div>
+                <div style={{background:'var(--bg-2)',borderRadius:12,padding:12}}>
+                  <div style={{fontSize:'.72rem',color:'var(--muted)'}}>Sales (30d)</div>
+                  <b style={{color:'var(--green)'}}>{money(loyaltyStats.salesRevenue30d)}</b>
+                </div>
+                <div style={{background:'var(--bg-2)',borderRadius:12,padding:12}}>
+                  <div style={{fontSize:'.72rem',color:'var(--muted)'}}>Cost % of sales</div>
+                  <b style={{color: loyaltyStats.rewardCostPct < 2 ? 'var(--green)' : 'var(--red, #ff5252)'}}>{loyaltyStats.rewardCostPct}%</b>
+                </div>
+                <div style={{background:'var(--bg-2)',borderRadius:12,padding:12}}>
+                  <div style={{fontSize:'.72rem',color:'var(--muted)'}}>Redemptions (30d)</div>
+                  <b>{loyaltyStats.redemptionCount30d}</b>
+                </div>
+              </div>
+              {loyaltyStats.topCustomers && loyaltyStats.topCustomers.length > 0 && (
+                <div style={{marginTop:12}}>
+                  <h4 style={{fontSize:'.85rem',color:'var(--muted)',marginBottom:8}}>🏆 Customer Lifetime Value (top 10 by spend)</h4>
+                  <div className="blitz-admin-list">
+                    {loyaltyStats.topCustomers.map((c, i) => (
+                      <div className="exp-row" key={c.phone}>
+                        <div><span style={{color:'var(--gold)',marginRight:8}}>#{i+1}</span><b>{c.name || c.phone}</b><span className="blitz-admin-muted"> · {c.phone} · {c.tier}</span></div>
+                        <div style={{display:'flex',gap:10}}>
+                          <span style={{fontSize:'.8rem',color:'var(--muted)'}}>{money(c.totalSpent)} spent</span>
+                          <b style={{fontSize:'.85rem',color:'var(--gold)'}}>{c.points} pts</b>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Top Members */}
           {loyaltyMembers.length > 0 && (

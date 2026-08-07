@@ -88,6 +88,60 @@ app.whenReady().then(() => {
   });
 });
 
+// ===== Native notification bridge =====
+// Electron cannot do web push (no PushManager API), so the desktop app polls a
+// small event feed on the backend and shows native Windows toasts for shop
+// events (new orders, admin broadcasts). Polling — not a WebSocket — because
+// the Render server sleeps when idle; polling wakes it and survives sleep.
+const NOTIF_FEED_URL = 'https://blitzmall-backend.onrender.com/api/notifications/feed';
+let notifSince = null; // null => prime the cursor on the first poll (no backlog toasts)
+const shownNotifIds = new Set(); // in-session dedup so a failed cursor save can't re-toast
+
+const showNativeToast = (title, body) => {
+  try {
+    const { Notification } = require('electron');
+    if (Notification.isSupported()) {
+      new Notification({ title: String(title || 'BlitzMall'), body: String(body || ''), silent: false }).show();
+    }
+  } catch (e) { console.error('[notif] toast failed:', e && e.message); }
+};
+
+const pollNotifications = async () => {
+  try {
+    const statePath = path.join(app.getPath('userData'), 'notif-feed.json');
+    if (notifSince === null) {
+      // First poll: start from the saved cursor (if any), otherwise from now —
+      // never toast a backlog of events that happened while the app was closed.
+      try {
+        const st = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+        notifSince = (st && st.since) || new Date().toISOString();
+      } catch (e) { notifSince = new Date().toISOString(); }
+    }
+    const url = `${NOTIF_FEED_URL}?admin=1&since=${encodeURIComponent(notifSince)}`;
+    const r = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!r.ok) return;
+    const items = await r.json();
+    if (!Array.isArray(items) || !items.length) return;
+    let newest = notifSince;
+    for (const it of items) {
+      const ts = it && it.createdAt ? new Date(it.createdAt).toISOString() : null;
+      if (ts && ts > newest) newest = ts;
+      if (!it || it.audience === 'customer') continue; // customer pushes belong on phones
+      const key = it.id || `${it.title}|${it.body}|${it.createdAt}`;
+      if (shownNotifIds.has(key)) continue;
+      shownNotifIds.add(key);
+      showNativeToast(it.title, it.body);
+    }
+    if (newest !== notifSince) {
+      notifSince = newest;
+      try { fs.writeFileSync(statePath, JSON.stringify({ since: notifSince })); } catch (e) {}
+    }
+  } catch (e) { /* server asleep or offline — retry next tick */ }
+};
+setTimeout(pollNotifications, 15 * 1000);
+setInterval(pollNotifications, 20 * 1000);
+console.log('[notif] PC notification bridge active (polls every 20s)');
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
