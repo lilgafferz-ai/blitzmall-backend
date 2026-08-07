@@ -111,6 +111,24 @@ const WHEEL_SECTORS = [
 
 const TIER_LABELS = { Bronze: '🥉 Bronze Shopper', Silver: '🥈 Silver Shopper', Gold: '🥇 Gold Shopper', Platinum: '💎 Platinum Shopper' };
 
+// Redemption table — mirrors the server's redeemTiers defaults (100 pts → KES
+// 100, 250 → KES 250, 500 → KES 600, 1000 → KES 1300). The store redeems one
+// coupon per visit, so the card shows the biggest coupon the balance covers now.
+const REDEEM_TIERS = [
+  { points: 100, value: 100 },
+  { points: 250, value: 250 },
+  { points: 500, value: 600 },
+  { points: 1000, value: 1300 }
+];
+const bestRedeemValue = (pts, tiers) => {
+  const p = pts || 0;
+  // Use the owner's effective tiers from the server when available, else the
+  // defaults below — so the display stays correct after Admin retunes rates.
+  const list = (tiers && tiers.length ? tiers : REDEEM_TIERS).filter(t => t && p >= (t.points || 0));
+  const t = list.sort((a, b) => (b.points || 0) - (a.points || 0))[0];
+  return t ? t.value || 0 : 0;
+};
+
 // Screens that auto-redirect themselves (never recorded in the back stack).
 const TRANSIENT_SCREENS = ['splash', 'welcome'];
 
@@ -2162,6 +2180,9 @@ function App() {
           <Avatar profile={profile} size={88} />
           <h2>{profile?.name || customer?.name}</h2>
           <span className="muted">{profile?.phone || customer?.customerId}</span>
+          {custAccount?.isOwner && (
+            <span style={{ marginTop: 8, background: 'linear-gradient(135deg, #ffd24a, #ff7a1a)', color: '#000', fontWeight: 'bold', fontSize: '.7rem', padding: '4px 14px', borderRadius: 20, letterSpacing: '.5px', boxShadow: '0 4px 12px rgba(255, 178, 26, 0.45)' }}>👑 OWNER</span>
+          )}
         </div>
 
         {/* Choose an avatar — kept up top so it's the first thing you see */}
@@ -2192,12 +2213,12 @@ function App() {
                 <div style={{ fontFamily: 'Unbounded, sans-serif', fontSize: '1.5rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>{custLoyalty.points} PTS</div>
               </div>
               <div style={{ textAlign: 'right' }}>
-                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Est. Cashback</span>
-                <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {Math.round(custLoyalty.points * 5).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</div>
+                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Best coupon now</span>
+                <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {bestRedeemValue(custLoyalty.points, custAccount?.redeemTiers).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</div>
               </div>
             </div>
             <small style={{ display: 'block', marginTop: '10px', fontSize: '0.65rem', opacity: 0.7, borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: '6px' }}>
-              * 100 PTS = KES 500 cashback. Ask cashier to redeem at counter!
+              * Redeem at the counter: 100 PTS = KES 100 · 500 PTS = KES 600 · 1000 PTS = KES 1300
             </small>
           </div>
         )}

@@ -1721,9 +1721,15 @@ app.get('/api/customers/:phone', async (req, res) => {
     const loyalty = await loyalty_.findOne({ phone });
     const vouchers = await coupons_.find({ ownerPhone: phone, active: true }).toArray();
     const tier = loyalty ? tierFromPoints(loyalty.points) : 'Bronze';
+    // Effective redemption tiers (owner-tunable in Admin → Loyalty Controls) so
+    // the app's "best coupon" display always matches what the store redeems.
+    const loyaltySettings = await getLoyaltySettings();
+    const redeemTiers = (loyaltySettings && Array.isArray(loyaltySettings.redeemTiers)) ? loyaltySettings.redeemTiers : null;
     res.json({
       exists: !!cust || active.length > 0,
       phone,
+      isOwner: !!(cust && cust.isOwner),
+      redeemTiers,
       referralCode: phone,
       referralCount: cust ? cust.referralCount || 0 : 0,
       referredBy: cust ? cust.referredBy || null : null,
