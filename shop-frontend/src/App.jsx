@@ -153,6 +153,18 @@ function ScratchCard({ revealed, result, claiming, signedIn, onComplete, onNeedL
   const pressedRef = useRef(false);
   const doneRef = useRef(false);
   const lastCheckRef = useRef(0);
+  const stageRef = useRef(null);
+
+  // Prevent the page from scrolling while the user's finger is on the scratch
+  // card. CSS `touch-action: none` is unreliable on some mobile browsers, so we
+  // attach a non-passive touchmove listener that calls preventDefault().
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const prevent = (e) => { if (pressedRef.current) e.preventDefault(); };
+    el.addEventListener('touchmove', prevent, { passive: false });
+    return () => el.removeEventListener('touchmove', prevent);
+  });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -245,7 +257,7 @@ function ScratchCard({ revealed, result, claiming, signedIn, onComplete, onNeedL
   }
 
   return (
-    <div className="scratch-stage" onPointerDown={e => { pressedRef.current = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {} scratchAt(e.clientX, e.clientY); }} onPointerMove={e => { if (pressedRef.current) scratchAt(e.clientX, e.clientY); }} onPointerUp={() => { pressedRef.current = false; }} onPointerLeave={() => { pressedRef.current = false; }}>
+    <div ref={stageRef} className="scratch-stage" onPointerDown={e => { pressedRef.current = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {} scratchAt(e.clientX, e.clientY); }} onPointerMove={e => { if (pressedRef.current) scratchAt(e.clientX, e.clientY); }} onPointerUp={() => { pressedRef.current = false; }} onPointerLeave={() => { pressedRef.current = false; }}>
       <div className="scratch-under">
         <div className="scratch-emoji">🎁</div>
         <h4>Scratch & Win Daily!</h4>
@@ -483,6 +495,9 @@ function App() {
   const [couponInput, setCouponInput] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState(null);
   const [couponError, setCouponError] = useState('');
+  const [showWalletModal, setShowWalletModal] = useState(false);
+  const [pointsToConvert, setPointsToConvert] = useState('');
+  const [useWalletPayment, setUseWalletPayment] = useState(false);
   const [deliveryArea, setDeliveryArea] = useState('mall'); // 'mall' | 'standard'
   const [deliveryLocation, setDeliveryLocation] = useState('');
   const [gpsCoords, setGpsCoords] = useState(null);
@@ -1000,6 +1015,50 @@ function App() {
       .catch(() => {});
   }, [screen]);
 
+  const lastPollTimeRef = useRef(new Date().toISOString());
+
+  useEffect(() => {
+    if (!notifEnabled || !customer?.customerId) return;
+    
+    let active = true;
+    const pollInterval = setInterval(async () => {
+      if (!active) return;
+      try {
+        const r = await fetch(`${API_URL}/notifications/feed?phone=${customer.customerId}&since=${lastPollTimeRef.current}`);
+        const data = await r.json();
+        if (active && Array.isArray(data) && data.length > 0) {
+          data.forEach(item => {
+            showToast(`🔔 ${item.title} — ${item.body}`);
+            if (!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) && 'Notification' in window && Notification.permission === 'granted') {
+              try { new Notification(item.title, { body: item.body }); } catch (e) {}
+            }
+          });
+          const latest = data[data.length - 1];
+          if (latest && latest.createdAt) {
+            lastPollTimeRef.current = latest.createdAt;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to poll notifications feed:', e);
+      }
+    }, 8000);
+    
+    return () => {
+      active = false;
+      clearInterval(pollInterval);
+    };
+  }, [notifEnabled, customer?.customerId]);
+
+  useEffect(() => {
+    if (couponInput && !appliedCoupon && total > 0) {
+      const delayDebounce = setTimeout(() => {
+        validateCoupon();
+      }, 800);
+      return () => clearTimeout(delayDebounce);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [couponInput, total, appliedCoupon]);
+
   const loadMyOrders = async () => {
     try {
       const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
@@ -1164,6 +1223,39 @@ function App() {
     }
   };
 
+  const handleConvertToWallet = async () => {
+    const pts = parseInt(pointsToConvert, 10);
+    if (isNaN(pts) || pts <= 0) return;
+    if (pts > (custLoyalty?.points || 0)) {
+      alert('You do not have enough points!');
+      return;
+    }
+    if (pts % 2 !== 0) {
+      alert('Points must be converted in multiples of 2.');
+      return;
+    }
+
+    try {
+      const r = await fetch(`${API_URL}/loyalty/convert-to-wallet`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: customer?.customerId, points: pts })
+      });
+      const d = await r.json();
+      if (d.success) {
+        showToast(`💰 Converted ${pts} points to KES ${pts / 2} wallet cash!`);
+        setShowWalletModal(false);
+        setPointsToConvert('');
+        loadCustLoyalty();
+      } else {
+        alert(d.error || 'Failed to convert points');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Network error converting points');
+    }
+  };
+
   const pinGpsLocation = () => {
     if (!navigator.geolocation) {
       alert('Geolocation is not supported by your browser');
@@ -1315,7 +1407,11 @@ function App() {
     setIsSubmittingOrder(true);
     const finalFee = total >= 1500 || appliedCoupon?.type === 'free_delivery' || deliveryArea === 'mall' ? 0 : 150;
     const discountAmt = appliedCoupon ? appliedCoupon.discount : 0;
-    const finalTotal = Math.max(0, total + finalFee - discountAmt);
+    const walletBalance = custAccount?.walletBalance || 0;
+    const maxWalletApplicable = Math.min(walletBalance, Math.max(0, total + finalFee - discountAmt));
+    const appliedWalletAmt = useWalletPayment ? maxWalletApplicable : 0;
+    const finalTotal = Math.max(0, total + finalFee - discountAmt - appliedWalletAmt);
+
     const orderData = {
       customerId: customer.customerId,
       customerName: customer.name,
@@ -1326,13 +1422,14 @@ function App() {
       deliveryFee: finalFee,
       gpsCoords,
       couponCode: appliedCoupon ? appliedCoupon.code : null,
-      discount: discountAmt
+      discount: discountAmt,
+      useWallet: useWalletPayment
     };
     try {
       const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(orderData) });
       const d = await r.json();
       if (d.success) {
-        if (payMethod === 'mpesa') {
+        if (payMethod === 'mpesa' && finalTotal > 0) {
           // Trigger STK push
           setStkStatus('waiting');
           setStkError('');
@@ -1364,6 +1461,8 @@ function App() {
           setDeliveryLocation('');
           setGpsCoords(null);
           setGpsAddress('');
+          setUseWalletPayment(false);
+          loadCustLoyalty();
           setScreen('confirmation');
           triggerSimulatedNotifications();
         }
@@ -1382,9 +1481,13 @@ function App() {
         setDeliveryLocation('');
         setGpsCoords(null);
         setGpsAddress('');
+        setUseWalletPayment(false);
+        loadCustLoyalty();
         setScreen('confirmation');
         triggerSimulatedNotifications();
-      } catch (err) { console.error('Failed to queue order:', err); }
+      } catch (err) {
+        alert('Offline and failed to save order.');
+      }
     } finally {
       setIsSubmittingOrder(false);
     }
@@ -1408,47 +1511,75 @@ function App() {
     let error = '';
     try {
       if (isNativeApp) {
-        const { PushNotifications } = await import('@capacitor/push-notifications');
-        let perm = await PushNotifications.checkPermissions();
-        if (perm.receive === 'prompt') perm = await PushNotifications.requestPermissions();
-        if (perm.receive !== 'granted') error = 'denied';
-        else {
-          await PushNotifications.register();
-          token = await new Promise(resolve => {
-            const unsubs = [];
-            const finish = (t) => { try { unsubs.forEach(u => u.remove()); } catch (e) {} resolve(t); };
-            unsubs.push(PushNotifications.addListener('registration', (r) => finish(r && r.value)));
-            unsubs.push(PushNotifications.addListener('registrationError', () => finish(null)));
-            setTimeout(() => finish(null), 15000);
-          });
-          if (token && !pushListenerRef.current) {
-            pushListenerRef.current = await PushNotifications.addListener('pushNotificationReceived', (n) => {
-              if (n && n.notification) showToast(`${n.notification.title || 'BlitzMall'} — ${n.notification.body || ''}`);
+        try {
+          const { PushNotifications } = await import('@capacitor/push-notifications');
+          let perm = await PushNotifications.checkPermissions();
+          if (perm.receive === 'prompt') perm = await PushNotifications.requestPermissions();
+          if (perm.receive !== 'granted') error = 'denied';
+          else {
+            await PushNotifications.register();
+            token = await new Promise(resolve => {
+              const unsubs = [];
+              const finish = (t) => { try { unsubs.forEach(u => u.remove()); } catch (e) {} resolve(t); };
+              unsubs.push(PushNotifications.addListener('registration', (r) => finish(r && r.value)));
+              unsubs.push(PushNotifications.addListener('registrationError', () => finish(null)));
+              setTimeout(() => finish(null), 15000);
             });
+            if (token && !pushListenerRef.current) {
+              pushListenerRef.current = await PushNotifications.addListener('pushNotificationReceived', (n) => {
+                if (n && n.notification) showToast(`${n.notification.title || 'BlitzMall'} — ${n.notification.body || ''}`);
+              });
+            }
           }
+        } catch (nativeErr) {
+          console.warn('Native push plugin failed, using mock fallback:', nativeErr);
+          // Fallback: generate a mock token so the polling loop can take over
+          token = `MOCK_NATIVE_TOKEN_${customer.customerId}_${Date.now()}`;
+          error = 'mock_fallback';
         }
       } else {
-        const cfg = window.BLITZ_FIREBASE_CONFIG;
-        if (!cfg || !cfg.apiKey || !cfg.vapidKey) { error = 'not_configured'; }
-        else {
-          const { initializeApp, getApps } = await import('firebase/app');
-          const { getMessaging, getToken, onMessage } = await import('firebase/messaging');
-          if (!fcmWebApp) fcmWebApp = getApps().length ? getApps()[0] : initializeApp({ apiKey: cfg.apiKey, authDomain: cfg.authDomain, projectId: cfg.projectId, messagingSenderId: cfg.messagingSenderId, appId: cfg.appId }, 'blitzmallWeb');
-          const messaging = getMessaging(fcmWebApp);
+        // Request standard browser notifications permission
+        if ('Notification' in window && Notification.permission !== 'granted') {
           const perm = await Notification.requestPermission();
-          if (perm !== 'granted') error = 'denied';
-          else {
-            const reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
-            token = await getToken(messaging, { vapidKey: cfg.vapidKey, serviceWorkerRegistration: reg });
-            onMessage(messaging, (payload) => {
-              if (payload && payload.notification) showToast(`${payload.notification.title || 'BlitzMall'} — ${payload.notification.body || ''}`);
-            });
+          if (perm !== 'granted') {
+            error = 'denied';
+          }
+        }
+        
+        if (error !== 'denied') {
+          const cfg = window.BLITZ_FIREBASE_CONFIG;
+          if (!cfg || !cfg.apiKey || !cfg.vapidKey) {
+            // Fallback mock token for web if Firebase is not configured
+            token = `MOCK_WEB_TOKEN_${customer.customerId}_${Date.now()}`;
+            error = 'mock_fallback';
+          } else {
+            try {
+              const { initializeApp, getApps } = await import('firebase/app');
+              const { getMessaging, getToken, onMessage } = await import('firebase/messaging');
+              if (!fcmWebApp) fcmWebApp = getApps().length ? getApps()[0] : initializeApp({ apiKey: cfg.apiKey, authDomain: cfg.authDomain, projectId: cfg.projectId, messagingSenderId: cfg.messagingSenderId, appId: cfg.appId }, 'blitzmallWeb');
+              const messaging = getMessaging(fcmWebApp);
+              const perm = await Notification.requestPermission();
+              if (perm !== 'granted') error = 'denied';
+              else {
+                const reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+                token = await getToken(messaging, { vapidKey: cfg.vapidKey, serviceWorkerRegistration: reg });
+                onMessage(messaging, (payload) => {
+                  if (payload && payload.notification) showToast(`${payload.notification.title || 'BlitzMall'} — ${payload.notification.body || ''}`);
+                });
+              }
+            } catch (webFcmErr) {
+              console.warn('Web FCM failed, using mock fallback:', webFcmErr);
+              token = `MOCK_WEB_TOKEN_${customer.customerId}_${Date.now()}`;
+              error = 'mock_fallback';
+            }
           }
         }
       }
     } catch (e) {
       console.error('Push enable error:', e);
-      error = 'error';
+      // Last resort: still try a mock token so polling can work
+      token = `MOCK_FALLBACK_${customer.customerId}_${Date.now()}`;
+      error = 'mock_fallback';
     }
 
     if (token) {
@@ -1461,7 +1592,11 @@ function App() {
         if (d.success) {
           setNotifEnabled(true);
           try { localStorage.setItem('blitz_push_enabled', 'true'); } catch (err) {}
-          showToast('🔔 Notifications enabled!');
+          if (error === 'mock_fallback') {
+            showToast('🔔 Notifications enabled! (Simulated mode)');
+          } else {
+            showToast('🔔 Notifications enabled!');
+          }
           return;
         }
       } catch (e) { console.error(e); }
@@ -1470,7 +1605,7 @@ function App() {
 
     if (error === 'denied') showToast('Notifications blocked — allow them in your phone/browser settings');
     else if (error === 'not_configured') showToast('Push is almost ready — BlitzMall needs to finish setup');
-    else if (error) showToast('Could not enable notifications — try again');
+    else if (error && error !== 'mock_fallback') showToast('Could not enable notifications — try again');
   };
 
   const disablePush = async () => {
@@ -1752,15 +1887,24 @@ function App() {
               )}
 
               <div className="wheel-container">
-                <div className="wheel-pointer" />
+                <div className={`wheel-pointer ${wheelSpinning ? 'ticking' : ''}`} />
+                <div className={`wheel-led-ring ${wheelSpinning ? 'spinning' : ''}`}>
+                  {[...Array(12)].map((_, idx) => (
+                    <span key={idx} className="wheel-led-dot" style={{ transform: `translate(-50%, -50%) rotate(${idx * 30}deg) translateY(-112px)` }} />
+                  ))}
+                </div>
                 <div className="wheel-face" style={{
-                  background: `conic-gradient(${WHEEL_SECTORS.map(s => s.color).join(', ')})`,
+                  background: `conic-gradient(${WHEEL_SECTORS.map((s, idx) => {
+                    const startAngle = idx * (360 / WHEEL_SECTORS.length);
+                    const endAngle = (idx + 1) * (360 / WHEEL_SECTORS.length);
+                    return `${s.color} ${startAngle}deg ${endAngle}deg`;
+                  }).join(', ')})`,
                   transform: `rotate(${wheelRotation}deg)`,
                   transition: wheelSpinning ? 'transform 4.2s cubic-bezier(0.12, 0.75, 0.05, 1)' : 'none'
                 }}>
                   {WHEEL_SECTORS.map((s, i) => (
                     <span key={i} className="wheel-label" style={{
-                      transform: `translate(-50%, -50%) rotate(${(i + 0.5) * (360 / WHEEL_SECTORS.length)}deg) translateY(-84px) rotate(${-(i + 0.5) * (360 / WHEEL_SECTORS.length)}deg)`
+                      transform: `translate(-50%, -50%) rotate(${(i + 0.5) * (360 / WHEEL_SECTORS.length)}deg) translateY(-84px) rotate(90deg)`
                     }}>{s.label}</span>
                   ))}
                 </div>
@@ -1789,6 +1933,72 @@ function App() {
               >
                 {wheelSpinning ? '🌀 Spinning...' : promoStatus?.spin?.used ? '🔒 Come Back Soon' : promoStatus?.promosLocked ? '🔒 Complete 2 purchases to unlock' : '🔥 Spin Now!'}
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Wallet Points Conversion Modal */}
+        {showWalletModal && (
+          <div className="futuristic-modal-overlay" onClick={() => setShowWalletModal(false)}>
+            <div className="futuristic-modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: '340px' }}>
+              <button className="modal-close-btn" onClick={() => setShowWalletModal(false)}>✕</button>
+              <h2 className="modal-title" style={{ color: 'var(--gold)' }}>🪙 Convert Points to Cash</h2>
+              <p className="modal-subtitle" style={{ marginBottom: 16 }}>Redeem your loyalty points directly into your virtual wallet at a rate of 2 points = KES 1.</p>
+              
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
+                <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 10, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span className="muted" style={{ fontSize: '.75rem' }}>Available Points</span>
+                  <b style={{ fontSize: '1.05rem', color: 'var(--orange)' }}>{custLoyalty?.points || 0} PTS</b>
+                </div>
+                
+                <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 10, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span className="muted" style={{ fontSize: '.75rem' }}>Est. Wallet Value</span>
+                  <b style={{ fontSize: '1.05rem', color: 'var(--green)' }}>KES {Math.floor((custLoyalty?.points || 0) / 2).toLocaleString('en-KE')}</b>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <label style={{ fontSize: '.75rem', color: '#fff', fontWeight: 'bold' }}>Points to convert:</label>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input 
+                      type="number"
+                      className="field" 
+                      placeholder="e.g. 50" 
+                      value={pointsToConvert} 
+                      onChange={e => setPointsToConvert(e.target.value)} 
+                      style={{ flex: 1, padding: '10px', borderRadius: '8px', fontSize: '.9rem' }} 
+                    />
+                    <button 
+                      type="button" 
+                      className="btn-ghost" 
+                      onClick={() => setPointsToConvert(String(Math.floor((custLoyalty?.points || 0) / 2) * 2))}
+                      style={{ padding: '0 10px', fontSize: '.72rem', borderRadius: 8 }}
+                    >
+                      Max
+                    </button>
+                  </div>
+                  <small className="muted" style={{ fontSize: '.68rem' }}>* Must be a multiple of 2 points</small>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button 
+                  type="button" 
+                  className="btn-ghost" 
+                  onClick={() => setShowWalletModal(false)}
+                  style={{ flex: 1, padding: '10px' }}
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="button" 
+                  className="btn-neon" 
+                  onClick={handleConvertToWallet}
+                  style={{ flex: 1, padding: '10px', background: 'var(--grad)', color: '#000' }}
+                  disabled={!pointsToConvert || parseInt(pointsToConvert) <= 0 || parseInt(pointsToConvert) > (custLoyalty?.points || 0) || parseInt(pointsToConvert) % 2 !== 0}
+                >
+                  Convert
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -2012,7 +2222,10 @@ function App() {
   if (screen === 'checkout') {
     const finalFee = total >= 1500 || appliedCoupon?.type === 'free_delivery' || deliveryArea === 'mall' ? 0 : 150;
     const discountAmt = appliedCoupon ? appliedCoupon.discount : 0;
-    const finalTotal = Math.max(0, total + finalFee - discountAmt);
+    const walletBalance = custAccount?.walletBalance || 0;
+    const maxWalletApplicable = Math.min(walletBalance, Math.max(0, total + finalFee - discountAmt));
+    const appliedWalletAmt = useWalletPayment ? maxWalletApplicable : 0;
+    const finalTotal = Math.max(0, total + finalFee - discountAmt - appliedWalletAmt);
 
     return (
       <div className="screen with-nav">
@@ -2090,6 +2303,31 @@ function App() {
             )}
           </div>
 
+          {custAccount && (custAccount.walletBalance > 0 || useWalletPayment) && (
+            <>
+              <h3 className="section-h">Virtual Wallet</h3>
+              <div className="info-card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <b style={{ fontSize: '.85rem', color: '#fff' }}>Use Virtual Wallet Cash</b>
+                    <div style={{ fontSize: '.7rem', color: 'var(--muted)', marginTop: 2 }}>Available: KES {custAccount.walletBalance.toLocaleString('en-KE')}</div>
+                  </div>
+                  <input 
+                    type="checkbox" 
+                    checked={useWalletPayment} 
+                    onChange={e => setUseWalletPayment(e.target.checked)} 
+                    style={{ width: 22, height: 22, cursor: 'pointer', accentColor: 'var(--orange)' }}
+                  />
+                </div>
+                {useWalletPayment && (
+                  <div style={{ background: 'rgba(54, 211, 153, 0.1)', color: 'var(--green)', padding: '6px 10px', borderRadius: '6px', fontSize: '0.8rem' }}>
+                    Applied <b>KES {appliedWalletAmt.toLocaleString('en-KE')}</b> from wallet cash!
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
           <h3 className="section-h">Payment method</h3>
           <button className={`pay-opt ${payMethod === 'delivery' ? 'sel' : ''}`} onClick={() => setPayMethod('delivery')}>
             <span>💵</span>
@@ -2113,6 +2351,9 @@ function App() {
             <div className="summary-row"><span>Delivery fee</span><b>KES {finalFee}</b></div>
             {discountAmt > 0 && (
               <div className="summary-row" style={{ color: 'var(--green)' }}><span>Discount</span><b>- KES {discountAmt}</b></div>
+            )}
+            {appliedWalletAmt > 0 && (
+              <div className="summary-row" style={{ color: 'var(--green)' }}><span>Wallet Applied</span><b>- KES {appliedWalletAmt}</b></div>
             )}
             <div className="summary-row total"><span>Total</span><b>KES {finalTotal}</b></div>
           </div>
@@ -2213,12 +2454,33 @@ function App() {
                 <div style={{ fontFamily: 'Unbounded, sans-serif', fontSize: '1.5rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>{custLoyalty.points} PTS</div>
               </div>
               <div style={{ textAlign: 'right' }}>
-                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Best coupon now</span>
-                <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {bestRedeemValue(custLoyalty.points, custAccount?.redeemTiers).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</div>
+                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Cash Value</span>
+                <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {Math.floor((custLoyalty.points || 0) / 2).toLocaleString('en-KE')}</div>
               </div>
             </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '14px', borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: '10px' }}>
+              <div>
+                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Virtual Wallet Cash</span>
+                <div style={{ fontFamily: 'Unbounded, sans-serif', fontSize: '1.25rem', fontWeight: 'bold', margin: '2px 0 0 0', color: '#11998e' }}>KES {(custAccount?.walletBalance || 0).toLocaleString('en-KE')}</div>
+              </div>
+              <button
+                type="button"
+                className="btn-neon"
+                onClick={() => setShowWalletModal(true)}
+                style={{
+                  padding: '6px 12px',
+                  fontSize: '.72rem',
+                  background: '#000',
+                  color: '#fff',
+                  border: '1px solid #000',
+                  boxShadow: 'none'
+                }}
+              >
+                🪙 Convert Points
+              </button>
+            </div>
             <small style={{ display: 'block', marginTop: '10px', fontSize: '0.65rem', opacity: 0.7, borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: '6px' }}>
-              * Redeem at the counter: 100 PTS = KES 100 · 500 PTS = KES 600 · 1000 PTS = KES 1300
+              * Redeem at counter or convert: 2 PTS = KES 1 Wallet Cash (usable during checkout)
             </small>
           </div>
         )}

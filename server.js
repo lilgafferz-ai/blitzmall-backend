@@ -507,11 +507,33 @@ app.post('/api/orders', async (req, res) => {
         }
       } catch (e) { console.error('Failed to recompute discount:', e); }
     }
+    const itemsTotal = items.reduce((s, i) => s + i.price * i.quantity, 0);
     const discountAmt = Math.round(safeDiscount * 100) / 100;
+    const baseTotal = Math.max(0, itemsTotal + fee - discountAmt);
+
+    let walletApplied = 0;
+    const phoneClean = String(customerId).replace(/[^0-9]/g, '');
+    if (req.body.useWallet) {
+      try {
+        const loyalty = await loyalty_.findOne({ phone: phoneClean });
+        if (loyalty && (loyalty.walletBalance || 0) > 0) {
+          walletApplied = Math.min(loyalty.walletBalance, baseTotal);
+          if (walletApplied > 0) {
+            const newBal = Math.max(0, (loyalty.walletBalance || 0) - walletApplied);
+            await loyalty_.updateOne({ phone: phoneClean }, { $set: { walletBalance: newBal, updatedAt: new Date() } });
+          }
+        }
+      } catch (e) { console.error('Failed to apply wallet balance:', e); }
+    }
+
     const order = {
       customerId, customerName, items,
-      totalPrice: Math.max(0, items.reduce((s, i) => s + i.price * i.quantity, 0) + fee - discountAmt),
-      paymentMethod: paymentMethod || 'delivery', status: 'pending', createdAt: new Date(),
+      totalPrice: Math.max(0, baseTotal - walletApplied),
+      walletApplied: Math.round(walletApplied * 100) / 100,
+      paymentMethod: paymentMethod || 'delivery',
+      paymentStatus: (baseTotal - walletApplied <= 0) ? 'paid' : 'pending',
+      status: 'pending',
+      createdAt: new Date(),
       deliveryLocation: deliveryLocation || '',
       deliveryFee: fee,
       gpsCoords: gpsCoords || null,
@@ -1547,6 +1569,57 @@ app.post('/api/admin/loyalty/redeem', authenticate, async (req, res) => {
   } catch (e) { console.error('Failed to redeem:', e); res.status(500).json({ error: 'Failed to redeem' }); }
 });
 
+app.post('/api/loyalty/convert-to-wallet', async (req, res) => {
+  const { phone, points } = req.body;
+  const phoneClean = String(phone || '').replace(/[^0-9]/g, '');
+  if (!phoneClean) return res.status(400).json({ error: 'Phone required' });
+  const ptsToRedeem = parseInt(points, 10);
+  if (isNaN(ptsToRedeem) || ptsToRedeem <= 0) return res.status(400).json({ error: 'Valid points amount required' });
+  if (ptsToRedeem % 2 !== 0) return res.status(400).json({ error: 'Points must be redeemed in multiples of 2' });
+
+  try {
+    const loyalty = await loyalty_.findOne({ phone: phoneClean });
+    if (!loyalty || (loyalty.points || 0) < ptsToRedeem) {
+      return res.status(400).json({ error: 'Insufficient loyalty points' });
+    }
+
+    const cashAmount = ptsToRedeem / 2; // 2 points = 1 KES
+    const newPoints = (loyalty.points || 0) - ptsToRedeem;
+    const newWalletBalance = (loyalty.walletBalance || 0) + cashAmount;
+
+    await loyalty_.updateOne(
+      { phone: phoneClean },
+      { 
+        $set: { 
+          points: newPoints, 
+          walletBalance: newWalletBalance,
+          tier: tierFromPoints(newPoints),
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    await redemptions_.insertOne({
+      customerId: phoneClean,
+      rewardName: `Converted ${ptsToRedeem} points to KES ${cashAmount} Wallet Cash`,
+      pointsSpent: ptsToRedeem,
+      rewardValue: cashAmount,
+      type: 'wallet_conversion',
+      redeemedAt: new Date()
+    });
+
+    res.json({
+      success: true,
+      points: newPoints,
+      walletBalance: newWalletBalance,
+      message: `Successfully converted ${ptsToRedeem} points to KES ${cashAmount} wallet cash!`
+    });
+  } catch (e) {
+    console.error('Wallet conversion failed:', e);
+    res.status(500).json({ error: 'Failed to convert points' });
+  }
+});
+
 app.post('/api/admin/loyalty/add-points', async (req, res) => {
   const { phone, points } = req.body;
   if (!phone || !points) return res.status(400).json({ error: 'Phone and points required' });
@@ -1741,6 +1814,7 @@ app.get('/api/customers/:phone', async (req, res) => {
       loyaltyPoints: loyalty ? loyalty.points || 0 : 0,
       loyaltyTier: loyalty ? loyalty.tier : tier,
       tier,
+      walletBalance: loyalty ? loyalty.walletBalance || 0 : 0,
       vouchers: vouchers.map(v => ({
         code: v.code, type: v.type, value: v.value, minPurchase: v.minPurchase || 0,
         used: (Array.isArray(v.usedBy) && v.usedBy.includes(phone)),
@@ -1893,32 +1967,52 @@ async function runPromo({ phone, name, type }) {
     return { ...o, weight: typeof w === 'number' ? w : o.weight };
   });
   const picked = pickWeighted(list, tier, s.jackpotEnabled !== false);
-  let code = '', pointsAdded = 0;
-  let title = picked.title || '', message = picked.message || '';
+  let finalPicked = { ...picked };
 
-  if (picked.prize === 'again' || picked.prize === 'lose') {
+  // Anti-abuse spending logic for cash coupon prizes (fixed-amount coupons)
+  if (finalPicked.type === 'fixed') {
+    const cashValue = finalPicked.value || 0;
+    const totalSpent = completed.reduce((sum, o) => sum + (o.totalPrice || 0), 0);
+    // Customer must have completed at least 5 orders AND spent at least 10x the cash value
+    const shopsAlot = completed.length >= 5 && totalSpent >= (cashValue * 10);
+    if (!shopsAlot) {
+      // 98% of the time, reroll cash coupon to small points (1-5 pts) or TRY AGAIN / lose
+      if (Math.random() < 0.98) {
+        const safeOutcomes = list.filter(o => o.prize === 'again' || o.prize === 'lose' || (o.points && o.points <= 5));
+        if (safeOutcomes.length > 0) {
+          const rollIdx = Math.floor(Math.random() * safeOutcomes.length);
+          finalPicked = { ...safeOutcomes[rollIdx] };
+        }
+      }
+    }
+  }
+
+  let code = '', pointsAdded = 0;
+  let title = finalPicked.title || '', message = finalPicked.message || '';
+
+  if (finalPicked.prize === 'again' || finalPicked.prize === 'lose') {
     // nothing — intentionally. Most players should win nothing or very little.
-  } else if (picked.points) {
-    pointsAdded = picked.points;
+  } else if (finalPicked.points) {
+    pointsAdded = finalPicked.points;
     await addLoyaltyPoints(phoneClean, pointsAdded);
   } else {
-    code = await issueVoucher({ phone: phoneClean, type: picked.type, value: picked.value, minPurchase: picked.minPurchase, prefix: type === 'spin' ? 'SPIN' : 'SCR' });
+    code = await issueVoucher({ phone: phoneClean, type: finalPicked.type, value: finalPicked.value, minPurchase: finalPicked.minPurchase, prefix: type === 'spin' ? 'SPIN' : 'SCR' });
   }
 
   try {
     await promo_claims_.insertOne({
       phone: phoneClean, name: (name || '').trim(), type, day, tier, at: new Date(),
-      prizeName: picked.prize, title, message, code, pointsAdded,
-      sectorIndex: picked.sectorIndex !== undefined ? picked.sectorIndex : null,
+      prizeName: finalPicked.prize, title, message, code, pointsAdded,
+      sectorIndex: finalPicked.sectorIndex !== undefined ? finalPicked.sectorIndex : null,
       createdAt: new Date()
     });
   } catch (e) { console.error('Failed to record promo claim:', e); }
 
   return {
     success: true, alreadyUsed: false, day, tier,
-    prizeName: picked.prize, title, message,
-    code, type: picked.type || '', value: picked.value || 0,
-    minPurchase: picked.minPurchase || 0, pointsAdded, sectorIndex: picked.sectorIndex
+    prizeName: finalPicked.prize, title, message,
+    code, type: finalPicked.type || '', value: finalPicked.value || 0,
+    minPurchase: finalPicked.minPurchase || 0, pointsAdded, sectorIndex: finalPicked.sectorIndex
   };
 }
 

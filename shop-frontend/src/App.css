@@ -832,6 +832,46 @@ input, textarea {
   0%, 100% { margin-top: 0; }
   50% { margin-top: 3px; }
 }
+.wheel-pointer.ticking {
+  animation: pointerTick 0.12s linear infinite !important;
+}
+@keyframes pointerTick {
+  0%, 100% { transform: translateX(-50%) rotate(0deg); }
+  50% { transform: translateX(-50%) rotate(-12deg); }
+}
+.wheel-led-ring {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  z-index: 15;
+  pointer-events: none;
+}
+.wheel-led-ring.spinning {
+  animation: ledRingRotate 2.5s linear infinite;
+}
+@keyframes ledRingRotate {
+  100% { transform: rotate(360deg); }
+}
+.wheel-led-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ffd60a;
+  box-shadow: 0 0 6px #ffd60a, 0 0 12px #ffd60a;
+  animation: ledPulse 0.6s ease-in-out infinite alternate;
+}
+.wheel-led-dot:nth-child(even) {
+  background: #ff2d55;
+  box-shadow: 0 0 6px #ff2d55, 0 0 12px #ff2d55;
+  animation-delay: 0.3s;
+}
+@keyframes ledPulse {
+  0% { transform: translate(-50%, -50%) scale(0.85); opacity: 0.7; }
+  100% { transform: translate(-50%, -50%) scale(1.2); opacity: 1; }
+}
 .wheel-face {
   width: 100%;
   height: 100%;
