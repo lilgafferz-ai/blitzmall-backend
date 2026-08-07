@@ -410,6 +410,11 @@ function Admin() {
   const [selectedTypes, setSelectedTypes] = useState([]);
   const [wipeConfirm, setWipeConfirm] = useState('');
   const [wipeBusy, setWipeBusy] = useState(false);
+  const [notifyTitle, setNotifyTitle] = useState('');
+  const [notifyBody, setNotifyBody] = useState('');
+  const [notifyPhone, setNotifyPhone] = useState('');
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  const [notifyResult, setNotifyResult] = useState('');
   const [muted, setMuted] = useState(false);
   const [showBanner, setShowBanner] = useState(true);
   const [users, setUsers] = useState([]);
@@ -1735,6 +1740,25 @@ const loadStockTransfers = async () => {
     }
   };
 
+  // ===== 📣 Notify tab (owner) — push to one customer or everyone =====
+  const sendNotification = async () => {
+    if (!notifyTitle.trim() || !notifyBody.trim()) { alert('Enter a title and message'); return; }
+    setNotifyBusy(true); setNotifyResult('');
+    try {
+      const r = await authPost(API_URL + '/admin/notifications/send', { title: notifyTitle.trim(), body: notifyBody.trim(), phone: notifyPhone.trim() || undefined });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.success) {
+        setNotifyResult(`✅ Sent to ${d.sent} device(s).`);
+        setNotifyTitle(''); setNotifyBody(''); setNotifyPhone('');
+      } else {
+        setNotifyResult('❌ ' + ((d && d.error) || 'Send failed (HTTP ' + r.status + ').'));
+      }
+    } catch (e) {
+      console.error(e);
+      setNotifyResult('❌ Network error — could not send.');
+    } finally { setNotifyBusy(false); }
+  };
+
   const exportInventoryExcel = () => {
     try {
       const rows = (products||[]).map(p => ({
@@ -1841,6 +1865,7 @@ const loadStockTransfers = async () => {
     { id: 'loyalty', label: '🎁 Loyalty' },
     { id: 'staff', label: '👷 Staff' },
     { id: 'branches', label: '🏪 Branches' },
+    { id: 'notify', label: '📣 Notify' },
     { id: 'wipe', label: '🗑️ Delete' },
   ];
   const visibleTabs = role === 'owner' 
@@ -3052,6 +3077,27 @@ ${div}
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {safeTab === "notify" && user?.role === 'owner' && (
+        <div className="blitz-admin-body">
+          <div className="blitz-admin-row-between">
+            <h2>📣 Send Push Notification</h2>
+            <span className="blitz-admin-muted" style={{ fontSize: '.78rem' }}>Owner · reaches devices with notifications enabled</span>
+          </div>
+          <p className="blitz-admin-muted" style={{ marginBottom: 16, fontSize: '.85rem', maxWidth: 640 }}>
+            Customers who turned on notifications (Profile → Push Notifications) receive this on their phone, PC or browser. Leave the phone blank to reach everyone. Order status pushes (on the way / delivered) are sent automatically.
+          </p>
+          <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: 16, maxWidth: 640, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <input className="owner-field" placeholder="Title — e.g. 🔥 Weekend Special!" value={notifyTitle} onChange={e => setNotifyTitle(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
+            <textarea className="owner-field" placeholder="Message — e.g. 10% off orders over KES 1000 with code BLITZ10" value={notifyBody} onChange={e => setNotifyBody(e.target.value)} rows={3} style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical' }} />
+            <input className="owner-field" placeholder="Phone (optional — blank sends to everyone)" value={notifyPhone} onChange={e => setNotifyPhone(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
+            <button className="blitz-admin-btn small" disabled={notifyBusy} onClick={sendNotification} style={{ alignSelf: 'flex-start', background: 'var(--grad)', color: '#000', border: 'none', padding: '10px 18px', borderRadius: 10, fontWeight: 700, cursor: notifyBusy ? 'not-allowed' : 'pointer' }}>
+              {notifyBusy ? '⏳ Sending…' : '📣 Send push'}
+            </button>
+            {notifyResult && <div style={{ fontSize: '.85rem' }}>{notifyResult}</div>}
+          </div>
         </div>
       )}
 

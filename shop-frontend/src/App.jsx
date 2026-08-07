@@ -25,6 +25,8 @@ const CUSTOMER_KEY = 'blitz_customer';
 const FAVORITES_KEY = 'blitz_favorites';
 const SHOP_COORDS = { lat: 0.8273, lng: 35.1207 }; // Blitz Mall, Matunda
 
+let fcmWebApp = null; // reuse the Firebase web app across toggle on/off cycles
+
 // Built-in avatars (served from public/avatars/). Upload-your-own also supported.
 const AVATARS = [
   { id: 'cat', src: '/Avatars/cat.png' },
@@ -429,6 +431,9 @@ function App() {
   const [customer, setCustomer] = useState(() => {
     try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
   });
+  const [notifEnabled, setNotifEnabled] = useState(() => {
+    try { return localStorage.getItem('blitz_push_enabled') === 'true'; } catch { return false; }
+  });
   const [welcomeMsg, setWelcomeMsg] = useState(null);
   const [profile, setProfile] = useState(() => {
     try { return JSON.parse(localStorage.getItem('blitz_profile')) || null; } catch { return null; }
@@ -608,6 +613,7 @@ function App() {
   // root a single back just shows a hint — the app only exits on a deliberate
   // second back press, or via the explicit Exit App button in the profile.
   const navStackRef = useRef([]);
+  const pushListenerRef = useRef(null); // native push-received listener (registered once)
   const backHandlingRef = useRef(false);
   const lastBackPressRef = useRef(0);
 
@@ -1356,6 +1362,102 @@ function App() {
 
   const onUpload = (e) => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader();
     rd.onloadend = () => saveProfile({ ...(profile || {}), photo: rd.result }); rd.readAsDataURL(f); };
+
+  // ===== Push notifications =====
+  const isNativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+
+  // Ask the OS/browser for permission, obtain the FCM token and register it with
+  // our server. Native (Android) uses the Capacitor push plugin; web/PC uses the
+  // Firebase JS SDK + service worker. Everything degrades gracefully when the
+  // Firebase config isn't set up yet.
+  const registerPushToken = async () => {
+    if (!customer?.customerId) { showToast('Sign in first to enable notifications'); return; }
+    const platform = isNativeApp ? 'android' : (/electron/i.test(navigator.userAgent || '') ? 'pc' : 'web');
+    let token = null;
+    let error = '';
+    try {
+      if (isNativeApp) {
+        const { PushNotifications } = await import('@capacitor/push-notifications');
+        let perm = await PushNotifications.checkPermissions();
+        if (perm.receive === 'prompt') perm = await PushNotifications.requestPermissions();
+        if (perm.receive !== 'granted') error = 'denied';
+        else {
+          await PushNotifications.register();
+          token = await new Promise(resolve => {
+            const unsubs = [];
+            const finish = (t) => { try { unsubs.forEach(u => u.remove()); } catch (e) {} resolve(t); };
+            unsubs.push(PushNotifications.addListener('registration', (r) => finish(r && r.value)));
+            unsubs.push(PushNotifications.addListener('registrationError', () => finish(null)));
+            setTimeout(() => finish(null), 15000);
+          });
+          if (token && !pushListenerRef.current) {
+            pushListenerRef.current = await PushNotifications.addListener('pushNotificationReceived', (n) => {
+              if (n && n.notification) showToast(`${n.notification.title || 'BlitzMall'} — ${n.notification.body || ''}`);
+            });
+          }
+        }
+      } else {
+        const cfg = window.BLITZ_FIREBASE_CONFIG;
+        if (!cfg || !cfg.apiKey || !cfg.vapidKey) { error = 'not_configured'; }
+        else {
+          const { initializeApp, getApps } = await import('firebase/app');
+          const { getMessaging, getToken, onMessage } = await import('firebase/messaging');
+          if (!fcmWebApp) fcmWebApp = getApps().length ? getApps()[0] : initializeApp({ apiKey: cfg.apiKey, authDomain: cfg.authDomain, projectId: cfg.projectId, messagingSenderId: cfg.messagingSenderId, appId: cfg.appId }, 'blitzmallWeb');
+          const messaging = getMessaging(fcmWebApp);
+          const perm = await Notification.requestPermission();
+          if (perm !== 'granted') error = 'denied';
+          else {
+            const reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+            token = await getToken(messaging, { vapidKey: cfg.vapidKey, serviceWorkerRegistration: reg });
+            onMessage(messaging, (payload) => {
+              if (payload && payload.notification) showToast(`${payload.notification.title || 'BlitzMall'} — ${payload.notification.body || ''}`);
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Push enable error:', e);
+      error = 'error';
+    }
+
+    if (token) {
+      try {
+        const r = await fetch(`${API_URL}/notifications/register`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: customer.customerId, token, platform })
+        });
+        const d = await r.json();
+        if (d.success) {
+          setNotifEnabled(true);
+          try { localStorage.setItem('blitz_push_enabled', 'true'); } catch (err) {}
+          showToast('🔔 Notifications enabled!');
+          return;
+        }
+      } catch (e) { console.error(e); }
+      error = 'error';
+    }
+
+    if (error === 'denied') showToast('Notifications blocked — allow them in your phone/browser settings');
+    else if (error === 'not_configured') showToast('Push is almost ready — BlitzMall needs to finish setup');
+    else if (error) showToast('Could not enable notifications — try again');
+  };
+
+  const disablePush = async () => {
+    setNotifEnabled(false);
+    try { localStorage.setItem('blitz_push_enabled', 'false'); } catch (e) {}
+    // Tell the server to forget this phone's tokens so pushes actually stop.
+    try {
+      await fetch(`${API_URL}/notifications/unregister`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: customer?.customerId || '' })
+      });
+    } catch (e) {}
+    if (pushListenerRef.current) {
+      try { pushListenerRef.current.remove(); } catch (e) {}
+      pushListenerRef.current = null;
+    }
+    showToast('🔕 Notifications turned off');
+  };
 
   const submitReview = async () => {
     if (!reviewStars) { alert('Please tap a star rating first'); return; }
@@ -2171,6 +2273,28 @@ function App() {
         )}
 
         <h3 className="section-h">Preferences</h3>
+        <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <b style={{ fontSize: '.88rem', color: '#fff' }}>🔔 Push Notifications</b>
+            <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>Order updates & promo alerts</div>
+          </div>
+          <button
+            className="btn-neon"
+            onClick={() => (notifEnabled ? disablePush() : registerPushToken())}
+            style={{
+              padding: '6px 12px',
+              fontSize: '.75rem',
+              background: notifEnabled ? 'var(--green)' : 'var(--line)',
+              color: notifEnabled ? '#000' : 'var(--text)',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: 'pointer'
+            }}
+          >
+            {notifEnabled ? 'ON' : 'OFF'}
+          </button>
+        </div>
+
         <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <b style={{ fontSize: '.88rem', color: '#fff' }}>Performance Mode</b>

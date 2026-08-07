@@ -76,7 +76,7 @@ const client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
 let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_, categories_;
-let customers_, promo_claims_;
+let customers_, promo_claims_, notification_tokens_;
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   console.error('FATAL ERROR: JWT_SECRET environment variable is not defined.');
@@ -296,6 +296,7 @@ async function connectDb() {
   categories_ = db.collection('categories');
   customers_ = db.collection('customers');
   promo_claims_ = db.collection('promo_claims');
+  notification_tokens_ = db.collection('notification_tokens');
 
   try {
     const bannerCount = await banners_.countDocuments();
@@ -1061,6 +1062,15 @@ app.put('/api/admin/orders/:orderId', authenticate, async (req, res) => {
     }
     const r = await orders_.updateOne({ _id: new ObjectId(req.params.orderId) }, { $set: update });
     if (!r.matchedCount) return res.status(404).json({ error: 'Order not found' });
+    // Push the customer a status update (fires only when FCM is configured).
+    try {
+      const updated = await orders_.findOne({ _id: new ObjectId(req.params.orderId) });
+      if (updated && updated.customerId) {
+        if (updated.status === 'on_the_way') sendPushToPhone(updated.customerId, '🛵 On the way!', 'Your BlitzMall order is out for delivery — it will arrive soon.');
+        else if (updated.status === 'delivered') sendPushToPhone(updated.customerId, '✅ Delivered!', 'Your BlitzMall order has been delivered. Enjoy!');
+        else if (updated.status === 'cancelled') sendPushToPhone(updated.customerId, '❌ Order cancelled', 'Your BlitzMall order was cancelled.');
+      }
+    } catch (e) { console.error('Order status push failed:', e.message); }
     res.json({ success: true });
   } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); }
 });
@@ -3703,6 +3713,118 @@ app.delete('/api/admin/records', authenticate, authorize('owner'), async (req, r
   } catch (e) {
     console.error('records delete error:', e);
     res.status(500).json({ error: 'Failed to delete records' });
+  }
+});
+
+// ===== PUSH NOTIFICATIONS (Firebase Cloud Messaging) =====
+// Fully config-guarded: everything here no-ops gracefully until the owner adds
+// FCM_SERVICE_ACCOUNT_JSON (a Firebase service-account key, pasted as JSON) to
+// the server env. The Android app, PC app and website register their device
+// tokens with /api/notifications/register; the server sends through the FCM
+// HTTP v1 API via firebase-admin.
+let fcmApp = null;
+function getFcmApp() {
+  if (fcmApp) return fcmApp;
+  try {
+    const raw = process.env.FCM_SERVICE_ACCOUNT_JSON;
+    if (!raw) return null;
+    const { initializeApp, cert } = require('firebase-admin/app');
+    fcmApp = initializeApp({ credential: cert(JSON.parse(raw)) }, 'blitzmall');
+    return fcmApp;
+  } catch (e) { console.error('FCM init failed:', e.message); return null; }
+}
+const fcmConfigured = () => !!getFcmApp();
+
+async function sendToTokens(tokens, title, body, data = {}) {
+  const { getMessaging } = require('firebase-admin/messaging');
+  let sent = 0;
+  for (const token of tokens) {
+    try {
+      await getMessaging(fcmApp).send({ token, notification: { title: String(title || 'BlitzMall'), body: String(body || '') }, data: { ...data, click_action: 'FCM_PLUGIN_ACTIVITY' } });
+      sent++;
+    } catch (e) {
+      // Dead token (uninstalled/revoked) — drop it so we never retry it.
+      if (e && e.code === 'messaging/registration-token-not-registered') await notification_tokens_.deleteMany({ token });
+    }
+  }
+  return { sent };
+}
+
+async function sendPushToPhone(phone, title, body, data = {}) {
+  if (!phone || !fcmConfigured()) return { sent: 0, skipped: 1 };
+  try {
+    const tokens = await notification_tokens_.find({ phone }).toArray();
+    const uniq = [...new Set(tokens.map(t => t.token).filter(Boolean))];
+    if (!uniq.length) return { sent: 0 };
+    return await sendToTokens(uniq, title, body, data);
+  } catch (e) { console.error('sendPushToPhone failed:', e.message); return { sent: 0 }; }
+}
+
+async function sendPushToAll(title, body, data = {}) {
+  if (!fcmConfigured()) return { sent: 0, skipped: 1 };
+  try {
+    const all = await notification_tokens_.find().toArray();
+    const uniq = [...new Set(all.map(t => t.token).filter(Boolean))];
+    if (!uniq.length) return { sent: 0 };
+    return await sendToTokens(uniq, title, body, data);
+  } catch (e) { console.error('sendPushToAll failed:', e.message); return { sent: 0 }; }
+}
+
+const notifRegisterLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10, // 10 token registrations per minute per IP — stops token stuffing
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Customers register their device/browser token here after enabling notifications.
+// Requires an existing customer account so tokens can't be stuffed for random phones.
+app.post('/api/notifications/register', notifRegisterLimiter, async (req, res) => {
+  const { phone, token, platform } = req.body;
+  if (!phone || !token) return res.status(400).json({ error: 'Phone and token required' });
+  try {
+    const phoneClean = String(phone).replace(/[^0-9]/g, '');
+    const cust = await customers_.findOne({ phone: phoneClean });
+    if (!cust && !(await orders_.findOne({ customerId: phoneClean }))) {
+      return res.status(403).json({ error: 'Unknown customer — sign in first' });
+    }
+    await notification_tokens_.deleteMany({ token }); // one token belongs to one phone
+    await notification_tokens_.insertOne({ phone: phoneClean, token: String(token), platform: platform || 'android', updatedAt: new Date() });
+    res.json({ success: true });
+  } catch (e) {
+    console.error('notifications/register error:', e);
+    res.status(500).json({ error: 'Failed to register notification token' });
+  }
+});
+
+// Forget every token for a phone (called when the customer turns notifications off).
+app.post('/api/notifications/unregister', notifRegisterLimiter, async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ error: 'Phone required' });
+  try {
+    const phoneClean = String(phone).replace(/[^0-9]/g, '');
+    await notification_tokens_.deleteMany({ phone: phoneClean });
+    res.json({ success: true });
+  } catch (e) {
+    console.error('notifications/unregister error:', e);
+    res.status(500).json({ error: 'Failed to unregister' });
+  }
+});
+
+// Owner sends a push to one customer (phone) or to every registered device.
+app.post('/api/admin/notifications/send', authenticate, authorize('owner'), async (req, res) => {
+  const { title, body, phone } = req.body;
+  if (!title || !body) return res.status(400).json({ error: 'Title and message required' });
+  try {
+    if (!fcmConfigured()) {
+      return res.status(503).json({ error: 'Push is not configured yet — add FCM_SERVICE_ACCOUNT_JSON to the server env.' });
+    }
+    const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '') : '';
+    const result = cleanPhone ? await sendPushToPhone(cleanPhone, title, body) : await sendPushToAll(title, body);
+    res.json({ success: true, ...result });
+  } catch (e) {
+    console.error('notifications/send error:', e);
+    res.status(500).json({ error: 'Failed to send notification' });
   }
 });
 
