@@ -251,6 +251,14 @@ async function connectDb() {
           return { deletedCount: 0 };
         }
 
+        async deleteMany(filter = {}) {
+          const list = localDbData[this.name] || [];
+          const before = list.length;
+          localDbData[this.name] = list.filter(item => !matchFilter(item, filter));
+          saveLocalDb();
+          return { deletedCount: before - (localDbData[this.name] || []).length };
+        }
+
         async countDocuments(filter = {}) {
           const data = localDbData[this.name] || [];
           return data.filter(item => matchFilter(item, filter)).length;
@@ -3638,6 +3646,64 @@ app.get('/*path', (req, res, next) => {
     return next();
   }
   res.sendFile(path.join(__dirname, 'shop-frontend/build', 'index.html'));
+});
+
+// ===== RECORD MANAGEMENT (owner only) — select & delete records =====
+// Data cleanup tool: lets the owner wipe records by type (sales, expenses, …)
+// or everything at once. User accounts (login) and branches are deliberately
+// excluded so nobody can lock themselves out of the app.
+const RECORD_COLLS = {
+  sales: sales_,
+  orders: orders_,
+  expenses: expenses_,
+  credit: credit_,
+  reviews: reviews_,
+  coupons: coupons_,
+  customers: customers_,
+  products: products_,
+  banners: banners_,
+  loyalty: loyalty_,
+  promo_claims: promo_claims_,
+  saved_baskets: saved_baskets_,
+  stock_transfers: stock_transfers_,
+  shifts: shifts_,
+  audit_logs: audit_logs_,
+};
+
+app.get('/api/admin/records/counts', authenticate, authorize('owner'), async (req, res) => {
+  try {
+    const counts = {};
+    for (const key of Object.keys(RECORD_COLLS)) {
+      try { counts[key] = await RECORD_COLLS[key].countDocuments({}); } catch (e) { counts[key] = 0; }
+    }
+    res.json({ success: true, counts });
+  } catch (e) {
+    console.error('records/counts error:', e);
+    res.status(500).json({ error: 'Failed to load record counts' });
+  }
+});
+
+app.delete('/api/admin/records', authenticate, authorize('owner'), async (req, res) => {
+  const types = Array.isArray(req.body && req.body.types) ? req.body.types : [];
+  if (!types.length) return res.status(400).json({ error: 'Select at least one record type to delete' });
+  try {
+    let deleted = 0;
+    const done = [];
+    for (const t of types) {
+      const coll = RECORD_COLLS[t];
+      if (!coll) continue;
+      try {
+        const r = await coll.deleteMany({});
+        deleted += (r.deletedCount || 0);
+        done.push(t);
+        if (t === 'products') productCache.del('all_products'); // never serve wiped inventory from cache
+      } catch (e) { console.error('Failed to wipe collection:', t, e); }
+    }
+    res.json({ success: true, deleted, types: done });
+  } catch (e) {
+    console.error('records delete error:', e);
+    res.status(500).json({ error: 'Failed to delete records' });
+  }
 });
 
 // Global error handling middleware

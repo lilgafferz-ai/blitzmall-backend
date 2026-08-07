@@ -18,6 +18,27 @@ const getDefaultApiUrl = () => {
 const API_URL = getDefaultApiUrl();
 const BLANK = { name: '', category: '', barcode: '', buyingPrice: '', price: '', stock: '', description: '', image: null, expiryDate: '' };
 
+// Record types the owner can wipe from the 🗑️ Delete tab (users & branches are
+// intentionally not here — they're never bulk-deleted). Keys match the server's
+// RECORD_COLLS map in server.js.
+const RECORD_OPTIONS = [
+  { key: 'sales', label: 'Sales', icon: '🧾', desc: 'POS sale transactions' },
+  { key: 'orders', label: 'Orders', icon: '🛒', desc: 'Customer orders (incl. deliveries)' },
+  { key: 'expenses', label: 'Expenses', icon: '💸', desc: 'Recorded shop expenses' },
+  { key: 'credit', label: 'Credit / Debts', icon: '🧍', desc: 'Customer credit & debts' },
+  { key: 'reviews', label: 'Reviews', icon: '⭐', desc: 'Customer ratings & feedback' },
+  { key: 'coupons', label: 'Coupons', icon: '🎟️', desc: 'Voucher codes (marketing codes return on server restart)' },
+  { key: 'customers', label: 'Customers', icon: '👥', desc: 'Customer accounts & shopping history' },
+  { key: 'products', label: 'Products', icon: '📦', desc: 'All products & stock — wipes inventory!' },
+  { key: 'banners', label: 'Banners', icon: '🚀', desc: 'Home-screen ad banners' },
+  { key: 'loyalty', label: 'Loyalty Points', icon: '🎁', desc: 'Loyalty point balances' },
+  { key: 'promo_claims', label: 'Promo Claims', icon: '🎡', desc: 'Wheel / scratch claim history' },
+  { key: 'saved_baskets', label: 'Saved Baskets', icon: '🧺', desc: 'Customers\' saved basket templates' },
+  { key: 'stock_transfers', label: 'Stock Transfers', icon: '🔄', desc: 'Inter-branch transfer history' },
+  { key: 'shifts', label: 'Shifts', icon: '⏰', desc: 'Cashier shift records' },
+  { key: 'audit_logs', label: 'Audit Logs', icon: '📋', desc: 'Admin action history' },
+];
+
 // JWT auth helper — adds Bearer token to every admin fetch
 const authHeaders = () => {
   const token = sessionStorage.getItem('bm_token');
@@ -385,6 +406,10 @@ function Admin() {
   const [alerts, setAlerts] = useState({ low: [], out: [], expiringSoon: [], expired: [] });
   const [importingExcel, setImportingExcel] = useState(false);
   const importExcelInputRef = useRef(null);
+  const [recordCounts, setRecordCounts] = useState({});
+  const [selectedTypes, setSelectedTypes] = useState([]);
+  const [wipeConfirm, setWipeConfirm] = useState('');
+  const [wipeBusy, setWipeBusy] = useState(false);
   const [muted, setMuted] = useState(false);
   const [showBanner, setShowBanner] = useState(true);
   const [users, setUsers] = useState([]);
@@ -1056,6 +1081,7 @@ const loadStockTransfers = async () => {
     else if (tab === 'staff') { loadStaff(); if (user?.role === 'owner') { loadUsers(); loadBranches(); loadShiftsList(); loadAuditLogs(); } }
     else if (tab === 'loyalty') { loadLoyaltyMembers(); loadCoupons(); }
     else if (tab === 'branches' && (!user || user.role === 'owner')) loadBranches();
+    else if (tab === 'wipe' && user?.role === 'owner') loadRecordCounts();
     else if (tab === 'inventory') { loadProducts(); loadCategories(); loadPricingRules(); loadStockTransfers(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, loggedIn]);
@@ -1644,6 +1670,71 @@ const loadStockTransfers = async () => {
     }
   };
 
+  // ===== Delete Records tab (owner only) =====
+  const loadRecordCounts = async () => {
+    try {
+      const r = await authGet(API_URL + '/admin/records/counts');
+      const d = await r.json().catch(() => ({}));
+      if (d && d.counts) setRecordCounts(d.counts);
+    } catch (e) { console.error(e); }
+  };
+
+  const toggleRecordType = (key) => {
+    setSelectedTypes(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
+  };
+
+  const deleteSelectedRecords = async () => {
+    if (!selectedTypes.length) { alert('Select at least one record type first.'); return; }
+    if (!window.confirm(`Delete ALL ${selectedTypes.length} selected record type(s)? This CANNOT be undone.`)) return;
+    setWipeBusy(true);
+    try {
+      const r = await fetch(API_URL + '/admin/records', { method: 'DELETE', headers: authHeaders(), body: JSON.stringify({ types: selectedTypes }) });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.success) {
+        alert(`🗑️ Deleted ${d.deleted} record(s).`);
+        if (selectedTypes.includes('products')) loadProducts();
+        if (selectedTypes.includes('orders')) loadOrders();
+        if (selectedTypes.includes('sales')) loadSales();
+        setSelectedTypes([]);
+        loadRecordCounts();
+      } else {
+        alert('❌ ' + ((d && d.error) || 'Delete failed (HTTP ' + r.status + ').'));
+      }
+    } catch (e) {
+      console.error(e);
+      alert('❌ Network error — could not delete records.');
+    } finally {
+      setWipeBusy(false);
+    }
+  };
+
+  const deleteAllRecords = async () => {
+    if (wipeConfirm.trim().toUpperCase() !== 'DELETE') {
+      alert('Type DELETE in the box to confirm wiping everything.');
+      return;
+    }
+    if (!window.confirm('⚠️ FINAL WARNING: this permanently deletes ALL records (sales, orders, expenses, products, customers…). User accounts & branches are kept. This CANNOT be undone. Continue?')) return;
+    setWipeBusy(true);
+    try {
+      const r = await fetch(API_URL + '/admin/records', { method: 'DELETE', headers: authHeaders(), body: JSON.stringify({ types: RECORD_OPTIONS.map(o => o.key) }) });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.success) {
+        alert(`🗑️ Deleted ${d.deleted} records across all types.`);
+        loadProducts(); loadOrders(); loadSales(); loadExpenses(); loadCredit(); loadReviews();
+        setSelectedTypes([]);
+        setWipeConfirm('');
+        loadRecordCounts();
+      } else {
+        alert('❌ ' + ((d && d.error) || 'Delete failed (HTTP ' + r.status + ').'));
+      }
+    } catch (e) {
+      console.error(e);
+      alert('❌ Network error — could not delete records.');
+    } finally {
+      setWipeBusy(false);
+    }
+  };
+
   const exportInventoryExcel = () => {
     try {
       const rows = (products||[]).map(p => ({
@@ -1750,6 +1841,7 @@ const loadStockTransfers = async () => {
     { id: 'loyalty', label: '🎁 Loyalty' },
     { id: 'staff', label: '👷 Staff' },
     { id: 'branches', label: '🏪 Branches' },
+    { id: 'wipe', label: '🗑️ Delete' },
   ];
   const visibleTabs = role === 'owner' 
     ? allTabs 
@@ -2960,6 +3052,66 @@ ${div}
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {safeTab === "wipe" && user?.role === 'owner' && (
+        <div className="blitz-admin-body">
+          <div className="blitz-admin-row-between">
+            <h2>🗑️ Delete Records</h2>
+            <span className="blitz-admin-muted" style={{ fontSize: '.78rem' }}>Owner only · permanent</span>
+          </div>
+          <p className="blitz-admin-muted" style={{ marginBottom: 16, fontSize: '.85rem', maxWidth: 760 }}>
+            Select the record types you want to wipe (e.g. sales, expenses) and delete them — or delete everything at once.
+            <b> This cannot be undone.</b> Login accounts & branches are never deleted. Deletes apply to <b>all branches</b>,
+            and <b>product stock is not restored</b> when sales/orders are wiped.
+          </p>
+
+          <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: 16, maxWidth: 760 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+              <b style={{ fontSize: '.9rem' }}>Record types</b>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="blitz-admin-btn small" onClick={() => setSelectedTypes(RECORD_OPTIONS.map(o => o.key))}>Select all</button>
+                <button className="blitz-admin-btn small" onClick={() => setSelectedTypes([])}>Clear</button>
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(205px, 1fr))', gap: 8 }}>
+              {RECORD_OPTIONS.map(o => {
+                const on = selectedTypes.includes(o.key);
+                return (
+                  <label key={o.key} style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--bg-2)', border: on ? '1px solid var(--orange)' : '1px solid var(--line)', borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={on} onChange={() => toggleRecordType(o.key)} style={{ width: 16, height: 16, accentColor: 'var(--orange)', flexShrink: 0 }} />
+                    <span style={{ fontSize: '1.05rem' }}>{o.icon}</span>
+                    <span style={{ flex: 1 }}>
+                      <b style={{ fontSize: '.8rem', display: 'block' }}>{o.label}</b>
+                      <small style={{ color: 'var(--muted)', fontSize: '.68rem' }}>{recordCounts[o.key] ?? 0} records · {o.desc}</small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <button
+              className="blitz-admin-btn small"
+              disabled={!selectedTypes.length || wipeBusy}
+              onClick={deleteSelectedRecords}
+              style={{ marginTop: 14, background: selectedTypes.length && !wipeBusy ? 'var(--red)' : 'var(--line)', color: selectedTypes.length && !wipeBusy ? '#fff' : 'var(--muted)', border: 'none', padding: '10px 18px', borderRadius: 10, fontWeight: 700, cursor: selectedTypes.length && !wipeBusy ? 'pointer' : 'not-allowed' }}
+            >
+              {wipeBusy ? '⏳ Deleting…' : `🗑️ Delete selected (${selectedTypes.length})`}
+            </button>
+          </div>
+
+          <div style={{ background: 'rgba(255,45,85,0.07)', border: '1px solid rgba(255,45,85,0.45)', borderRadius: 14, padding: 16, marginTop: 16, maxWidth: 760 }}>
+            <b style={{ color: '#ff6b81', fontSize: '.9rem' }}>☢️ Danger zone — delete EVERYTHING</b>
+            <p className="blitz-admin-muted" style={{ fontSize: '.78rem', margin: '8px 0 12px 0' }}>
+              Wipes sales, orders, expenses, credit, reviews, coupons, customers, products, banners, loyalty, promos, baskets, transfers, shifts and audit logs. Login accounts & branches are kept. Type <b>DELETE</b> below to confirm.
+            </p>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <input value={wipeConfirm} onChange={e => setWipeConfirm(e.target.value)} placeholder="Type DELETE" style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 10, padding: '10px 14px', color: 'var(--text)', width: 180 }} />
+              <button className="blitz-admin-btn small" disabled={wipeBusy} onClick={deleteAllRecords} style={{ background: 'var(--red)', color: '#fff', border: 'none', padding: '10px 18px', borderRadius: 10, fontWeight: 700, cursor: wipeBusy ? 'not-allowed' : 'pointer' }}>
+                {wipeBusy ? '⏳ Deleting…' : '☢️ Delete ALL records'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

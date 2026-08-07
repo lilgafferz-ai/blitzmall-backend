@@ -2042,11 +2042,23 @@ function App() {
   if (screen === 'profile') return (
     <div className="screen with-nav">
       <header className="topbar"><div className="topbar-brand"><BlitzLogo size={30} /><span>BLITZ<b>MALL</b></span></div></header>
-      <div className="scroll">
+      <div className="scroll profile-scroll">
         <div className="profile-head">
           <Avatar profile={profile} size={88} />
           <h2>{profile?.name || customer?.name}</h2>
           <span className="muted">{profile?.phone || customer?.customerId}</span>
+        </div>
+
+        {/* Choose an avatar — kept up top so it's the first thing you see */}
+        <h3 className="section-h">Choose an avatar</h3>
+        <div className="avatar-row" style={{ marginBottom: 4 }}>
+          {AVATARS.map(a => (
+            <button key={a.id} className={`avatar-pick ${profile?.avatarId === a.id && !profile?.photo ? 'sel' : ''}`}
+              onClick={() => saveProfile({ ...(profile || {}), avatarId: a.id, photo: null })}>
+              <img src={getAvatarSrc(a.src)} alt={a.id} />
+            </button>
+          ))}
+          <label className="avatar-upload">＋<input type="file" accept="image/*" onChange={onUpload} hidden /></label>
         </div>
 
         {custLoyalty && (
@@ -2157,17 +2169,6 @@ function App() {
             </div>
           </div>
         )}
-
-        <h3 className="section-h">Choose an avatar</h3>
-        <div className="avatar-row">
-          {AVATARS.map(a => (
-            <button key={a.id} className={`avatar-pick ${profile?.avatarId === a.id && !profile?.photo ? 'sel' : ''}`}
-              onClick={() => saveProfile({ ...(profile || {}), avatarId: a.id, photo: null })}>
-              <img src={getAvatarSrc(a.src)} alt={a.id} />
-            </button>
-          ))}
-          <label className="avatar-upload">＋<input type="file" accept="image/*" onChange={onUpload} hidden /></label>
-        </div>
 
         <h3 className="section-h">Preferences</h3>
         <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

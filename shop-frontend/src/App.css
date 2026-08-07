@@ -1309,6 +1309,9 @@ input, textarea {
 .gallery-slide img{width:100%;max-height:72vh;object-fit:contain;background:#fff;border-radius:14px;}
 .gallery-hint{color:rgba(255,255,255,.72);font-size:.85rem;margin-top:18px;letter-spacing:.3px;}
 
+/* ===== PROFILE — same column on phone and PC ===== */
+.profile-scroll{max-width:560px;margin:0 auto;width:100%;}
+
 /* ===== FAVORITES ===== */
 .prod-card{position:relative}
 .prod-fav{position:absolute;top:8px;right:8px;background:rgba(10,10,14,.65);border:1px solid var(--line);border-radius:50%;width:34px;height:34px;font-size:15px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;backdrop-filter:blur(4px);transition:transform .15s ease,border-color .15s ease}
