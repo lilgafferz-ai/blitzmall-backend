@@ -8,7 +8,7 @@ const helmet = require('helmet');
 // express-mongo-sanitize removed: it reassigns req.query, which throws under
 // Express 5 (req.query is getter-only). Replaced by the Express 5-safe
 // sanitizeRequest middleware defined below.
-const rateLimit = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const NodeCache = require('node-cache');
 const productCache = new NodeCache({ stdTTL: 300 }); // Cache products for 5 minutes
 
@@ -68,6 +68,43 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// ---- Anti-abuse limiters for the money/value endpoints ----
+// Spinning/scratching is free money if spammed — one promo attempt per 10
+// seconds per IP, and wallet conversions are capped per minute so a scripted
+// client can't brute-force the conversion repeatedly.
+// Under Jest, the whole suite shares one IP and fires requests in bursts, so
+// the per-IP caps are lifted (the per-phone/duplicate logic still applies).
+const IS_TEST = !!process.env.JEST_WORKER_ID;
+const promosLimiter = rateLimit({
+  windowMs: 10 * 1000, // 10 seconds
+  max: IS_TEST ? 1000 : 2, // 2 promo attempts per 10s per IP (one tap + one accidental double-tap)
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many promo attempts. Please wait a moment.' }
+});
+const walletLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: IS_TEST ? 1000 : 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many wallet operations. Please try again shortly.' }
+});
+// Tight per-phone guard on placing orders (the 60s duplicate check below also
+// applies; this stops a scripted client from spraying orders from many phones).
+const orderLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: IS_TEST ? 1000 : 12, // 12 orders/min — plenty for a real shopper, brutal for a bot
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many orders from this device. Please wait a moment.' },
+  // Key by the shopper's phone number when present (so a school/hotel/office
+  // sharing one IP never trips the cap), falling back to IP for anonymous bots.
+  keyGenerator: ipKeyGenerator((req) => {
+    const cid = req.body && req.body.customerId ? String(req.body.customerId).replace(/[^0-9]/g, '') : '';
+    return cid || req.ip || 'unknown';
+  })
+});
+
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
@@ -76,7 +113,7 @@ const client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
 let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_, categories_;
-let customers_, promo_claims_, notification_tokens_, notifications_feed_, loyalty_settings_;
+let customers_, promo_claims_, notification_tokens_, notifications_feed_, loyalty_settings_, promo_cooldowns_;
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   console.error('FATAL ERROR: JWT_SECRET environment variable is not defined.');
@@ -269,6 +306,36 @@ async function connectDb() {
           return { matchedCount: modifiedCount, modifiedCount };
         }
 
+        // Atomic find-and-update used by the promo cooldown slot. Mirrors the
+        // MongoDB semantics the production code relies on: returns the updated
+        // document after a match (or upsert) and null when nothing matched.
+        async findOneAndUpdate(filter, update, options = {}) {
+          const list = localDbData[this.name] || [];
+          const item = list.find(item => matchFilter(item, filter));
+          if (item) {
+            if (update.$set) Object.assign(item, update.$set);
+            if (update.$inc) {
+              for (const [k, v] of Object.entries(update.$inc)) item[k] = (item[k] || 0) + v;
+            }
+            saveLocalDb();
+            return { value: item };
+          }
+          if (options && options.upsert && update && update.$set) {
+            const doc = { ...update.$set };
+            // Upserted docs inherit the equality fields from the filter (Mongo does
+            // the same) so the _id/phone/type keys survive the insert.
+            for (const [k, v] of Object.entries(filter)) {
+              if (v && typeof v === 'object' && !(v instanceof Date)) continue; // operator bag — skip
+              if (doc[k] === undefined) doc[k] = v;
+            }
+            if (!doc._id) doc._id = new ObjectId().toString();
+            list.push(doc);
+            saveLocalDb();
+            return { value: doc };
+          }
+          return { value: null };
+        }
+
         async deleteOne(filter) {
           const list = localDbData[this.name] || [];
           const idx = list.findIndex(item => matchFilter(item, filter));
@@ -328,6 +395,32 @@ async function connectDb() {
   notification_tokens_ = db.collection('notification_tokens');
   notifications_feed_ = db.collection('notifications_feed');
   loyalty_settings_ = db.collection('loyalty_settings');
+  promo_cooldowns_ = db.collection('promo_cooldowns');
+
+  // Migration: carry any existing 24h/48h promo claims into the atomic
+  // cooldown slots (added for bank-grade anti-abuse). Without this, shoppers
+  // who already claimed today could spin again once right after deploy.
+  try {
+    const s = await getLoyaltySettings();
+    const spinMs = (s.spinCooldownHours || 24) * 3600 * 1000;
+    const scratchMs = (s.scratchCooldownHours || 48) * 3600 * 1000;
+    const windowMs = Math.max(spinMs, scratchMs);
+    const recentClaims = await promo_claims_.find({ at: { $gt: new Date(Date.now() - windowMs) } }).toArray();
+    for (const c of recentClaims) {
+      try {
+        const key = String(c.phone) + ':' + c.type;
+        const cooldownMs = c.type === 'spin' ? spinMs : scratchMs;
+        const existing = await promo_cooldowns_.findOne({ _id: key });
+        if (!existing || new Date(existing.at) < new Date(c.at)) {
+          await promo_cooldowns_.findOneAndUpdate(
+            { _id: key, at: { $lte: new Date(c.at) } },
+            { $set: { _id: key, phone: String(c.phone), type: c.type, at: new Date(c.at), updatedAt: new Date() } },
+            { upsert: true }
+          );
+        }
+      } catch (e) { /* keep going */ }
+    }
+  } catch (e) { console.error('Promo cooldown migration failed:', e.message); }
 
   try {
     const bannerCount = await banners_.countDocuments();
@@ -370,12 +463,10 @@ async function connectDb() {
     console.error('Failed to seed marketing coupons:', err);
   }
 
-  await seedRewards();
-
-  // Seed the loyalty economy defaults (earn rate, tiers, redeem tiers, promo
-  // odds) so the Admin → Loyalty Controls tab has a real document to edit —
-  // without this the settings UI silently fails to persist.
+  // Seed the loyalty economy defaults FIRST (this also migrates any shop still
+  // on the legacy 1pt=KES1 currency), then derive the reward catalogue from it.
   await seedLoyaltySettings();
+  await seedRewards();
 
   // Seed categories if empty
   try {
@@ -507,11 +598,67 @@ app.post('/api/auth', authLimiter, async (req, res) => {
     res.json({ success: true, customerId: String(phone).replace(/[^0-9]/g, ''), returning: false, message: `Welcome ${name}!`, referralBonus });
   }
 });
-app.post('/api/orders', async (req, res) => {
+app.post('/api/orders', orderLimiter, async (req, res) => {
   const { customerId, items, customerName, paymentMethod, deliveryLocation, deliveryFee, gpsCoords, couponCode, discount } = req.body;
   if (!customerId || !items || !items.length) return res.status(400).json({ error: 'Missing data' });
+  if (!Array.isArray(items) || items.length > 100) return res.status(400).json({ error: 'Invalid basket' });
   try {
-    let fee = parseFloat(deliveryFee) || 0;
+    const phoneClean = String(customerId).replace(/[^0-9]/g, '');
+    if (!phoneClean) return res.status(400).json({ error: 'Valid phone number required' });
+
+    // ===== BANK-GRADE PRICE VERIFICATION =====
+    // Every cart line MUST resolve to a real product in the live catalogue,
+    // and the price is ALWAYS the catalogue price — a tampered request (e.g.
+    // "price: 1" on a KES 500 item, or a stripped _id) is ignored and the
+    // order is rejected if any line can't be verified. The catalogue is
+    // fetched ONCE and resolved in memory by String(_id) / name — identical
+    // behaviour on MongoDB and the offline mock, and fast for any basket size.
+    const catalog = await products_.find().toArray();
+    const findInCatalog = (raw) => {
+      const id = raw._id || raw.id;
+      if (id && ObjectId.isValid(id)) {
+        return catalog.find(p => p && String(p._id) === String(id)) || null;
+      }
+      const name = String(raw.name || '').trim().toLowerCase();
+      if (!name) return null;
+      return catalog.find(p => p && String(p.name || '').trim().toLowerCase() === name) || null;
+    };
+    const cleanItems = [];
+    for (const raw of items) {
+      if (!raw || typeof raw !== 'object') continue;
+      const qty = Math.max(1, Math.min(99, Math.abs(parseInt(raw.quantity, 10) || 1)));
+      const product = findInCatalog(raw);
+      if (!product) {
+        return res.status(400).json({ error: `One of the items in your basket is not in the catalogue ("${String(raw.name || raw._id || 'unknown').slice(0, 40)}"). Please refresh the shop and add it again.` });
+      }
+      const price = Math.min(Math.max(0, parseFloat(product.price) || 0), 1000000);
+      const name = String(product.name || raw.name || '').slice(0, 120);
+      cleanItems.push({ _id: String(product._id), id: String(product._id), name, price, quantity: qty, priceVerified: true });
+    }
+    if (!cleanItems.length) return res.status(400).json({ error: 'Your basket is empty' });
+    const itemsTotal = cleanItems.reduce((s, i) => s + i.price * i.quantity, 0);
+
+    // ===== 1-MINUTE DUPLICATE-ORDER GUARD =====
+    // The same phone may not place the SAME basket twice within 60 seconds
+    // (double-tap / paying twice for the same thing). Different baskets are
+    // always allowed — only exact duplicates are refused.
+    const sig = (list) => (list || [])
+      .map(i => `${i._id || i.id || i.name}|${Math.abs(parseInt(i.quantity, 10) || 1)}`)
+      .sort().join('::');
+    try {
+      const recent = await orders_.find({ customerId: phoneClean, createdAt: { $gt: new Date(Date.now() - 60 * 1000) } }).toArray();
+      const dup = recent.find(o => o && o.items && sig(o.items) === sig(cleanItems));
+      if (dup) {
+        return res.status(429).json({ success: false, error: 'You placed this exact order a moment ago — please wait at least 1 minute before ordering the same items again.' });
+      }
+    } catch (e) { /* guard is best-effort — never block a real order on a DB error */ }
+
+    let fee = Math.min(Math.max(0, parseFloat(deliveryFee) || 0), 100000);
+    // The transport fee is set by the SHOP (the person processing the order),
+    // never the customer. The client-supplied value is kept as a provisional
+    // estimate so the order total is meaningful, but staff must confirm the
+    // real fee in the Orders tab before dispatch (see PUT /orders/:id).
+    let freeDeliveryApplied = false;
     // Never trust the client's discount amount — recompute it from the coupon
     // on the server so promo discounts can't be faked, AND re-run the full
     // eligibility check (owner phone, already used, expiry, limit) so a used
@@ -523,17 +670,15 @@ app.post('/api/orders', async (req, res) => {
         const cc = String(couponCode).toUpperCase();
         const coupon = await coupons_.findOne({ code: cc, active: true });
         if (coupon) {
-          const phoneClean = String(customerId).replace(/[^0-9]/g, '');
           const expired = coupon.expiresAt && new Date(coupon.expiresAt) < new Date();
-          const alreadyUsedByMe = Array.isArray(coupon.usedBy) && coupon.usedBy.includes(customerId);
+          const alreadyUsedByMe = Array.isArray(coupon.usedBy) && (coupon.usedBy.includes(customerId) || coupon.usedBy.includes(phoneClean));
           const foreign = coupon.ownerPhone && String(coupon.ownerPhone) !== phoneClean;
           const limitReached = coupon.maxUses > 0 && (coupon.usedCount || 0) >= coupon.maxUses;
           if (!expired && !alreadyUsedByMe && !foreign && !limitReached) {
             couponEligible = true;
             // A won free-delivery voucher must ACTUALLY zero the delivery fee —
             // the server enforces it, never trusting the client's fee.
-            if (coupon.type === 'free_delivery') fee = 0;
-            const itemsTotal = items.reduce((s, i) => s + i.price * i.quantity, 0);
+            if (coupon.type === 'free_delivery') { fee = 0; freeDeliveryApplied = true; }
             if (coupon.type === 'percent') safeDiscount = itemsTotal * (coupon.value || 0) / 100;
             else if (coupon.type === 'fixed') safeDiscount = coupon.value || 0;
             safeDiscount = Math.min(safeDiscount, itemsTotal + fee);
@@ -541,12 +686,10 @@ app.post('/api/orders', async (req, res) => {
         }
       } catch (e) { console.error('Failed to recompute discount:', e); }
     }
-    const itemsTotal = items.reduce((s, i) => s + i.price * i.quantity, 0);
     const discountAmt = Math.round(safeDiscount * 100) / 100;
     const baseTotal = Math.max(0, itemsTotal + fee - discountAmt);
 
     let walletApplied = 0;
-    const phoneClean = String(customerId).replace(/[^0-9]/g, '');
     if (req.body.useWallet) {
       try {
         const loyalty = await loyalty_.findOne({ phone: phoneClean });
@@ -561,7 +704,7 @@ app.post('/api/orders', async (req, res) => {
     }
 
     const order = {
-      customerId, customerName, items,
+      customerId: phoneClean, customerName, items: cleanItems,
       totalPrice: Math.max(0, baseTotal - walletApplied),
       walletApplied: Math.round(walletApplied * 100) / 100,
       paymentMethod: paymentMethod || 'delivery',
@@ -570,6 +713,8 @@ app.post('/api/orders', async (req, res) => {
       createdAt: new Date(),
       deliveryLocation: deliveryLocation || '',
       deliveryFee: fee,
+      deliveryFeeConfirmed: freeDeliveryApplied, // provisional until the shop sets it
+      deliveryFeeSetBy: freeDeliveryApplied ? 'shop (free delivery voucher)' : null,
       gpsCoords: gpsCoords || null,
       gpsAccuracy: (gpsCoords && gpsCoords.accuracy) ? gpsCoords.accuracy : null,
       shopCoords: SHOP_COORDS,
@@ -580,7 +725,7 @@ app.post('/api/orders', async (req, res) => {
       deliveredAt: null
     };
     const result = await orders_.insertOne(order);
-    for (const it of items) { const id = it._id || it.id; if (id && ObjectId.isValid(id)) await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: -Math.abs(it.quantity) } }); }
+    for (const it of cleanItems) { const id = it._id || it.id; if (id && ObjectId.isValid(id)) await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: -Math.abs(it.quantity) } }); }
 
     // Keep the customer's shopping record (keyed by phone) up to date.
     try {
@@ -657,6 +802,23 @@ const requirePermission = (perm) => {
     return res.status(403).json({ error: 'Insufficient permissions' });
   };
 };
+
+// Lightweight audit trail — every money/security-sensitive admin action is
+// recorded (fire-and-forget so a logging hiccup can never break a request).
+// Readable from the Admin → Delete tab (audit_logs record type).
+async function auditLog(req, action, details) {
+  try {
+    if (!audit_logs_) return;
+    await audit_logs_.insertOne({
+      action: String(action || '').slice(0, 80),
+      details: String(details || '').slice(0, 400),
+      by: req.user ? (req.user.name || req.user.username || 'unknown') : 'system',
+      byRole: req.user ? (req.user.role || '') : 'system',
+      ip: (req.ip || '').slice(0, 64),
+      createdAt: new Date()
+    });
+  } catch (e) { console.error('auditLog failed:', e.message); }
+}
 
 // Helper branchFilter definition moved to top level
 
@@ -1131,6 +1293,7 @@ app.put('/api/admin/orders/:orderId', authenticate, async (req, res) => {
   try {
     const { status, deliveryFee, deliveryProgress } = req.body;
     const update = {};
+    let feeNotify = null; // { fee, total } — pushed to the customer after a confirmed fee change
     if (status !== undefined) {
       update.status = status;
       // Set dispatch timestamp when order goes out for delivery
@@ -1148,13 +1311,26 @@ app.put('/api/admin/orders/:orderId', authenticate, async (req, res) => {
       }
     }
     if (deliveryProgress !== undefined) update.deliveryProgress = deliveryProgress;
+    // ===== TRANSPORT FEE — SET BY THE PERSON PROCESSING THE ORDER =====
+    // The app can't estimate distance-based fees, so whoever processes the
+    // order (shop owner, staff or a hired boda-boda rider) types the fee they
+    // will charge. The server marks it confirmed, recomputes the total on the
+    // customer's side (including any wallet cash already applied) and pushes
+    // the final amount due to the customer.
     if (deliveryFee !== undefined) {
-      const fee = parseFloat(deliveryFee) || 0;
+      const fee = Math.min(Math.max(0, parseFloat(deliveryFee) || 0), 100000);
+      if (isNaN(fee) || fee < 0) return res.status(400).json({ error: 'Invalid transport fee' });
       update.deliveryFee = fee;
+      update.deliveryFeeConfirmed = true;
+      update.deliveryFeeSetBy = req.user ? (req.user.name || req.user.username || 'admin') : 'admin';
+      update.deliveryFeeSetAt = new Date();
       const order = await orders_.findOne({ _id: new ObjectId(req.params.orderId) });
       if (order) {
         const itemsTotal = order.items.reduce((s, i) => s + i.price * i.quantity, 0);
-        update.totalPrice = Math.max(0, itemsTotal + fee - (order.discount || 0));
+        const walletApplied = order.walletApplied || 0;
+        const newTotal = Math.max(0, itemsTotal + fee - (order.discount || 0) - walletApplied);
+        update.totalPrice = Math.round(newTotal * 100) / 100;
+        feeNotify = { fee, total: update.totalPrice };
       }
     }
     const r = await orders_.updateOne({ _id: new ObjectId(req.params.orderId) }, { $set: update });
@@ -1174,8 +1350,14 @@ app.put('/api/admin/orders/:orderId', authenticate, async (req, res) => {
           }
         }
         else if (updated.status === 'cancelled') sendPushToPhone(updated.customerId, '❌ Order cancelled', 'Your BlitzMall order was cancelled.');
+        // Tell the customer the FINAL transport fee + amount due (never the
+        // provisional one they saw at checkout).
+        if (feeNotify && feeNotify.total !== undefined) {
+          sendPushToPhone(updated.customerId, '🚚 Transport fee set', `Your delivery transport fee is KES ${feeNotify.fee}. Final amount due: KES ${feeNotify.total}.`);
+        }
       }
     } catch (e) { console.error('Order status push failed:', e.message); }
+    auditLog(req, 'order_updated', `Order ${req.params.orderId} updated ${feeNotify ? '— transport fee set to KES ' + feeNotify.fee : ''}`);
     res.json({ success: true });
   } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); }
 });
@@ -1492,11 +1674,14 @@ const REFEREE_BONUS_POINTS = 50;
 const LOYALTY_SETTINGS_DEFAULTS = {
   earnRate: 200, // KES spent per 1 point
   tierThresholds: { silver: 200, gold: 600, platinum: 1500 },
+  // Owner currency: 5 points = KES 1 (100 PTS = KES 20 cashback). These are
+  // editable in Admin → Loyalty Controls and drive BOTH the customer Points
+  // Redemption Store and the counter redemption.
   redeemTiers: [
-    { points: 100, value: 100 },
-    { points: 250, value: 250 },
-    { points: 500, value: 600 },
-    { points: 1000, value: 1300 }
+    { points: 100, value: 20 },
+    { points: 250, value: 50 },
+    { points: 500, value: 100 },
+    { points: 1000, value: 200 }
   ],
   jackpotEnabled: true,
   spinCooldownHours: 24,
@@ -1535,7 +1720,28 @@ const seedLoyaltySettings = async () => {
   try {
     if (!loyalty_settings_) return;
     const exists = await loyalty_settings_.findOne({ key: 'default' });
-    if (!exists) await loyalty_settings_.insertOne({ key: 'default', value: LOYALTY_SETTINGS_DEFAULTS, updatedAt: new Date() });
+    if (!exists) {
+      await loyalty_settings_.insertOne({ key: 'default', value: LOYALTY_SETTINGS_DEFAULTS, updatedAt: new Date() });
+      return;
+    }
+    // Migration: shops on the OLD default tables (100 PTS = KES 100 / KES 500)
+    // are moved to the owner's currency (5 pts = KES 1). Custom tiers the
+    // owner saved themselves are NEVER touched.
+    try {
+      const stored = exists.value || {};
+      const rt = stored.redeemTiers;
+      const tables = [
+        [[100, 100], [250, 250], [500, 600], [1000, 1300]], // legacy 1pt=KES1
+        [[100, 500], [250, 1250], [500, 2500], [1000, 5000]] // interim 1pt=KES5
+      ];
+      const matches = (t) => Array.isArray(rt) && rt.length === 4 &&
+        tables.some(tbl => tbl.every(([p, v], i) => rt[i] && rt[i].points === p && rt[i].value === v));
+      if (matches()) {
+        await loyalty_settings_.updateOne({ key: 'default' }, { $set: { value: { ...stored, redeemTiers: LOYALTY_SETTINGS_DEFAULTS.redeemTiers }, updatedAt: new Date() } });
+        loyaltySettingsCache = null;
+        console.log('💰 Migrated loyalty currency to 5 pts = KES 1 (owner default)');
+      }
+    } catch (e) { console.error('Loyalty currency migration failed:', e.message); }
   } catch (e) { console.error('Failed to seed loyalty settings:', e); }
 };
 
@@ -1596,9 +1802,10 @@ app.get('/api/admin/loyalty/:phone', authenticate, async (req, res) => {
   } catch (e) { console.error('Failed to lookup loyalty:', e); res.status(500).json({ error: 'Failed to lookup loyalty' }); }
 });
 
-app.put('/api/admin/loyalty/:phone', authenticate, async (req, res) => {
+app.put('/api/admin/loyalty/:phone', authenticate, authorize('owner', 'manager'), async (req, res) => {
   try {
-    const r = await loyalty_.updateOne({ phone: req.params.phone }, { $set: { customerName: req.body.customerName || '' } });
+    const r = await loyalty_.updateOne({ phone: String(req.params.phone).replace(/[^0-9]/g, '') }, { $set: { customerName: req.body.customerName || '' } });
+    auditLog(req, 'loyalty_name_updated', 'Renamed loyalty customer ' + req.params.phone);
     res.json({ success: true });
   } catch (e) { console.error('Failed to update:', e); res.status(500).json({ error: 'Failed to update' }); }
 });
@@ -1633,13 +1840,13 @@ app.post('/api/admin/loyalty/redeem', authenticate, async (req, res) => {
   } catch (e) { console.error('Failed to redeem:', e); res.status(500).json({ error: 'Failed to redeem' }); }
 });
 
-app.post('/api/loyalty/convert-to-wallet', async (req, res) => {
+app.post('/api/loyalty/convert-to-wallet', walletLimiter, async (req, res) => {
   const { phone, points } = req.body;
   const phoneClean = String(phone || '').replace(/[^0-9]/g, '');
   if (!phoneClean) return res.status(400).json({ error: 'Phone required' });
   const ptsToRedeem = parseInt(points, 10);
   if (isNaN(ptsToRedeem) || ptsToRedeem <= 0) return res.status(400).json({ error: 'Valid points amount required' });
-  if (ptsToRedeem % 2 !== 0) return res.status(400).json({ error: 'Points must be redeemed in multiples of 2' });
+  if (ptsToRedeem % 5 !== 0) return res.status(400).json({ error: 'Points must be converted in multiples of 5' });
 
   try {
     const loyalty = await loyalty_.findOne({ phone: phoneClean });
@@ -1647,7 +1854,7 @@ app.post('/api/loyalty/convert-to-wallet', async (req, res) => {
       return res.status(400).json({ error: 'Insufficient loyalty points' });
     }
 
-    const cashAmount = ptsToRedeem / 2; // 2 points = 1 KES
+    const cashAmount = ptsToRedeem / 5; // 5 points = KES 1 (owner currency)
     const newPoints = (loyalty.points || 0) - ptsToRedeem;
     const newWalletBalance = (loyalty.walletBalance || 0) + cashAmount;
 
@@ -1684,26 +1891,32 @@ app.post('/api/loyalty/convert-to-wallet', async (req, res) => {
   }
 });
 
-app.post('/api/admin/loyalty/add-points', async (req, res) => {
+app.post('/api/admin/loyalty/add-points', authenticate, authorize('owner', 'manager'), async (req, res) => {
   const { phone, points } = req.body;
   if (!phone || !points) return res.status(400).json({ error: 'Phone and points required' });
   try {
-    const existing = await loyalty_.findOne({ phone });
+    // CRITICAL anti-fraud fix: this endpoint used to be open to ANYONE, so a
+    // hacker could mint unlimited loyalty points. Now owner/manager only.
+    const cleanPhone = String(phone).replace(/[^0-9]/g, '');
+    const pts = Math.max(0, parseInt(points, 10) || 0);
+    const existing = await loyalty_.findOne({ phone: cleanPhone });
     if (existing) {
-      const newPoints = Math.max(0, (existing.points || 0) + parseInt(points));
-      await loyalty_.updateOne({ phone }, { $set: { points: newPoints, tier: tierFromPoints(newPoints), updatedAt: new Date() } });
+      const newPoints = (existing.points || 0) + pts;
+      await loyalty_.updateOne({ phone: cleanPhone }, { $set: { points: newPoints, tier: tierFromPoints(newPoints), updatedAt: new Date() } });
+      auditLog(req, 'points_added', `Added ${pts} pts to ${cleanPhone} (new balance ${newPoints})`);
       res.json({ success: true, points: newPoints });
     } else {
       await loyalty_.insertOne({
-        phone,
+        phone: cleanPhone,
         customerName: '',
         totalSpent: 0,
-        points: Math.max(0, parseInt(points)),
-        tier: tierFromPoints(parseInt(points)),
+        points: pts,
+        tier: tierFromPoints(pts),
         createdAt: new Date(),
         updatedAt: new Date()
       });
-      res.json({ success: true, points: parseInt(points) });
+      auditLog(req, 'points_added', `Created loyalty record for ${cleanPhone} with ${pts} pts`);
+      res.json({ success: true, points: pts });
     }
   } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to add points' }); }
 });
@@ -1787,6 +2000,17 @@ app.put('/api/admin/loyalty/settings', authenticate, authorize('owner', 'manager
       } else {
         delete next[key];
       }
+    }
+    // Sanitise the redemption tiers (the store currency): positive points,
+    // non-negative KES value, sorted ascending, never empty.
+    if (Array.isArray(next.redeemTiers)) {
+      const cleaned = next.redeemTiers
+        .filter(x => x && Number.isFinite(parseFloat(x.points)) && parseFloat(x.points) > 0 && Number.isFinite(parseFloat(x.value)) && parseFloat(x.value) >= 0)
+        .map(x => ({ points: Math.floor(parseFloat(x.points)), value: Math.round(parseFloat(x.value) * 100) / 100 }))
+        .sort((a, b) => a.points - b.points);
+      next.redeemTiers = cleaned.length ? cleaned : LOYALTY_SETTINGS_DEFAULTS.redeemTiers;
+    } else {
+      next.redeemTiers = LOYALTY_SETTINGS_DEFAULTS.redeemTiers;
     }
     await saveLoyaltySettings(next);
     res.json({ success: true, settings: next });
@@ -1879,8 +2103,8 @@ app.get('/api/customers/:phone', async (req, res) => {
       loyaltyTier: loyalty ? loyalty.tier : tier,
       tier,
       walletBalance: loyalty ? loyalty.walletBalance || 0 : 0,
-      // Virtual-wallet conversion rate (2 loyalty points = KES 1 wallet cash).
-      walletRatePointsPerKsh: 2,
+      // Virtual-wallet conversion rate (5 loyalty points = KES 1 wallet cash).
+      walletRatePointsPerKsh: 5,
       vouchers: vouchers.map(v => ({
         code: v.code, type: v.type, value: v.value, minPurchase: v.minPurchase || 0,
         used: (Array.isArray(v.usedBy) && v.usedBy.includes(phone)),
@@ -1989,6 +2213,51 @@ async function issueVoucher({ phone, type, value, minPurchase, prefix }) {
   return code;
 }
 
+// Atomic promo cooldown slot — the single source of truth for "has this phone
+// claimed this promo recently". The findOneAndUpdate upsert (cutoff inside the
+// filter) is atomic on MongoDB: two simultaneous spins can never both pass —
+// one insert wins, the loser is refused. This closes the double-spin race that
+// could otherwise farm points/coupons.
+async function claimPromoSlot(phone, type, cooldownMs) {
+  const key = `${phone}:${type}`;
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - cooldownMs);
+  const readSlot = async () => {
+    const existing = await promo_cooldowns_.findOne({ _id: key });
+    return existing ? new Date(new Date(existing.at).getTime() + cooldownMs) : null;
+  };
+  try {
+    const r = await promo_cooldowns_.findOneAndUpdate(
+      { _id: key, at: { $lte: cutoff } },
+      { $set: { phone, type, at: now, updatedAt: now } },
+      { upsert: true, returnDocument: 'after' }
+    );
+    const doc = r && typeof r === 'object' && r.value !== undefined ? r.value : r;
+    if (doc && doc._id === key) return { granted: true, nextAt: null };
+    return { granted: false, nextAt: await readSlot() };
+  } catch (e) {
+    // Upsert race — a concurrent claim already won this slot.
+    if (e && (e.code === 11000 || /duplicate/i.test(e.message || ''))) {
+      return { granted: false, nextAt: await readSlot() };
+    }
+    // Storage hiccup — never hard-fail the promo; degrade to a plain check.
+    const existing = await promo_cooldowns_.findOne({ _id: key });
+    return {
+      granted: !existing || new Date(existing.at) <= cutoff,
+      nextAt: existing ? new Date(new Date(existing.at).getTime() + cooldownMs) : null
+    };
+  }
+}
+
+const alreadyUsedPromoResponse = (claimed, cooldownHours, day) => ({
+  success: false, alreadyUsed: true, day, nextAt: new Date(new Date(claimed.at).getTime() + cooldownHours * 3600 * 1000),
+  tier: claimed.tier || 'Bronze',
+  prizeName: claimed.prizeName || 'again',
+  title: claimed.title || '', message: claimed.message || `Already claimed — come back in ${cooldownHours}h!`,
+  code: claimed.code || '', pointsAdded: claimed.pointsAdded || 0,
+  sectorIndex: claimed.sectorIndex !== undefined ? claimed.sectorIndex : 1
+});
+
 async function runPromo({ phone, name, type }) {
   const phoneClean = String(phone || '').replace(/[^0-9]/g, '');
   if (!phoneClean) return { success: false, error: 'Phone required' };
@@ -1996,20 +2265,12 @@ async function runPromo({ phone, name, type }) {
   const cooldownHours = type === 'spin' ? (s.spinCooldownHours || 24) : (s.scratchCooldownHours || 48);
   const cooldownMs = cooldownHours * 3600 * 1000;
   const day = promoDayKey();
+  const cutoff = new Date(Date.now() - cooldownMs);
 
-  // Rolling cooldown window (24h spin / 48h scratch) — not calendar days.
-  const claimed = await promo_claims_.findOne({ phone: phoneClean, type, at: { $gt: new Date(Date.now() - cooldownMs) } });
-  if (claimed) {
-    const nextAt = new Date(new Date(claimed.at).getTime() + cooldownMs);
-    return {
-      success: false, alreadyUsed: true, day, nextAt,
-      tier: claimed.tier || 'Bronze',
-      prizeName: claimed.prizeName || 'again',
-      title: claimed.title || '', message: claimed.message || `Already claimed — come back in ${cooldownHours}h!`,
-      code: claimed.code || '', pointsAdded: claimed.pointsAdded || 0,
-      sectorIndex: claimed.sectorIndex !== undefined ? claimed.sectorIndex : 1
-    };
-  }
+  // Read-only check purely for the friendly "come back later" response (the
+  // authoritative gate is the atomic slot claimed below).
+  const claimed = await promo_claims_.findOne({ phone: phoneClean, type, at: { $gt: cutoff } });
+  if (claimed) return alreadyUsedPromoResponse(claimed, cooldownHours, day);
 
   // Anti-abuse gate: at least two completed (non-cancelled) orders required.
   const orders = await orders_.find({ customerId: phoneClean }).toArray();
@@ -2019,6 +2280,19 @@ async function runPromo({ phone, name, type }) {
       success: false,
       error: type === 'spin' ? 'Complete two purchases to unlock Lucky Spin.' : 'Complete two purchases to unlock the Scratch Card.',
       orderCount: completed.length, minOrders: s.minOrdersForPromo || 2
+    };
+  }
+
+  // ===== ATOMIC SLOT CLAIM — consumed BEFORE any prize is awarded, so two
+  // concurrent spins can never both win.
+  const slot = await claimPromoSlot(phoneClean, type, cooldownMs);
+  if (!slot.granted) {
+    const hist = await promo_claims_.findOne({ phone: phoneClean, type, at: { $gt: cutoff } });
+    if (hist) return alreadyUsedPromoResponse(hist, cooldownHours, day);
+    return {
+      success: false, alreadyUsed: true, day, nextAt: slot.nextAt,
+      tier: 'Bronze', prizeName: 'again', title: 'Already Claimed!',
+      message: `Come back in ${cooldownHours}h for another go.`
     };
   }
 
@@ -2092,14 +2366,14 @@ async function runPromo({ phone, name, type }) {
   };
 }
 
-app.post('/api/promos/spin', async (req, res) => {
+app.post('/api/promos/spin', promosLimiter, async (req, res) => {
   try {
     const r = await runPromo({ phone: req.body.phone, name: req.body.name, type: 'spin' });
     res.json(r);
   } catch (e) { console.error('Spin failed:', e); res.status(500).json({ error: 'Failed to spin' }); }
 });
 
-app.post('/api/promos/scratch', async (req, res) => {
+app.post('/api/promos/scratch', promosLimiter, async (req, res) => {
   try {
     const r = await runPromo({ phone: req.body.phone, name: req.body.name, type: 'scratch' });
     res.json(r);
@@ -2686,26 +2960,30 @@ app.post('/api/mpesa/query', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed to query status' }); }
 });
 
-// Seed default loyalty rewards if collection is empty
+// Seed the legacy loyalty_rewards_ collection from the OWNER'S currency so even
+// old clients that read it directly see the same tiers as the settings-driven
+// /api/loyalty/rewards endpoint. Must run AFTER seedLoyaltySettings (which
+// migrates legacy default currencies).
 const seedRewards = async () => {
   try {
     if (!loyalty_rewards_) return;
-    // Upsert (not insert-if-empty) so existing databases get the new tier
-    // table: 100→KES100, 250→KES250, 500→KES600, 1000→KES1300.
-    const tiers = [
-      { name: 'KES 100 Discount Coupon', pointsCost: 100, rewardType: 'coupon', rewardValue: 100, active: true },
-      { name: 'KES 250 Discount Coupon', pointsCost: 250, rewardType: 'coupon', rewardValue: 250, active: true },
-      { name: 'KES 600 Discount Coupon', pointsCost: 500, rewardType: 'coupon', rewardValue: 600, active: true },
-      { name: 'KES 1300 Discount Coupon', pointsCost: 1000, rewardType: 'coupon', rewardValue: 1300, active: true }
-    ];
+    const s = await getLoyaltySettings();
+    const tiers = (s.redeemTiers || [])
+      .filter(t => t && parseFloat(t.points) > 0)
+      .sort((a, b) => parseFloat(a.points) - parseFloat(b.points))
+      .map(t => ({
+        name: `KES ${Math.round(parseFloat(t.value))} Discount Coupon`,
+        pointsCost: Math.floor(parseFloat(t.points)),
+        rewardType: 'coupon',
+        rewardValue: Math.round(parseFloat(t.value) * 100) / 100,
+        active: true
+      }));
     for (const t of tiers) {
       await loyalty_rewards_.updateOne({ pointsCost: t.pointsCost }, { $set: t }, { upsert: true });
     }
-    // Deactivate legacy rewards that aren't in the new tier table (old
-    // 'KES 250 @ 200 pts', 'KES 750 @ 500', 'Free Blitz Drink @ 50'...) so the
-    // customer store never shows stale, misleading or sub-100-point offers.
-    await loyalty_rewards_.updateMany({ pointsCost: { $nin: [100, 250, 500, 1000] } }, { $set: { active: false } });
-    console.log('✅ Seeded default loyalty rewards');
+    // Deactivate stale tiers no longer in the owner's table.
+    await loyalty_rewards_.updateMany({ pointsCost: { $nin: tiers.map(t => t.pointsCost) } }, { $set: { active: false } });
+    console.log('✅ Seeded loyalty rewards from owner currency');
   } catch (err) {
     console.error('Failed to seed loyalty rewards:', err);
   }
@@ -3078,30 +3356,59 @@ app.post('/api/admin/transfers/:id/complete', authenticate, authorize('owner'), 
 });
 
 // Loyalty Program Points Store
+// Customer Points Redemption Store — the catalogue is the OWNER'S redeemTiers
+// from Admin → Loyalty Controls (settings-driven, so whatever currency the
+// owner set is exactly what shoppers see). Stable ids 'tier-<points>' let the
+// app trade without ever depending on internal collection ids.
 app.get('/api/loyalty/rewards', async (req, res) => {
   try {
-    const rewards = await loyalty_rewards_.find({ active: true }).toArray();
-    res.json(rewards);
+    const s = await getLoyaltySettings();
+    const tiers = (Array.isArray(s.redeemTiers) ? s.redeemTiers : [])
+      .filter(t => t && parseFloat(t.points) > 0)
+      .sort((a, b) => parseFloat(a.points) - parseFloat(b.points));
+    res.json(tiers.map(t => ({
+      _id: 'tier-' + Math.floor(parseFloat(t.points)),
+      name: `KES ${Math.round(parseFloat(t.value))} Discount Coupon`,
+      pointsCost: Math.floor(parseFloat(t.points)),
+      rewardType: 'coupon',
+      rewardValue: Math.round(parseFloat(t.value) * 100) / 100,
+      active: true
+    })));
   } catch (e) {
     console.error('API error:', e);
     res.status(500).json({ error: 'Failed' });
   }
 });
 
-// Loyalty Program: Redeem Points Reward
+// Loyalty Program: Redeem Points Reward (settings-driven tiers + legacy ids)
 app.post('/api/loyalty/redeem-reward', async (req, res) => {
   const { customerId, rewardId } = req.body;
   if (!customerId || !rewardId) return res.status(400).json({ error: 'Missing parameters' });
   try {
-    const reward = await loyalty_rewards_.findOne({ _id: new ObjectId(rewardId) });
+    const phoneClean = String(customerId).replace(/[^0-9]/g, '');
+    if (!phoneClean) return res.status(400).json({ error: 'Valid phone number required' });
+
+    // Resolve the reward from the OWNER'S settings ('tier-<points>'), falling
+    // back to legacy loyalty_rewards_ documents for old clients.
+    let reward = null;
+    if (String(rewardId).startsWith('tier-')) {
+      const points = parseInt(String(rewardId).slice(5), 10);
+      const s = await getLoyaltySettings();
+      const tier = (s.redeemTiers || []).find(t => t && Math.floor(parseFloat(t.points)) === points);
+      if (tier) {
+        reward = { name: `KES ${Math.round(parseFloat(tier.value))} Discount Coupon`, pointsCost: Math.floor(parseFloat(tier.points)), rewardType: 'coupon', rewardValue: Math.round(parseFloat(tier.value) * 100) / 100 };
+      }
+    } else if (ObjectId.isValid(rewardId)) {
+      reward = await loyalty_rewards_.findOne({ _id: new ObjectId(rewardId) });
+    }
     if (!reward) return res.status(404).json({ error: 'Reward not found' });
 
-    const member = await loyalty_.findOne({ phone: customerId });
+    const member = await loyalty_.findOne({ phone: phoneClean });
     if (!member || (member.points || 0) < reward.pointsCost) {
       return res.status(400).json({ error: 'Insufficient points' });
     }
 
-    await loyalty_.updateOne({ phone: customerId }, { $inc: { points: -reward.pointsCost } });
+    await loyalty_.updateOne({ phone: phoneClean }, { $inc: { points: -reward.pointsCost }, $set: { tier: tierFromPoints(Math.max(0, (member.points || 0) - reward.pointsCost)), updatedAt: new Date() } });
 
     let code = '';
     if (reward.rewardType === 'coupon') {
@@ -3117,17 +3424,18 @@ app.post('/api/loyalty/redeem-reward', async (req, res) => {
         usedBy: [],
         // Bind the coupon to the phone that redeemed it — won offers must only
         // work for the customer who earned them.
-        ownerPhone: String(customerId).replace(/[^0-9]/g, ''),
+        ownerPhone: phoneClean,
         active: true,
         createdAt: new Date()
       });
     }
 
     await redemptions_.insertOne({
-      customerId,
-      rewardId: reward._id,
+      customerId: phoneClean,
+      rewardId: String(rewardId),
       rewardName: reward.name,
       pointsSpent: reward.pointsCost,
+      rewardValue: reward.rewardValue || 0,
       couponCode: code || null,
       createdAt: new Date()
     });
@@ -4121,6 +4429,7 @@ const RECORD_COLLS = {
   banners: banners_,
   loyalty: loyalty_,
   promo_claims: promo_claims_,
+  promo_cooldowns: promo_cooldowns_, // wiping this resets every shopper's spin/scratch cooldowns
   saved_baskets: saved_baskets_,
   stock_transfers: stock_transfers_,
   shifts: shifts_,
@@ -4156,6 +4465,7 @@ app.delete('/api/admin/records', authenticate, authorize('owner'), async (req, r
         if (t === 'products') productCache.del('all_products'); // never serve wiped inventory from cache
       } catch (e) { console.error('Failed to wipe collection:', t, e); }
     }
+    auditLog(req, 'records_deleted', `Wiped ${deleted} record(s) from: ${done.join(', ')}`);
     res.json({ success: true, deleted, types: done });
   } catch (e) {
     console.error('records delete error:', e);
@@ -4323,16 +4633,29 @@ app.get('/api/notifications/status', async (req, res) => {
 });
 
 // Owner sends a push to one customer (phone) or to every registered device.
+// ALWAYS delivers to the in-app notification feed (PC toasts + app inbox) so
+// the Notify tab works out of the box; real OS-level device push fires too
+// once FCM_SERVICE_ACCOUNT_JSON is configured on the server.
 app.post('/api/admin/notifications/send', authenticate, authorize('owner'), async (req, res) => {
   const { title, body, phone } = req.body;
   if (!title || !body) return res.status(400).json({ error: 'Title and message required' });
   try {
-    if (!fcmConfigured()) {
-      return res.status(503).json({ error: 'Push is not configured yet — add FCM_SERVICE_ACCOUNT_JSON to the server env.' });
-    }
     const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '') : '';
+    // sendPushToPhone / sendPushToAll write the feed event first and only then
+    // attempt real FCM delivery — so in-app delivery happens regardless of
+    // whether the service account is configured.
     const result = cleanPhone ? await sendPushToPhone(cleanPhone, title, body) : await sendPushToAll(title, body);
-    res.json({ success: true, ...result });
+    const configured = fcmConfigured();
+    auditLog(req, 'notification_sent', `Sent "${String(title).slice(0, 60)}" ${cleanPhone ? 'to ' + cleanPhone : 'to everyone'}`);
+    res.json({
+      success: true,
+      ...result,
+      inApp: true,
+      serverFcmConfigured: configured,
+      message: configured
+        ? `✅ Delivered in-app ${result.sent ? `+ pushed to ${result.sent} device(s)` : '(no devices registered yet)'}.`
+        : `✅ Delivered to the in-app feed${result.sent ? ` + ${result.sent} device(s)` : ''}. Real device push is OFF — add FCM_SERVICE_ACCOUNT_JSON to the server to switch it on.`
+    });
   } catch (e) {
     console.error('notifications/send error:', e);
     res.status(500).json({ error: 'Failed to send notification' });

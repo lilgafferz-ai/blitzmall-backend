@@ -5,6 +5,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
+const { getOwnerToken } = require('./helpers');
 const { customerTier, tierFromPoints, earnPoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS } = _test || {};
 
 // Unique 10-digit phone per call so a prior test run's promo claim can never
@@ -12,8 +13,25 @@ const { customerTier, tierFromPoints, earnPoints, issueVoucher, pickWeighted, WH
 let seq = 1000;
 const freshPhone = () => { seq += 7; return '07' + String(Date.now() + seq).slice(-8); };
 
+// Orders now REQUIRE every item to resolve to a real catalogue product (server
+// prices are authoritative), so the promo tests create their own products.
+let PRODUCTS = {};
+
 beforeAll(async () => {
   await connectDb();
+  const token = await getOwnerToken(request, app);
+  const create = async (name, price) => {
+    const r = await request(app)
+      .post('/api/admin/products')
+      .set({ Authorization: 'Bearer ' + token })
+      .send({ name, price, buyingPrice: Math.round(price * 0.7), stock: 50, image: [] });
+    return r.body && r.body.productId;
+  };
+  // Unique names (PT- prefix) so test files sharing the test DB never collide.
+  PRODUCTS.milk = await create('PT-Milk', 120);
+  PRODUCTS.bread = await create('PT-Bread', 300);
+  PRODUCTS.item0 = await create('PT-Item 0', 150);
+  PRODUCTS.item1 = await create('PT-Item 1', 150);
 });
 
 afterAll(async () => {
@@ -50,11 +68,12 @@ describe('Points earning (business-first)', () => {
     expect(s.earnRate).toBe(200);
     expect(s.jackpotEnabled).toBe(true);
     expect(s.minOrdersForPromo).toBe(2);
+    // Owner currency: 5 pts = KES 1 (100 PTS = KES 20 cashback).
     expect(s.redeemTiers).toEqual([
-      { points: 100, value: 100 },
-      { points: 250, value: 250 },
-      { points: 500, value: 600 },
-      { points: 1000, value: 1300 }
+      { points: 100, value: 20 },
+      { points: 250, value: 50 },
+      { points: 500, value: 100 },
+      { points: 1000, value: 200 }
     ]);
     expect(LOYALTY_SETTINGS_DEFAULTS.earnRate).toBe(200);
   });
@@ -86,7 +105,7 @@ describe('Promos API (spin wheel + scratch card)', () => {
     const phone = freshPhone();
     // One order is NOT enough — gate blocks the spin.
     await request(app).post('/api/orders').send({
-      customerId: phone, customerName: 'One Order', items: [{ name: 'Milk', price: 120, quantity: 1 }], paymentMethod: 'delivery'
+      customerId: phone, customerName: 'One Order', items: [{ _id: PRODUCTS.milk, quantity: 1 }], paymentMethod: 'delivery'
     });
     const blocked = await request(app).post('/api/promos/spin').send({ phone, name: 'One Order' });
     expect(blocked.statusCode).toBe(200);
@@ -96,7 +115,7 @@ describe('Promos API (spin wheel + scratch card)', () => {
 
     // Second order unlocks it — spin succeeds and lands on a real sector.
     await request(app).post('/api/orders').send({
-      customerId: phone, customerName: 'One Order', items: [{ name: 'Bread', price: 200, quantity: 1 }], paymentMethod: 'delivery'
+      customerId: phone, customerName: 'One Order', items: [{ _id: PRODUCTS.bread, quantity: 1 }], paymentMethod: 'delivery'
     });
     const res = await request(app).post('/api/promos/spin').send({ phone, name: 'One Order' });
     expect(res.statusCode).toBe(200);
@@ -122,7 +141,7 @@ describe('Promos API (spin wheel + scratch card)', () => {
     const phone = freshPhone();
     for (let i = 0; i < 2; i++) {
       await request(app).post('/api/orders').send({
-        customerId: phone, customerName: 'Scratcher', items: [{ name: 'Item ' + i, price: 150, quantity: 1 }], paymentMethod: 'delivery'
+        customerId: phone, customerName: 'Scratcher', items: [{ _id: i === 0 ? PRODUCTS.item0 : PRODUCTS.item1, quantity: 1 }], paymentMethod: 'delivery'
       });
     }
     const res = await request(app).post('/api/promos/scratch').send({ phone, name: 'Scratcher' });
@@ -141,7 +160,7 @@ describe('Promos API (spin wheel + scratch card)', () => {
     // rerolled to a non-cash outcome every single time.
     for (let i = 0; i < 2; i++) {
       await request(app).post('/api/orders').send({
-        customerId: phone, customerName: 'Low Spender', items: [{ name: 'Item ' + i, price: 150, quantity: 1 }], paymentMethod: 'delivery'
+        customerId: phone, customerName: 'Low Spender', items: [{ _id: i === 0 ? PRODUCTS.item0 : PRODUCTS.item1, quantity: 1 }], paymentMethod: 'delivery'
       });
     }
     const res = await request(app).post('/api/promos/spin').send({ phone, name: 'Low Spender' });
@@ -176,7 +195,7 @@ describe('Phone-bound voucher flow', () => {
     const order = await request(app).post('/api/orders').send({
       customerId: owner,
       customerName: 'Owner',
-      items: [{ name: 'Bread', price: 300, quantity: 2 }],
+      items: [{ _id: PRODUCTS.bread, quantity: 2 }],
       paymentMethod: 'delivery',
       couponCode: code,
       discount: 50

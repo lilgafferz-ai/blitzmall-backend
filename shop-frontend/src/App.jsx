@@ -480,6 +480,7 @@ function App() {
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [pointsToConvert, setPointsToConvert] = useState('');
   const [useWalletPayment, setUseWalletPayment] = useState(false);
+  const [lastOrderWasDelivery, setLastOrderWasDelivery] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [deliveryArea, setDeliveryArea] = useState('mall'); // 'mall' | 'standard'
   const [deliveryLocation, setDeliveryLocation] = useState('');
@@ -963,7 +964,17 @@ function App() {
           const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ customerId: order.customerId, customerName: order.customerName, items: order.items, paymentMethod: order.paymentMethod }) });
           const d = await r.json();
-          if (!d.success) synced.push(order);
+          if (!d.success) {
+            // A definitive rejection (4xx: product no longer in the catalogue,
+            // invalid basket…) will NEVER succeed — drop it and tell the
+            // customer instead of retrying forever. Network/server errors
+            // (5xx) stay queued for the next sync.
+            if (r.status >= 400 && r.status < 500) {
+              showToast('⚠️ One offline order could not be placed: ' + ((d && d.error) || 'an item is no longer available'));
+            } else {
+              synced.push(order);
+            }
+          }
         } catch (e) { console.error('Failed to sync offline order:', e); synced.push(order); }
       }
       localStorage.setItem(OFFLINE_ORDERS_KEY, JSON.stringify(synced));
@@ -1257,8 +1268,8 @@ function App() {
       alert('You do not have enough points!');
       return;
     }
-    if (pts % 2 !== 0) {
-      alert('Points must be converted in multiples of 2.');
+    if (pts % 5 !== 0) {
+      alert('Points must be converted in multiples of 5.');
       return;
     }
 
@@ -1270,7 +1281,7 @@ function App() {
       });
       const d = await r.json();
       if (d.success) {
-        showToast(`💰 Converted ${pts} points to KES ${pts / 2} wallet cash!`);
+        showToast(`💰 Converted ${pts} points to KES ${pts / 5} wallet cash!`);
         setShowWalletModal(false);
         setPointsToConvert('');
         loadCustLoyalty();
@@ -1485,6 +1496,7 @@ function App() {
           setCart([]);
           setAppliedCoupon(null);
           setCouponInput('');
+          setLastOrderWasDelivery(!!deliveryLocation);
           setDeliveryLocation('');
           setGpsCoords(null);
           setGpsAddress('');
@@ -1505,6 +1517,7 @@ function App() {
         setCart([]);
         setAppliedCoupon(null);
         setCouponInput('');
+        setLastOrderWasDelivery(!!deliveryLocation);
         setDeliveryLocation('');
         setGpsCoords(null);
         setGpsAddress('');
@@ -1985,7 +1998,7 @@ function App() {
             <div className="futuristic-modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: '340px' }}>
               <button className="modal-close-btn" onClick={() => setShowWalletModal(false)}>✕</button>
               <h2 className="modal-title" style={{ color: 'var(--gold)' }}>🪙 Convert Points to Cash</h2>
-              <p className="modal-subtitle" style={{ marginBottom: 16 }}>Redeem your loyalty points directly into your virtual wallet at a rate of 2 points = KES 1.</p>
+              <p className="modal-subtitle" style={{ marginBottom: 16 }}>Redeem your loyalty points directly into your virtual wallet at a rate of 5 points = KES 1.</p>
               
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
                 <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 10, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1995,7 +2008,7 @@ function App() {
                 
                 <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 10, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span className="muted" style={{ fontSize: '.75rem' }}>Est. Wallet Value</span>
-                  <b style={{ fontSize: '1.05rem', color: 'var(--green)' }}>KES {Math.floor((custLoyalty?.points || 0) / 2).toLocaleString('en-KE')}</b>
+                  <b style={{ fontSize: '1.05rem', color: 'var(--green)' }}>KES {Math.floor((custLoyalty?.points || 0) / 5).toLocaleString('en-KE')}</b>
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -2012,13 +2025,13 @@ function App() {
                     <button 
                       type="button" 
                       className="btn-ghost" 
-                      onClick={() => setPointsToConvert(String(Math.floor((custLoyalty?.points || 0) / 2) * 2))}
+                      onClick={() => setPointsToConvert(String(Math.floor((custLoyalty?.points || 0) / 5) * 5))}
                       style={{ padding: '0 10px', fontSize: '.72rem', borderRadius: 8 }}
                     >
                       Max
                     </button>
                   </div>
-                  <small className="muted" style={{ fontSize: '.68rem' }}>* Must be a multiple of 2 points</small>
+                  <small className="muted" style={{ fontSize: '.68rem' }}>* Must be a multiple of 5 points (5 PTS = KES 1)</small>
                 </div>
               </div>
 
@@ -2036,7 +2049,7 @@ function App() {
                   className="btn-neon" 
                   onClick={handleConvertToWallet}
                   style={{ flex: 1, padding: '10px', background: 'var(--grad)', color: '#000' }}
-                  disabled={!pointsToConvert || parseInt(pointsToConvert) <= 0 || parseInt(pointsToConvert) > (custLoyalty?.points || 0) || parseInt(pointsToConvert) % 2 !== 0}
+                  disabled={!pointsToConvert || parseInt(pointsToConvert) <= 0 || parseInt(pointsToConvert) > (custLoyalty?.points || 0) || parseInt(pointsToConvert) % 5 !== 0}
                 >
                   Convert
                 </button>
@@ -2448,6 +2461,11 @@ function App() {
     <div className="screen center-screen"><div className="ambient ambient-a" />
       <div className="confirm-card"><div className="confirm-mark">⚡</div><h1>Order placed!</h1>
         <p className="muted">Brilliant is preparing your order. Watch your phone for updates.</p>
+        {lastOrderWasDelivery && (
+          <p className="muted" style={{ fontSize: '.75rem', marginTop: 6, background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.25)', borderRadius: 10, padding: '8px 12px' }}>
+            🛵 Delivery order — our rider will confirm your transport fee and notify you with the final amount to pay.
+          </p>
+        )}
         <button className="btn-neon" onClick={() => { loadMyOrders(); setScreen('orders'); }}>Track my order</button>
         <button className="btn-ghost" onClick={() => { setReviewStars(0); setReviewMsg(''); setReviewSent(false); setScreen('review'); }}>Rate your experience</button>
         <button className="btn-ghost" onClick={() => setScreen('home')}>Keep shopping</button></div>
@@ -2495,10 +2513,19 @@ function App() {
                 <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Accumulated Points</span>
                 <div style={{ fontFamily: 'Unbounded, sans-serif', fontSize: '1.5rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>{custLoyalty.points} PTS</div>
               </div>
-              <div style={{ textAlign: 'right' }}>
-                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Cash Value</span>
-                <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {Math.floor((custLoyalty.points || 0) / 2).toLocaleString('en-KE')}</div>
-              </div>
+              {(() => {
+                // Cashback value follows the owner's redemption currency
+                // (Admin → Loyalty Controls → Points Redemption Store).
+                const tiers = (custAccount?.redeemTiers || []).filter(t => t && parseFloat(t.points) > 0);
+                const rate = tiers.length ? Math.max(...tiers.map(t => (parseFloat(t.value) || 0) / parseFloat(t.points))) : 0;
+                return (
+                  <div style={{ textAlign: 'right' }}>
+                    <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Est. Cashback</span>
+                    <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {Math.floor((custLoyalty.points || 0) * rate).toLocaleString('en-KE')}</div>
+                    {rate > 0 && <div style={{ fontSize: '0.62rem', opacity: 0.8, marginTop: 2 }}>1 pt = KES {Math.round(rate * 100) / 100}</div>}
+                  </div>
+                );
+              })()}
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '14px', borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: '10px' }}>
               <div>
@@ -2522,7 +2549,7 @@ function App() {
               </button>
             </div>
             <small style={{ display: 'block', marginTop: '10px', fontSize: '0.65rem', opacity: 0.7, borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: '6px' }}>
-              * Redeem at counter or convert: 2 PTS = KES 1 Wallet Cash (usable during checkout)
+              {(() => { const ts = [...(custAccount?.redeemTiers || [])].sort((a, b) => (parseFloat(a.points) || 0) - (parseFloat(b.points) || 0)); const base = ts[0]; return base ? `* ${base.points} PTS = KES ${base.value} cashback. Trade points in the Redemption Store or ask cashier to redeem at counter!` : '* Trade points in the Redemption Store or ask cashier to redeem at counter!'; })()}
             </small>
           </div>
         )}

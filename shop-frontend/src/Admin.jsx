@@ -410,6 +410,9 @@ function Admin() {
   const [selectedTypes, setSelectedTypes] = useState([]);
   const [wipeConfirm, setWipeConfirm] = useState('');
   const [wipeBusy, setWipeBusy] = useState(false);
+  const [wipeError, setWipeError] = useState('');
+  // Transport fee set by the person processing each order (rider/shop) — keyed by order _id.
+  const [feeInputs, setFeeInputs] = useState({});
   const [notifyTitle, setNotifyTitle] = useState('');
   const [notifyBody, setNotifyBody] = useState('');
   const [notifyPhone, setNotifyPhone] = useState('');
@@ -1722,11 +1725,19 @@ const loadStockTransfers = async () => {
 
   // ===== Delete Records tab (owner only) =====
   const loadRecordCounts = async () => {
+    setWipeError('');
     try {
       const r = await authGet(API_URL + '/admin/records/counts');
       const d = await r.json().catch(() => ({}));
-      if (d && d.counts) setRecordCounts(d.counts);
-    } catch (e) { console.error(e); }
+      if (d && d.counts) {
+        setRecordCounts(d.counts);
+      } else if (!r.ok) {
+        setWipeError('Could not load record counts — server says: ' + ((d && d.error) || ('HTTP ' + r.status)) + '. If this persists, the live server needs to be redeployed with the latest code.');
+      }
+    } catch (e) {
+      console.error(e);
+      setWipeError('Network error while loading record counts — check your connection or server.');
+    }
   };
 
   const toggleRecordType = (key) => {
@@ -1746,12 +1757,15 @@ const loadStockTransfers = async () => {
         if (selectedTypes.includes('orders')) loadOrders();
         if (selectedTypes.includes('sales')) loadSales();
         setSelectedTypes([]);
+        setWipeError('');
         loadRecordCounts();
       } else {
+        setWipeError('❌ ' + ((d && d.error) || 'Delete failed (HTTP ' + r.status + ').'));
         alert('❌ ' + ((d && d.error) || 'Delete failed (HTTP ' + r.status + ').'));
       }
     } catch (e) {
       console.error(e);
+      setWipeError('❌ Network error — could not delete records.');
       alert('❌ Network error — could not delete records.');
     } finally {
       setWipeBusy(false);
@@ -1773,12 +1787,15 @@ const loadStockTransfers = async () => {
         loadProducts(); loadOrders(); loadSales(); loadExpenses(); loadCredit(); loadReviews();
         setSelectedTypes([]);
         setWipeConfirm('');
+        setWipeError('');
         loadRecordCounts();
       } else {
+        setWipeError('❌ ' + ((d && d.error) || 'Delete failed (HTTP ' + r.status + ').'));
         alert('❌ ' + ((d && d.error) || 'Delete failed (HTTP ' + r.status + ').'));
       }
     } catch (e) {
       console.error(e);
+      setWipeError('❌ Network error — could not delete records.');
       alert('❌ Network error — could not delete records.');
     } finally {
       setWipeBusy(false);
@@ -1793,8 +1810,11 @@ const loadStockTransfers = async () => {
       const r = await authPost(API_URL + '/admin/notifications/send', { title: notifyTitle.trim(), body: notifyBody.trim(), phone: notifyPhone.trim() || undefined });
       const d = await r.json().catch(() => ({}));
       if (d && d.success) {
-        setNotifyResult(`✅ Sent to ${d.sent} device(s).`);
+        // The server ALWAYS delivers to the in-app feed (PC toasts + app inbox);
+        // real device push is included when FCM is configured.
+        setNotifyResult(d.message || `✅ Sent to ${d.sent} device(s).`);
         setNotifyTitle(''); setNotifyBody(''); setNotifyPhone('');
+        try { const st = await (await fetch(API_URL + '/notifications/status')).json(); if (st) setPushStatus(st); } catch (e) {}
       } else {
         setNotifyResult('❌ ' + ((d && d.error) || 'Send failed (HTTP ' + r.status + ').'));
       }
@@ -2497,15 +2517,36 @@ ${div}
                 <div style={{marginTop: 8, padding: 8, background: 'var(--bg-2)', borderRadius: 8, fontSize: '.8rem', display: 'flex', flexDirection: 'column', gap: 6}}>
                   <div>📍 <b>Location:</b> {o.deliveryLocation || 'None (In-Store / Standard)'}</div>
                   {o.deliveryFee !== undefined && (
-                    <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between'}}>
-                      <span>🚚 <b>Delivery Fee:</b> {money(o.deliveryFee)}</span>
-                      <button 
-                        className="blitz-admin-btn small" 
-                        onClick={() => updateOrder(o._id, { deliveryFee: o.deliveryFee > 0 ? 0 : 150 })}
-                        style={{padding: '2px 6px', fontSize: '.7rem', borderRadius: 4, cursor: 'pointer', background: 'var(--line)', color: 'var(--text)', border: '1px solid var(--muted)'}}
-                      >
-                        {o.deliveryFee > 0 ? 'Make Free' : 'Add Fee (KES 150)'}
-                      </button>
+                    <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap'}}>
+                      <span>
+                        🚚 <b>Transport Fee:</b> {money(o.deliveryFee)}
+                        {o.deliveryFeeConfirmed
+                          ? <span style={{color:'var(--green)', marginLeft:6, fontSize:'.68rem'}}>✅ set by {o.deliveryFeeSetBy || 'shop'}</span>
+                          : <span style={{color:'var(--gold)', marginLeft:6, fontSize:'.68rem'}}>⏳ not confirmed — rider/shop sets it</span>}
+                      </span>
+                      <div style={{display: 'flex', gap: 6, alignItems: 'center'}}>
+                        <input
+                          type="number"
+                          min="0"
+                          step="50"
+                          placeholder="Set transport fee"
+                          value={feeInputs[o._id] ?? (o.deliveryFee ?? '')}
+                          onChange={e => setFeeInputs({ ...feeInputs, [o._id]: e.target.value })}
+                          style={{width: 110, padding: '4px 8px', fontSize: '.72rem', borderRadius: 6, background: 'var(--card)', border: '1px solid var(--line)', color: 'var(--text)'}}
+                        />
+                        <button
+                          className="blitz-admin-btn small"
+                          onClick={() => {
+                            const fee = parseFloat(feeInputs[o._id]);
+                            if (isNaN(fee) || fee < 0) { alert('Enter a valid transport fee (KES).'); return; }
+                            updateOrder(o._id, { deliveryFee: fee });
+                            setFeeInputs({ ...feeInputs, [o._id]: undefined });
+                          }}
+                          style={{padding: '4px 8px', fontSize: '.7rem', borderRadius: 6, cursor: 'pointer', background: 'var(--line)', color: 'var(--text)', border: '1px solid var(--muted)', whiteSpace: 'nowrap'}}
+                        >
+                          {o.deliveryFeeConfirmed ? 'Update fee' : 'Set fee'}
+                        </button>
+                      </div>
                     </div>
                   )}
                   {o.gpsCoords && o.gpsCoords.lat && (
@@ -2558,6 +2599,11 @@ ${div}
                   <select value={o.status} onChange={e => updateOrder(o._id, { status: e.target.value })} style={{flex:1}}>
                     <option value="pending">⏳ Pending</option><option value="packed">📦 Packed</option><option value="on_the_way">🚚 On the way</option><option value="delivered">✅ Delivered</option>
                   </select>
+                  {o.deliveryLocation && !o.deliveryFeeConfirmed && (
+                    <div style={{fontSize:'.68rem', color:'var(--gold)', flex:'1 0 100%', marginTop:2}}>
+                      ⚠️ Delivery order — set the <b>transport fee</b> above before dispatch so the customer knows the final total.
+                    </div>
+                  )}
                   {o.status === 'delivered' && o.customerId && (
                     <a className="cr-remind" href={waLink(o.customerId,
                       '⚡️ *BLITZ MALL - DELIVERY CONFIRMED* ⚡️\n' +
@@ -3001,7 +3047,7 @@ ${div}
                     <b style={{fontSize:'1.3rem',color:'var(--gold)'}}>{loyaltyData.points} pts</b>
                   </div>
                   <div style={{marginTop:8,fontSize:'.85rem',color:'var(--muted)'}}>Total spent: {money(loyaltyData.totalSpent)}</div>
-                  <div style={{marginTop:8,fontSize:'.85rem'}}>Redeemable for: <b style={{color:'var(--green)'}}>{loyaltyData.points >= 1000 ? 'KES 1300 coupon' : loyaltyData.points >= 500 ? 'KES 600 coupon' : loyaltyData.points >= 250 ? 'KES 250 coupon' : loyaltyData.points >= 100 ? 'KES 100 coupon' : '— need 100+ pts'}</b></div>
+                  <div style={{marginTop:8,fontSize:'.85rem'}}>Redeemable for: <b style={{color:'var(--green)'}}>{(() => { const ts = [...(loyaltySettings?.redeemTiers || [])].sort((a, b) => (parseFloat(a.points) || 0) - (parseFloat(b.points) || 0)); const best = [...ts].reverse().find(t => loyaltyData.points >= (parseFloat(t.points) || 0)); if (best) return `KES ${best.value} coupon (${best.points} pts)`; return ts.length ? `— need ${ts[0].points}+ pts` : '—'; })()}</b></div>
                   <button className="blitz-admin-btn small" style={{marginTop:10}} onClick={redeemPoints}>🎯 Redeem Points</button>
                 </div>
               ) : (
@@ -3090,6 +3136,20 @@ ${div}
                       <input type="number" value={loyaltySettings.tierThresholds?.platinum} onChange={e => setLoyaltySettings(s => ({ ...s, tierThresholds: { ...(s.tierThresholds || {}), platinum: e.target.value } }))} />
                     </label>
                   </div>
+                </div>
+
+                <div style={{borderTop:'1px solid var(--line)',paddingTop:10}}>
+                  <h4 style={{fontSize:'.85rem',color:'var(--muted)',marginBottom:4}}>💱 Points Redemption Store — your currency (shown to customers)</h4>
+                  <p style={{fontSize:'.72rem',color:'var(--muted)',marginBottom:8}}>Each row: points a coupon costs → its KES value. Default is 5 pts = KES 1 (100 PTS = KES 20). Customers trade points here in the app.</p>
+                  {(loyaltySettings.redeemTiers || []).map((t, idx) => (
+                    <div key={idx} style={{display:'flex',gap:8,alignItems:'center',marginBottom:6}}>
+                      <input type="number" min="1" value={t.points} placeholder="Points" style={{width:90}} onChange={e => setLoyaltySettings(s => { const ts = [...(s.redeemTiers || [])]; ts[idx] = { ...ts[idx], points: e.target.value }; return { ...s, redeemTiers: ts }; })} />
+                      <span style={{fontSize:'.75rem',color:'var(--muted)'}}>PTS →</span>
+                      <input type="number" min="0" value={t.value} placeholder="KES value" style={{width:110}} onChange={e => setLoyaltySettings(s => { const ts = [...(s.redeemTiers || [])]; ts[idx] = { ...ts[idx], value: e.target.value }; return { ...s, redeemTiers: ts }; })} />
+                      <button className="pos-void" onClick={() => setLoyaltySettings(s => ({ ...s, redeemTiers: (s.redeemTiers || []).filter((_, i) => i !== idx) }))}>✕</button>
+                    </div>
+                  ))}
+                  <button className="blitz-admin-btn small" onClick={() => setLoyaltySettings(s => ({ ...s, redeemTiers: [...(s.redeemTiers || []), { points: '', value: '' }] }))}>+ Add tier</button>
                 </div>
 
                 <div style={{borderTop:'1px solid var(--line)',paddingTop:10}}>
@@ -3314,12 +3374,19 @@ ${div}
             and <b>product stock is not restored</b> when sales/orders are wiped.
           </p>
 
+          {wipeError && (
+            <div style={{ background: 'rgba(255,45,45,0.08)', border: '1px solid rgba(255,45,45,0.45)', borderRadius: 10, padding: '10px 14px', marginBottom: 14, maxWidth: 760, fontSize: '.78rem', color: '#ff6b81' }}>
+              {wipeError}
+            </div>
+          )}
+
           <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: 16, maxWidth: 760 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
               <b style={{ fontSize: '.9rem' }}>Record types</b>
               <div style={{ display: 'flex', gap: 8 }}>
-                <button className="blitz-admin-btn small" onClick={() => setSelectedTypes(RECORD_OPTIONS.map(o => o.key))}>Select all</button>
+                <button className="blitz-admin-btn small" onClick={() => { setSelectedTypes(RECORD_OPTIONS.map(o => o.key)); }}>Select all</button>
                 <button className="blitz-admin-btn small" onClick={() => setSelectedTypes([])}>Clear</button>
+                <button className="blitz-admin-btn small" onClick={loadRecordCounts} title="Reload record counts from the server">🔄 Refresh counts</button>
               </div>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(205px, 1fr))', gap: 8 }}>
