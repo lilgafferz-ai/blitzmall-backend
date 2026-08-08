@@ -109,7 +109,11 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const MONGO_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/my_shop';
-const client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
+// Under Jest the MongoDB driver retries for the FULL serverSelectionTimeoutMS
+// even when the connection is refused, so in CI (where no MongoDB exists)
+// every test file would otherwise stall ~5s before falling back to the
+// offline mock. Tests connect mock-fast instead; production keeps 5s.
+const client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: IS_TEST ? 500 : 5000 });
 
 let db, db_, products_, orders_, sales_, expenses_, credit_, reviews_, staff_, users_, loyalty_, coupons_, branches_;
 let audit_logs_, shifts_, pricing_rules_, stock_transfers_, loyalty_rewards_, redemptions_, saved_baskets_, banners_, categories_;
@@ -153,22 +157,38 @@ const branchFilter = (req) => {
 
 async function connectDb() {
   try {
+    // MOCK_DB=1 (test mode only) jumps straight to the offline file DB. CI has
+    // no MongoDB, so this makes the backend test suite deterministic instead of
+    // depending on connection-refused timing. The offline mock behaves like a
+    // real DB (see FileCollection below), so tests pass either way.
+    if (process.env.MOCK_DB === '1' && IS_TEST) {
+      throw new Error('MOCK_DB=1: skipping real MongoDB (offline mock mode)');
+    }
     console.log('Connecting to primary MongoDB Atlas...');
     await client.connect();
     db = client.db('my_shop');
     db_ = db;
     console.log('✅ Connected to MongoDB Atlas');
   } catch (err) {
-    console.error('❌ MongoDB Atlas connection failed:', err.message);
+    if (err && err.message && err.message.startsWith('MOCK_DB=1')) {
+      console.log('🧪 MOCK_DB=1 — offline mock mode (skipping real MongoDB)');
+    } else {
+      console.error('❌ MongoDB Atlas connection failed:', err.message);
+    }
     console.log('Connecting to fallback Local MongoDB (mongodb://127.0.0.1:27017/my_shop)...');
     try {
-      const localClient = new MongoClient('mongodb://127.0.0.1:27017/my_shop', { serverSelectionTimeoutMS: 2000 });
+      if (process.env.MOCK_DB === '1' && IS_TEST) {
+        throw new Error('MOCK_DB=1: skipping local MongoDB (offline mock mode)');
+      }
+      const localClient = new MongoClient('mongodb://127.0.0.1:27017/my_shop', { serverSelectionTimeoutMS: IS_TEST ? 500 : 2000 });
       await localClient.connect();
       db = localClient.db('my_shop');
       db_ = db;
       console.log('✅ Connected to Local MongoDB');
     } catch (localErr) {
-      console.error('❌ Local MongoDB connection failed:', localErr.message);
+      if (!(localErr && localErr.message && localErr.message.startsWith('MOCK_DB=1'))) {
+        console.error('❌ Local MongoDB connection failed:', localErr.message);
+      }
       console.log('⚠️ Entering Offline Mock Mode (Local File DB: local_db_fallback.json)...');
       
       const fs = require('fs');
@@ -223,7 +243,13 @@ async function connectDb() {
 
       const matchFilter = (item, filter) => {
         if (!filter || Object.keys(filter).length === 0) return true;
+        // $or: the item must match at least one sub-filter (used by the
+        // customer notification feed: their phone OR a broadcast to everyone).
+        if (Array.isArray(filter.$or)) {
+          if (!filter.$or.some(sub => matchFilter(item, sub))) return false;
+        }
         for (const [k, v] of Object.entries(filter)) {
+          if (k === '$or') continue; // handled above
           if (k === '_id' && item._id) {
             if (item._id.toString() !== v.toString()) return false;
             continue;
@@ -4669,4 +4695,4 @@ app.use((err, req, res, next) => {
 });
 const PORT = process.env.PORT || 5000;
 
-module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS } };
+module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => db_ } };

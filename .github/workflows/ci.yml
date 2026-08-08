@@ -18,7 +18,13 @@ jobs:
         node-version: 20
         cache: 'npm'
     - run: npm ci
+    # Backend tests run against the offline mock DB (MOCK_DB=1). CI runners
+    # have no MongoDB, so without this every test file stalls ~5s+ on a
+    # connection-refused before falling back to the same mock — slow and
+    # timing-dependent. MOCK_DB=1 makes the suite fast and deterministic.
     - run: npm test -- --runInBand
+      env:
+        MOCK_DB: '1'
 
   frontend-tests:
     runs-on: ubuntu-latest

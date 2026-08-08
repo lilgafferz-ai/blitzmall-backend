@@ -166,9 +166,16 @@ describe('Promos API (spin wheel + scratch card)', () => {
     const res = await request(app).post('/api/promos/spin').send({ phone, name: 'Low Spender' });
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
-    // Only non-cash outcomes are possible for a low spender — no fake coupons.
-    expect(['again', 'points1', 'points2', 'points3', 'points5']).toContain(res.body.prizeName);
-    expect(res.body.code || '').toBe('');
+    // Low spenders can NEVER win a fixed-cash coupon: the wheel rerolls any
+    // cash sector to points/try-again. Points (any amount), jackpot and free
+    // delivery are all legitimate low-spender wins — they cost the shop no
+    // cash — so the assertion is on "no cash", not on one specific roll.
+    expect(['fixed50', 'fixed100']).not.toContain(res.body.prizeName);
+    expect(res.body.type || '').not.toBe('fixed');
+    // A miss or points win must never fabricate a coupon code.
+    if (res.body.prizeName === 'again' || res.body.pointsAdded > 0) {
+      expect(res.body.code || '').toBe('');
+    }
   });
 });
 
