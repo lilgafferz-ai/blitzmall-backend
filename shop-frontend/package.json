@@ -31,6 +31,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build && node scripts/make-ota-bundle.js",
     "build:web": "react-scripts build",
+    "build:strict": "node scripts/build-strict.js",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "android:build": "npm run build && npx cap sync android",

@@ -155,6 +155,35 @@ async function connectDb() {
         }
       };
 
+      // Supports MongoDB comparison operators inside filter values ({ $gt, $gte,
+      // $lt, $lte, $ne, $in, $exists }) so the offline mock behaves like a real
+      // database — e.g. the promo cooldown query promo_claims_.findOne({ at: { $gt } })
+      // must see the previous claim or the rolling 24h/48h gate silently never triggers.
+      const matchesValue = (actual, expected) => {
+        // Only treat a plain object as an operator bag when EVERY key is a
+        // $-prefixed operator. A subdocument-equality filter (e.g. { coords:
+        // { lat: x } }) must fall through to exact matching instead — otherwise
+        // its plain keys would be iterated as "operators" and match everything.
+        const expectedKeys = expected && typeof expected === 'object' && !(expected instanceof Date)
+          ? Object.keys(expected) : [];
+        const isOperatorBag = expectedKeys.length > 0 && expectedKeys.every(k => k.startsWith('$'));
+        if (isOperatorBag) {
+          for (const [op, opVal] of Object.entries(expected)) {
+            const a = actual instanceof Date ? actual.getTime() : (typeof actual === 'object' && actual !== null ? null : actual);
+            if (op === '$gt') { if (!(a !== null && a > (opVal instanceof Date ? opVal.getTime() : opVal))) return false; }
+            else if (op === '$gte') { if (!(a !== null && a >= (opVal instanceof Date ? opVal.getTime() : opVal))) return false; }
+            else if (op === '$lt') { if (!(a !== null && a < (opVal instanceof Date ? opVal.getTime() : opVal))) return false; }
+            else if (op === '$lte') { if (!(a !== null && a <= (opVal instanceof Date ? opVal.getTime() : opVal))) return false; }
+            else if (op === '$ne') { if (a === (opVal instanceof Date ? opVal.getTime() : opVal)) return false; }
+            else if (op === '$in') { if (!(Array.isArray(opVal) && opVal.some(x => (x instanceof Date ? x.getTime() : x) === a))) return false; }
+            else if (op === '$exists') { if (!!opVal !== (actual !== undefined)) return false; }
+            else if (op === '$regex') { if (typeof actual !== 'string' || !new RegExp(opVal).test(actual)) return false; }
+          }
+          return true;
+        }
+        return actual === expected;
+      };
+
       const matchFilter = (item, filter) => {
         if (!filter || Object.keys(filter).length === 0) return true;
         for (const [k, v] of Object.entries(filter)) {
@@ -162,7 +191,7 @@ async function connectDb() {
             if (item._id.toString() !== v.toString()) return false;
             continue;
           }
-          if (item[k] !== v) return false;
+          if (!matchesValue(item[k], v)) return false;
         }
         return true;
       };

@@ -35,3 +35,10 @@ jobs:
       working-directory: ./shop-frontend
     - run: CI=true npm test -- --watchAll=false
       working-directory: ./shop-frontend
+    # Production build with warnings-as-errors — catches lint warnings (unused
+    # vars etc.) that react-scripts build only treats as fatal under CI=true.
+    # The release workflow builds the PC installer, so failing fast here keeps
+    # a lint warning from silently blocking every PC/mobile update.
+    - name: Strict production build (warnings-as-errors)
+      run: npm run build:strict
+      working-directory: ./shop-frontend

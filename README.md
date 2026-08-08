@@ -12,7 +12,7 @@ Online shop + POS + admin dashboard for Blitz Mall (Matunda, Kakamega).
 
 **Install (first time):** download the latest APK and allow "Install from unknown sources" when prompted.
 
-- Latest APK: **https://blitzmall-backend.onrender.com/apk/blitzmall-v6.apk**
+- Latest APK: **https://blitzmall-backend.onrender.com/apk/blitzmall-v7.apk**
 - The in-app Share screen shows a QR code that always points at the newest APK (`/api/app-info`).
 
 **Update (no reinstall needed):** the app checks for updates on every launch. If a newer web bundle exists, it downloads it in the background and applies it the next time you reopen the app — your data, login and basket are untouched. No Play Store, no APK reinstall, no data loss.
