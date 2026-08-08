@@ -415,7 +415,22 @@ function Admin() {
   const [notifyPhone, setNotifyPhone] = useState('');
   const [notifyBusy, setNotifyBusy] = useState(false);
   const [notifyResult, setNotifyResult] = useState('');
+  const [pushStatus, setPushStatus] = useState(null);
   const [muted, setMuted] = useState(false);
+
+  // Live push-setup status for the 📣 Notify tab (public endpoint, no auth needed).
+  useEffect(() => {
+    if (!loggedIn || tab !== 'notify') return;
+    let active = true;
+    (async () => {
+      try {
+        const r = await fetch(API_URL + '/notifications/status');
+        const d = await r.json();
+        if (active) setPushStatus(d);
+      } catch (e) { if (active) setPushStatus(null); }
+    })();
+    return () => { active = false; };
+  }, [tab, loggedIn]);
   const [showBanner, setShowBanner] = useState(true);
   const [users, setUsers] = useState([]);
   const [newUsername, setNewUsername] = useState('');
@@ -3256,6 +3271,25 @@ ${div}
           <p className="blitz-admin-muted" style={{ marginBottom: 16, fontSize: '.85rem', maxWidth: 640 }}>
             Customers who turned on notifications (Profile → Push Notifications) receive this on their phone, PC or browser. Leave the phone blank to reach everyone. Order status pushes (on the way / delivered) are sent automatically.
           </p>
+          {pushStatus && !pushStatus.serverFcmConfigured && (
+            <div style={{ background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.45)', borderRadius: 12, padding: '12px 14px', marginBottom: 16, maxWidth: 640 }}>
+              <b style={{ fontSize: '.85rem', color: 'var(--gold)' }}>⚠️ Real device push is OFF</b>
+              <p style={{ fontSize: '.78rem', margin: '6px 0', color: 'var(--muted)' }}>
+                Customers still get <b>in-app updates</b> (toasts + notification feed), but phone/PC OS-level push needs one secret on the server:
+              </p>
+              <ol style={{ fontSize: '.76rem', margin: '6px 0 0 0', paddingLeft: 18, color: 'var(--text)', lineHeight: 1.7 }}>
+                <li>Open <b>Firebase console → Project settings → Service accounts</b></li>
+                <li>Click <b>Generate new private key</b> → download the JSON file</li>
+                <li>Copy its contents into <b>Render → Environment → FCM_SERVICE_ACCOUNT_JSON</b></li>
+                <li>Deploy — push activates automatically, no code change needed</li>
+              </ol>
+            </div>
+          )}
+          {pushStatus && pushStatus.serverFcmConfigured && (
+            <div style={{ background: 'rgba(54,211,153,0.08)', border: '1px solid rgba(54,211,153,0.4)', borderRadius: 12, padding: '10px 14px', marginBottom: 16, maxWidth: 640, fontSize: '.8rem', color: 'var(--green)' }}>
+              ✅ Real device push is <b>live</b> — messages reach phones, PCs and browsers instantly.
+            </div>
+          )}
           <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: 16, maxWidth: 640, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <input className="owner-field" placeholder="Title — e.g. 🔥 Weekend Special!" value={notifyTitle} onChange={e => setNotifyTitle(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
             <textarea className="owner-field" placeholder="Message — e.g. 10% off orders over KES 1000 with code BLITZ10" value={notifyBody} onChange={e => setNotifyBody(e.target.value)} rows={3} style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical' }} />

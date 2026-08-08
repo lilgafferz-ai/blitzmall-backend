@@ -511,7 +511,7 @@ app.post('/api/orders', async (req, res) => {
   const { customerId, items, customerName, paymentMethod, deliveryLocation, deliveryFee, gpsCoords, couponCode, discount } = req.body;
   if (!customerId || !items || !items.length) return res.status(400).json({ error: 'Missing data' });
   try {
-    const fee = parseFloat(deliveryFee) || 0;
+    let fee = parseFloat(deliveryFee) || 0;
     // Never trust the client's discount amount — recompute it from the coupon
     // on the server so promo discounts can't be faked, AND re-run the full
     // eligibility check (owner phone, already used, expiry, limit) so a used
@@ -530,6 +530,9 @@ app.post('/api/orders', async (req, res) => {
           const limitReached = coupon.maxUses > 0 && (coupon.usedCount || 0) >= coupon.maxUses;
           if (!expired && !alreadyUsedByMe && !foreign && !limitReached) {
             couponEligible = true;
+            // A won free-delivery voucher must ACTUALLY zero the delivery fee —
+            // the server enforces it, never trusting the client's fee.
+            if (coupon.type === 'free_delivery') fee = 0;
             const itemsTotal = items.reduce((s, i) => s + i.price * i.quantity, 0);
             if (coupon.type === 'percent') safeDiscount = itemsTotal * (coupon.value || 0) / 100;
             else if (coupon.type === 'fixed') safeDiscount = coupon.value || 0;
@@ -1876,6 +1879,8 @@ app.get('/api/customers/:phone', async (req, res) => {
       loyaltyTier: loyalty ? loyalty.tier : tier,
       tier,
       walletBalance: loyalty ? loyalty.walletBalance || 0 : 0,
+      // Virtual-wallet conversion rate (2 loyalty points = KES 1 wallet cash).
+      walletRatePointsPerKsh: 2,
       vouchers: vouchers.map(v => ({
         code: v.code, type: v.type, value: v.value, minPurchase: v.minPurchase || 0,
         used: (Array.isArray(v.usedBy) && v.usedBy.includes(phone)),
@@ -2030,19 +2035,29 @@ async function runPromo({ phone, name, type }) {
   const picked = pickWeighted(list, tier, s.jackpotEnabled !== false);
   let finalPicked = { ...picked };
 
-  // Anti-abuse spending logic for cash coupon prizes (fixed-amount coupons)
+  // Anti-abuse spending logic for cash coupon prizes (fixed-amount coupons).
+  // Cash is a reward for loyal, high-value shoppers ONLY: it can be won only
+  // after ≥ 5 completed orders AND total spending ≥ 10× the prize value (spent
+  // far more than the money offered). Everyone else is ALWAYS rerolled to a
+  // small non-cash consolation (points / try-again) — no 2% leak — and the
+  // wheel message says exactly why, so nothing feels rigged.
   if (finalPicked.type === 'fixed') {
     const cashValue = finalPicked.value || 0;
     const totalSpent = completed.reduce((sum, o) => sum + (o.totalPrice || 0), 0);
-    // Customer must have completed at least 5 orders AND spent at least 10x the cash value
-    const shopsAlot = completed.length >= 5 && totalSpent >= (cashValue * 10);
-    if (!shopsAlot) {
-      // 98% of the time, reroll cash coupon to small points (1-5 pts) or TRY AGAIN / lose
-      if (Math.random() < 0.98) {
-        const safeOutcomes = list.filter(o => o.prize === 'again' || o.prize === 'lose' || (o.points && o.points <= 5));
-        if (safeOutcomes.length > 0) {
-          const rollIdx = Math.floor(Math.random() * safeOutcomes.length);
-          finalPicked = { ...safeOutcomes[rollIdx] };
+    const cashUnlocked = completed.length >= 5 && totalSpent >= (cashValue * 10);
+    if (!cashUnlocked) {
+      const safeOutcomes = list.filter(o => o.prize === 'again' || o.prize === 'lose' || (o.points && o.points <= 5));
+      const consolation = safeOutcomes.filter(o => o.points && o.points > 0);
+      const fallback = consolation.length ? consolation : safeOutcomes;
+      if (fallback.length > 0) {
+        finalPicked = { ...fallback[Math.floor(Math.random() * fallback.length)] };
+        const unlockAt = `KES ${cashValue * 10}`;
+        if (finalPicked.prize === 'again' || finalPicked.prize === 'lose') {
+          finalPicked.title = 'So Close!';
+          finalPicked.message = `Cash prizes unlock after 5+ orders and ${unlockAt} in total shopping — try again after your next order!`;
+        } else {
+          // Keep the win message, then explain why the bigger cash prize was not granted.
+          finalPicked.message = `${finalPicked.message} Cash prizes unlock after 5+ orders and ${unlockAt} in total shopping.`;
         }
       }
     }
@@ -2112,6 +2127,10 @@ app.get('/api/promos/status/:phone', async (req, res) => {
     const tier = tierFromPoints(loyalty ? loyalty.points : 0);
     const spinInfo = spin ? { used: true, day, at: spin.at, nextAt: new Date(new Date(spin.at).getTime() + spinCooldownMs), prizeName: spin.prizeName, code: spin.code || '', title: spin.title || '', message: spin.message || '' } : { used: false, day };
     const scratchInfo = scratch ? { used: true, day, at: scratch.at, nextAt: new Date(new Date(scratch.at).getTime() + scratchCooldownMs), prizeName: scratch.prizeName, code: scratch.code || '', title: scratch.title || '', message: scratch.message || '' } : { used: false, day };
+    // Smallest cash-prize unlock threshold (prize × 10) so the app can tell
+    // shoppers exactly how much they must spend before cash coupons unlock.
+    const cashSectors = WHEEL_SECTORS.filter(o => o.type === 'fixed' && o.value);
+    const cashPrizeUnlockSpend = cashSectors.length ? Math.min(...cashSectors.map(o => o.value * 10)) : 0;
     res.json({
       phone,
       tier,
@@ -2120,6 +2139,8 @@ app.get('/api/promos/status/:phone', async (req, res) => {
       minOrders,
       promosLocked: completed.length < minOrders,
       totalSpent: Math.round(totalSpent * 100) / 100,
+      cashPrizeUnlockSpend,
+      cashPrizeUnlockOrders: 5,
       spin: spinInfo,
       scratch: scratchInfo
     });
@@ -3092,6 +3113,11 @@ app.post('/api/loyalty/redeem-reward', async (req, res) => {
         minPurchase: 0,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
         maxUses: 1,
+        usedCount: 0,
+        usedBy: [],
+        // Bind the coupon to the phone that redeemed it — won offers must only
+        // work for the customer who earned them.
+        ownerPhone: String(customerId).replace(/[^0-9]/g, ''),
         active: true,
         createdAt: new Date()
       });
@@ -4287,6 +4313,13 @@ app.post('/api/notifications/unregister', notifRegisterLimiter, async (req, res)
     console.error('notifications/unregister error:', e);
     res.status(500).json({ error: 'Failed to unregister' });
   }
+});
+
+// Public status — lets the app and admin panel self-diagnose push setup.
+// Real device push only fires when FCM_SERVICE_ACCOUNT_JSON is set in the
+// server env; the in-app feed (polled toasts) works without it.
+app.get('/api/notifications/status', async (req, res) => {
+  res.json({ serverFcmConfigured: fcmConfigured() });
 });
 
 // Owner sends a push to one customer (phone) or to every registered device.

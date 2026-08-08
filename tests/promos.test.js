@@ -133,6 +133,24 @@ describe('Promos API (spin wheel + scratch card)', () => {
     // A miss must never fabricate a coupon code.
     if (res.body.prizeName === 'lose') expect(res.body.code || '').toBe('');
   });
+
+  it('cash coupon prizes stay LOCKED for low-spend shoppers (rerolled to points/try-again)', async () => {
+    const phone = freshPhone();
+    // Two small orders — total spend KES 300 is far below the smallest cash
+    // unlock threshold (KES 500 = KES 50 prize × 10), so a cash win must be
+    // rerolled to a non-cash outcome every single time.
+    for (let i = 0; i < 2; i++) {
+      await request(app).post('/api/orders').send({
+        customerId: phone, customerName: 'Low Spender', items: [{ name: 'Item ' + i, price: 150, quantity: 1 }], paymentMethod: 'delivery'
+      });
+    }
+    const res = await request(app).post('/api/promos/spin').send({ phone, name: 'Low Spender' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    // Only non-cash outcomes are possible for a low spender — no fake coupons.
+    expect(['again', 'points1', 'points2', 'points3', 'points5']).toContain(res.body.prizeName);
+    expect(res.body.code || '').toBe('');
+  });
 });
 
 describe('Phone-bound voucher flow', () => {

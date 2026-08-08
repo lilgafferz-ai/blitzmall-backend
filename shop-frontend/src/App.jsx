@@ -1619,10 +1619,20 @@ function App() {
         if (d.success) {
           setNotifEnabled(true);
           try { localStorage.setItem('blitz_push_enabled', 'true'); } catch (err) {}
+          // Honest status: the token is registered now and will work the moment
+          // the store's server push secret is configured, but until then the
+          // in-app feed (polled toasts) is what actually delivers updates.
+          let serverReady = true;
+          try {
+            const s = await (await fetch(`${API_URL}/notifications/status`)).json();
+            serverReady = !!(s && s.serverFcmConfigured);
+          } catch (e) {}
           if (error === 'mock_fallback') {
-            showToast('🔔 Notifications enabled! (Simulated mode)');
-          } else {
+            showToast('🔔 Notifications enabled — in-app updates active (simulated mode)');
+          } else if (serverReady) {
             showToast('🔔 Notifications enabled!');
+          } else {
+            showToast('🔔 Notifications enabled — you get in-app updates now; real push turns on once the store finishes setup');
           }
           return;
         }
@@ -1913,6 +1923,12 @@ function App() {
                 </div>
               )}
 
+              {promoStatus?.cashPrizeUnlockSpend > 0 && !promoStatus?.promosLocked && !promoStatus?.spin?.used && (
+                <p className="modal-subtitle" style={{ fontSize: '.72rem', color: 'var(--gold)', marginTop: 6 }}>
+                  💰 Cash prizes unlock after {promoStatus.cashPrizeUnlockOrders || 5}+ orders and KES {promoStatus.cashPrizeUnlockSpend} in total shopping
+                </p>
+              )}
+
               <div className="wheel-container">
                 <div className={`wheel-pointer ${wheelSpinning ? 'ticking' : ''}`} />
                 <div className={`wheel-led-ring ${wheelSpinning ? 'spinning' : ''}`}>
@@ -1926,8 +1942,7 @@ function App() {
                     const endAngle = (idx + 1) * (360 / WHEEL_SECTORS.length);
                     return `${s.color} ${startAngle}deg ${endAngle}deg`;
                   }).join(', ')})`,
-                  transform: `rotate(${wheelRotation}deg)`,
-                  transition: wheelSpinning ? 'transform 4.2s cubic-bezier(0.12, 0.75, 0.05, 1)' : 'none'
+                  transform: `rotate(${wheelRotation}deg)`
                 }}>
                   {WHEEL_SECTORS.map((s, i) => (
                     <span key={i} className="wheel-label" style={{
