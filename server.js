@@ -99,10 +99,10 @@ const orderLimiter = rateLimit({
   message: { error: 'Too many orders from this device. Please wait a moment.' },
   // Key by the shopper's phone number when present (so a school/hotel/office
   // sharing one IP never trips the cap), falling back to IP for anonymous bots.
-  keyGenerator: ipKeyGenerator((req) => {
+  keyGenerator: (req) => {
     const cid = req.body && req.body.customerId ? String(req.body.customerId).replace(/[^0-9]/g, '') : '';
-    return cid || req.ip || 'unknown';
-  })
+    return cid || ipKeyGenerator(req.ip || 'unknown');
+  }
 });
 
 app.use(cors());
