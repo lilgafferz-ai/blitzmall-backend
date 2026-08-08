@@ -214,7 +214,7 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
       <div className="blitz-admin-full" style={{marginBottom:10}}>
         <label style={{display:'flex', alignItems:'center', gap:8, marginBottom:8, fontWeight:600, fontSize:'.88rem'}}>
           Product Photos
-          <span style={{fontWeight:400,fontSize:'.72rem',color:'var(--muted)'}}>{isPcApp ? '(Auto-found on white background, or upload)' : '(Upload)'}</span>
+          <span style={{fontWeight:400,fontSize:'.72rem',color:'var(--muted)'}}>{isPcApp ? '(Auto-found · 4K quality, or upload)' : '(Upload)'}</span>
         </label>
         <div style={{display:'flex', gap:8}}>
           {isPcApp && (

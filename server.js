@@ -434,14 +434,15 @@ if (require.main === module) {
 app.get('/api/products', async (req, res) => {
   try {
     const cacheKey = 'all_products';
-    const cached = productCache.get(cacheKey);
-    if (cached) return res.json(cached);
-
-    const list = await products_.find().toArray();
-    const priced = await applyPricingRules(list);
-    
-    productCache.set(cacheKey, priced);
-    res.json(priced);
+    let priced = productCache.get(cacheKey);
+    if (!priced) {
+      const list = await products_.find().toArray();
+      priced = await applyPricingRules(list);
+      productCache.set(cacheKey, priced);
+    }
+    // 4K image upgrade happens PER REQUEST (after cache) so phone customers
+    // keep the stored URLs while PC/desktop-web customers see full-res photos.
+    res.json(upgradeImagesForClient(priced, isMobileUA(req.headers['user-agent'])));
   } catch (e) {
     console.error('Failed to fetch products:', e);
     res.status(500).json({ error: 'Failed to fetch products' });
@@ -451,7 +452,8 @@ app.get('/api/admin/products', authenticate, async (req, res) => {
   try {
     const filter = branchFilter(req);
     const list = await products_.find(filter).toArray();
-    res.json(await applyPricingRules(list));
+    const priced = await applyPricingRules(list);
+    res.json(upgradeImagesForClient(priced, isMobileUA(req.headers['user-agent'])));
   } catch (e) {
     console.error('Failed to fetch products:', e);
     res.status(500).json({ error: 'Failed to fetch products' });
@@ -828,6 +830,33 @@ async function searchDuckDuckGoImages(query, maxResults = 10) {
   return results;
 }
 
+// ---- 4K / full-resolution product image upgrade (PC & desktop web only) ----
+// Image sources hand out thumbnails as small as 600px. Rewriting known
+// thumbnail URL patterns to their full-resolution original makes product
+// photos crisp for customers on the shop PC and desktop browsers. The phone
+// app deliberately keeps URLs exactly as stored — this feature is PC-only.
+const upgradeImageUrl = (url) => {
+  if (!url || typeof url !== 'string') return url;
+  // Wikimedia Commons: .../thumb/a/ab/Foo.jpg/600px-Foo.jpg -> .../a/ab/Foo.jpg
+  // (the original, full-resolution file — often 4K+). Only keep the rewrite
+  // when the result is a real image file — a PDF-derived thumb would upgrade
+  // to a .pdf URL that can't render in an <img>.
+  const upgraded = url.replace(/\/thumb\/([^/]+\/[^/]+\/[^/]+)\/\d+px-[^/]+$/i, '/$1');
+  return /\.(jpe?g|png|webp|gif|avif)$/i.test(upgraded) ? upgraded : url;
+};
+const isMobileUA = (ua) => /Mobile|Android|iP(hone|od|ad)|IEMobile|BlackBerry|Kindle|Silk-Accelerated|(hpw|web)OS|Opera M(obi|ini)/i.test(ua || '');
+// Hosts whose full-size image files are safe to hotlink from the customer app.
+const SAFE_IMAGE_HOSTS = /^https?:\/\/(upload\.wikimedia\.org|images\.(openfoodfacts|openbeautyfacts|openproductsfacts|openpetfoodfacts)\.org)/i;
+const upgradeImagesForClient = (list, isMobile) => {
+  if (isMobile) return list; // mobile keeps stored URLs — feature is PC-only
+  return (Array.isArray(list) ? list : []).map(p => {
+    if (!p || !p.image) return p;
+    const arr = Array.isArray(p.image) ? p.image : [p.image];
+    const upgraded = arr.map(upgradeImageUrl);
+    return { ...p, image: Array.isArray(p.image) ? upgraded : upgraded[0] };
+  });
+};
+
 // ---- Shared image search pipeline: OpenFoodFacts → DuckDuckGo → AI fallback ----
 // Returns up to 3 image URLs. Used by both the API endpoint and autoFetchProductImage.
 // Finds REAL photos BY NAME, only returning a photo when the product's own details
@@ -836,7 +865,8 @@ async function searchDuckDuckGoImages(query, maxResults = 10) {
 async function searchProductImages(name, barcode) {
   const images = [];
   const addImg = (url) => {
-    if (url && typeof url === 'string' && !url.startsWith('data:') && !images.includes(url)) images.push(url);
+    const clean = upgradeImageUrl(url);
+    if (clean && typeof clean === 'string' && !clean.startsWith('data:') && !images.includes(clean)) images.push(clean);
   };
   // fetch with a timeout so a slow source can't hang the finder
   const fetchT = (url, ms = 7000) => {
@@ -903,7 +933,7 @@ async function searchProductImages(name, barcode) {
       // Wikimedia Commons — free, no key
       (async () => {
         try {
-          const r = await fetchT(`https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=15&prop=imageinfo&iiprop=url&iiurlwidth=600&format=json&origin=*`, 9000);
+          const r = await fetchT(`https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=15&prop=imageinfo&iiprop=url&iiurlwidth=2560&format=json&origin=*`, 9000);
           if (!r.ok) return [];
           const d = await r.json();
           const pages = d.query && d.query.pages ? Object.values(d.query.pages) : [];
@@ -913,15 +943,17 @@ async function searchProductImages(name, barcode) {
             bonus: 1,
           })).filter(c => c.url && /\.(jpe?g|png|webp)$/i.test(c.url));
         } catch (e) { return []; }
-      })(),
-      // Openverse — aggregates Flickr, Wikimedia, museums and more (free, no key)
-      (async () => {
+      })(),    // Openverse — aggregates Flickr, Wikimedia, museums and more (free, no key).
+    // Prefer the full-size original only from hotlink-safe hosts (Wikimedia /
+    // Open Facts CDNs); elsewhere the proxied /thumb/ URL is far more reliable
+    // than a third-party origin that may 403 when the customer's app loads it.
+    (async () => {
         try {
           const r = await fetchT(`https://api.openverse.org/v1/images/?q=${q}&page_size=15&mature=false`, 9000);
           if (!r.ok) return [];
           const d = await r.json();
           return (d.results || []).map(x => ({
-            url: x.thumbnail || x.url,
+            url: (x.url && SAFE_IMAGE_HOSTS.test(x.url)) ? x.url : (x.thumbnail || x.url),
             text: `${x.title || ''} ${(x.tags || []).map(t => t.name).join(' ')}`,
             bonus: 0,
           })).filter(c => c.url);
