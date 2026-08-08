@@ -111,24 +111,6 @@ const WHEEL_SECTORS = [
 
 const TIER_LABELS = { Bronze: '🥉 Bronze Shopper', Silver: '🥈 Silver Shopper', Gold: '🥇 Gold Shopper', Platinum: '💎 Platinum Shopper' };
 
-// Redemption table — mirrors the server's redeemTiers defaults (100 pts → KES
-// 100, 250 → KES 250, 500 → KES 600, 1000 → KES 1300). The store redeems one
-// coupon per visit, so the card shows the biggest coupon the balance covers now.
-const REDEEM_TIERS = [
-  { points: 100, value: 100 },
-  { points: 250, value: 250 },
-  { points: 500, value: 600 },
-  { points: 1000, value: 1300 }
-];
-const bestRedeemValue = (pts, tiers) => {
-  const p = pts || 0;
-  // Use the owner's effective tiers from the server when available, else the
-  // defaults below — so the display stays correct after Admin retunes rates.
-  const list = (tiers && tiers.length ? tiers : REDEEM_TIERS).filter(t => t && p >= (t.points || 0));
-  const t = list.sort((a, b) => (b.points || 0) - (a.points || 0))[0];
-  return t ? t.value || 0 : 0;
-};
-
 // Screens that auto-redirect themselves (never recorded in the back stack).
 const TRANSIENT_SCREENS = ['splash', 'welcome'];
 
