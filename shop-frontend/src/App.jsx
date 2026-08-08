@@ -467,6 +467,13 @@ function App() {
   const [referralCode, setReferralCode] = useState('');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
+  // Phone-verified sign-in: a first-time number must confirm a 6-digit OTP
+  // before its account is created (returning numbers sign straight in).
+  const [otpPending, setOtpPending] = useState(null); // { phone, name, referralCode } awaiting the code
+  const [otpInput, setOtpInput] = useState('');
+  const [otpError, setOtpError] = useState('');
+  const [otpResendIn, setOtpResendIn] = useState(0);
+  const [otpVerifying, setOtpVerifying] = useState(false);
   const [activeCategory, setActiveCategory] = useState('All');
   const [activeProduct, setActiveProduct] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -701,6 +708,14 @@ function App() {
   }, []);
 
   const saveProfile = (p) => { setProfile(p); try { localStorage.setItem('blitz_profile', JSON.stringify(p)); } catch {} };
+
+  // OTP resend countdown — one tick per second while waiting to resend.
+  useEffect(() => {
+    if (otpResendIn <= 0) return;
+    const id = setInterval(() => setOtpResendIn(s => (s > 0 ? s - 1 : 0)), 1000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [otpResendIn > 0]);
 
   // M-Pesa STK polling — must be before any conditional returns
   useEffect(() => {
@@ -1157,31 +1172,108 @@ function App() {
     return digits.length >= 10;
   };
 
+  // Completes a successful sign-in — used by the direct (returning customer)
+  // path AND the OTP-verified (first-time) path. The server decides returning.
+  const finishSignIn = (d, nameUsed) => {
+    const cust = { customerId: d.customerId, name: nameUsed, phone: d.customerId };
+    setCustomer(cust);
+    if (d.referralBonus) showToast(`🎁 Welcome bonus: +${d.referralBonus} loyalty points — thanks for using a friend's code!`);
+    try { localStorage.setItem(CUSTOMER_KEY, JSON.stringify(cust)); } catch {}
+    if (!profile) saveProfile({ name: nameUsed, phone: d.customerId, avatarId: 'cat', photo: null });
+    setName(''); setPhone(''); setReferralCode('');
+    setOtpPending(null); setOtpInput(''); setOtpError('');
+    setWelcomeMsg({ name: nameUsed, returning: !!d.returning });
+    setScreen('welcome');
+  };
+
+  const startOtpStep = (d, nameUsed) => {
+    setOtpPending({ phone: d.phone || phone, name: nameUsed, referralCode });
+    setOtpInput(''); setOtpError('');
+    setOtpResendIn(Math.max(0, Math.min(60, Math.floor(d.resendAfter || 60))));
+    showToast('📲 We sent a 6-digit code to your phone');
+    if (d.devOtp) showToast(`🔑 Dev code (SMS not configured yet): ${d.devOtp}`);
+  };
+
   const handleLogin = async (e) => {
     e.preventDefault();
     if (!validatePhone(phone)) { alert('Please enter a valid phone number (at least 10 digits, e.g. 0712345678)'); return; }
     try {
       const r = await fetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone, referralCode }) });
-      if (!r.ok) {
-        if (r.status === 429) { alert('Too many attempts. Please try again later.'); return; }
+      const d = await r.json().catch(() => ({}));
+      // A rate-limit 429 (from the global/auth limiters) has a plain-text body
+      // that can't be parsed as JSON — handle it before touching d.otpRequired.
+      if (r.status === 429 && !d.otpRequired) {
+        alert(d.error || 'Too many attempts. Please try again later.');
+        return;
       }
-      const d = await r.json();
       if (d.success) {
-        const isReturning = !!d.returning;
-        const cust = { customerId: d.customerId, name, phone };
-        setCustomer(cust);
-        if (d.referralBonus) showToast(`🎁 Welcome bonus: +${d.referralBonus} loyalty points — thanks for using a friend's code!`);
-        try { localStorage.setItem(CUSTOMER_KEY, JSON.stringify(cust)); } catch {}
-        if (!profile) saveProfile({ name, phone, avatarId: 'cat', photo: null });
-        setName(''); setPhone(''); setReferralCode('');
-        setWelcomeMsg({ name, returning: isReturning });
-        setScreen('welcome');
+        finishSignIn(d, name);
+      } else if (d.otpRequired) {
+        // First-time number: the server sent an OTP — swap to the code step.
+        if (r.status === 429 && d.resendAfter) {
+          setOtpResendIn(d.resendAfter);
+          alert(d.error || 'Please wait before requesting another code.');
+          return;
+        }
+        startOtpStep(d, name);
       } else {
         alert(d.error || 'Login failed.');
       }
     } catch (e) { 
       console.error(e);
       alert('Network error. Please check your connection and try again.');
+    }
+  };
+
+  const handleVerifyOtp = async (e) => {
+    e.preventDefault();
+    if (!otpPending) return;
+    const code = otpInput.trim();
+    if (!/^\d{6}$/.test(code)) { setOtpError('Enter the 6-digit code'); return; }
+    setOtpVerifying(true);
+    setOtpError('');
+    try {
+      const r = await fetch(`${API_URL}/auth/verify-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: otpPending.phone, otp: code, name: otpPending.name, referralCode: otpPending.referralCode })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (d.success) {
+        finishSignIn(d, otpPending.name);
+      } else {
+        setOtpError(d.error || 'Verification failed. Please try again.');
+        if (/expired|too many wrong/i.test(d.error || '')) setOtpPending(null);
+      }
+    } catch (err) {
+      console.error(err);
+      setOtpError('Network error. Please check your connection and try again.');
+    } finally {
+      setOtpVerifying(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (!otpPending || otpResendIn > 0) return;
+    try {
+      const r = await fetch(`${API_URL}/auth`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: otpPending.name, phone: otpPending.phone, referralCode: otpPending.referralCode })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (d.otpRequired) {
+        setOtpResendIn(Math.max(0, Math.min(60, Math.floor(d.resendAfter || 60))));
+        showToast('📲 A new code was sent to your phone');
+        if (d.devOtp) showToast(`🔑 Dev code (SMS not configured yet): ${d.devOtp}`);
+      } else if (d.success) {
+        finishSignIn(d, otpPending.name);
+      } else {
+        setOtpError(d.error || 'Could not resend the code.');
+      }
+    } catch (err) {
+      console.error(err);
+      setOtpError('Network error — could not resend the code.');
     }
   };
 
@@ -1726,20 +1818,40 @@ function App() {
     </div>
   );
 
-  // LOGIN
+  // LOGIN — direct sign-in for returning numbers; a 6-digit OTP step for
+  // first-time numbers (the server verifies the number before creating the
+  // account, so referral codes only apply to verified sign-ins).
   if (screen === 'login') return (
     <div className="screen center-screen">
       <div className="ambient ambient-a" /><div className="ambient ambient-b" />
       <div className="login-card"><BlitzLogo size={70} />
         <h1 className="brand">BLITZ<span>MALL</span></h1>
-        <p className="muted">Sign in to start shopping</p>
-        <form onSubmit={handleLogin}>
-          <input className="field" placeholder="Your name" value={name} onChange={e => setName(e.target.value)} required />
-          <input className="field" type="tel" placeholder="Phone (07xx xxx xxx)" value={phone} onChange={e => setPhone(e.target.value)} required />
-          <input className="field" placeholder="Referral code (optional) — got invited? 🎁" value={referralCode} onChange={e => setReferralCode(e.target.value)} />
-          <button className="btn-neon login-cta" type="submit">Enter Blitz Mall</button>
-        </form>
-        <button className="owner-link" onClick={() => setIsAdmin(true)}>Owner login</button>
+        {otpPending ? (
+          <>
+            <p className="muted">Enter the 6-digit code sent to</p>
+            <p className="otp-phone">{(() => { const p = String(otpPending.phone); const m = p.match(/^0?(\d{3})(\d{3})(\d{4})$/); return m ? `0${m[1]} ${m[2]} ${m[3]}` : p; })()}</p>
+            <form onSubmit={handleVerifyOtp}>
+              <input className="field otp-input" type="tel" inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="6-digit code" value={otpInput} onChange={e => setOtpInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} autoFocus />
+              {otpError && <p className="form-error">{otpError}</p>}
+              <button className="btn-neon login-cta" type="submit" disabled={otpVerifying}>{otpVerifying ? 'Verifying…' : 'Verify & Sign In'}</button>
+            </form>
+            <button className="owner-link" type="button" disabled={otpResendIn > 0} onClick={handleResendOtp}>
+              {otpResendIn > 0 ? `Resend code in ${otpResendIn}s` : 'Resend code'}
+            </button>
+            <button className="owner-link" type="button" onClick={() => { setOtpPending(null); setOtpInput(''); setOtpError(''); }}>← Change phone number</button>
+          </>
+        ) : (
+          <>
+            <p className="muted">Sign in to start shopping</p>
+            <form onSubmit={handleLogin}>
+              <input className="field" placeholder="Your name" value={name} onChange={e => setName(e.target.value)} required />
+              <input className="field" type="tel" placeholder="Phone (07xx xxx xxx)" value={phone} onChange={e => setPhone(e.target.value)} required />
+              <input className="field" placeholder="Referral code (optional) — got invited? 🎁" value={referralCode} onChange={e => setReferralCode(e.target.value)} />
+              <button className="btn-neon login-cta" type="submit">Enter Blitz Mall</button>
+            </form>
+            <button className="owner-link" onClick={() => setIsAdmin(true)}>Owner login</button>
+          </>
+        )}
       </div>
     </div>
   );

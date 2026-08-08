@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { MongoClient, ObjectId } = require('mongodb');
 const helmet = require('helmet');
 // express-mongo-sanitize removed: it reassigns req.query, which throws under
@@ -14,6 +15,10 @@ const productCache = new NodeCache({ stdTTL: 300 }); // Cache products for 5 min
 
 const app = express();
 app.set('trust proxy', 1);
+// Under Jest the whole suite shares one IP and fires requests in bursts, so the
+// per-IP caps are lifted (the per-phone/duplicate logic still applies). Hoisted
+// here because the auth/OTP limiters below also need it.
+const IS_TEST = !!process.env.JEST_WORKER_ID;
 const path = require('path');
 // Downloadable APK(s) live OUTSIDE the web build so they aren't bundled into the
 // app itself. Still served at the same /apk/... URL the Share screen/QR use.
@@ -63,9 +68,20 @@ app.use(globalLimiter);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20, // Strict limit for auth routes
+  max: IS_TEST ? 1000 : 20, // Strict limit for auth routes
   standardHeaders: true,
   legacyHeaders: false,
+});
+
+// OTP verification is the money route of phone-verified sign-in — cap it per
+// IP so a scripted client can't brute-force 6-digit codes (each code also has
+// its own 5-attempt cap server-side).
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: IS_TEST ? 1000 : 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many verification attempts. Please try again later.' }
 });
 
 // ---- Anti-abuse limiters for the money/value endpoints ----
@@ -74,7 +90,7 @@ const authLimiter = rateLimit({
 // client can't brute-force the conversion repeatedly.
 // Under Jest, the whole suite shares one IP and fires requests in bursts, so
 // the per-IP caps are lifted (the per-phone/duplicate logic still applies).
-const IS_TEST = !!process.env.JEST_WORKER_ID;
+// (IS_TEST is hoisted near the top — see above.)
 const promosLimiter = rateLimit({
   windowMs: 10 * 1000, // 10 seconds
   max: IS_TEST ? 1000 : 2, // 2 promo attempts per 10s per IP (one tap + one accidental double-tap)
@@ -520,6 +536,9 @@ async function connectDb() {
   if (getMpesaCallbackUrl() === 'https://your-deployed-url.com/api/mpesa/callback') {
     console.warn('⚠️ CALLBACK_URL env var not set. M-Pesa callbacks will not reach your server.');
   }
+  if (!process.env.AT_USERNAME || !process.env.AT_API_KEY) {
+    console.warn('⚠️ Africa\'s Talking SMS credentials (AT_USERNAME, AT_API_KEY) not configured — OTP codes are shown on-screen instead of sent by SMS.');
+  }
 
   if (require.main === module) {
     app.listen(PORT, () => {
@@ -580,50 +599,179 @@ app.get('/api/admin/products', authenticate, async (req, res) => {
 });
 // Customer sign-in is keyed by PHONE NUMBER: every account's shopping record,
 // loyalty points, vouchers and debts live under the phone they sign in with.
+// Changing the number means a NEW account (bound to the new number).
+//
+// First-time numbers MUST prove ownership with a 6-digit OTP (sent by SMS)
+// before the account is created — no OTP, no sign-in. Returning customers
+// (their number is already registered) sign straight in. OTPs live in a
+// short-lived in-memory store: hashed with the JWT secret, 10-minute expiry,
+// 5 attempts max, 60s resend cooldown, single use.
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+const otpStore = new Map();
+
+const genOtp = () => String(Math.floor(100000 + Math.random() * 900000));
+const hashOtp = (code, phone) => crypto.createHmac('sha256', JWT_SECRET).update(`${phone}:${code}`).digest('hex');
+// Local 07xxxxxxxx / 01xxxxxxxx -> 2547xxxxxxxx / 2541xxxxxxxx for the SMS gateway.
+const toIntlPhone = (p) => {
+  const d = String(p).replace(/[^0-9]/g, '');
+  if (!d) return '';
+  if (d.startsWith('254')) return d;
+  if (d.startsWith('0')) return '254' + d.slice(1);
+  return '254' + d;
+};
+// Africa's Talking (Nairobi-based, KES billing) via its plain HTTP v1 API — no
+// SDK, uses Node's global fetch. Until AT_USERNAME + AT_API_KEY are configured
+// the code is logged + echoed back (devOtp) so the whole flow works offline for
+// testing; real SMS lights up automatically once the credentials are set.
+const smsConfigured = () => !!(process.env.AT_USERNAME && process.env.AT_API_KEY);
+async function sendOtpSms(phone, code) {
+  const to = toIntlPhone(phone);
+  const message = `Your BlitzMall verification code is ${code}. It expires in 10 minutes. Do not share it.`;
+  if (smsConfigured() && to) {
+    try {
+      const res = await fetch('https://api.africastalking.com/version1/messaging', {
+        method: 'POST',
+        headers: {
+          apiKey: process.env.AT_API_KEY,
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({ username: process.env.AT_USERNAME, to, message }).toString()
+      });
+      if (!res.ok) {
+        const detail = (await res.text()).slice(0, 200);
+        // Log the code loudly on delivery failure so support can recover a
+        // sign-in (the caller also falls back to echoing it on-screen).
+        console.error(`[otp-sms-failed] ${phone} -> ${code} (HTTP ${res.status} ${detail})`);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.error(`[otp-sms-failed] ${phone} -> ${code} (${e.message})`);
+      return false;
+    }
+  }
+  console.log(`[dev-otp] ${phone} -> ${code} (SMS provider not configured)`);
+  return false;
+}
+
+// Shared account creation (referral-aware). A first sign-in only reaches this
+// AFTER the OTP was verified, so referral bonuses are only ever awarded to
+// phone-verified accounts. Idempotent: if the account already exists (race),
+// it just refreshes the name/lastLogin instead of creating a duplicate.
+async function createCustomerAccount(name, phoneClean, referralCodeRaw) {
+  const existingCust = await customers_.findOne({ phone: phoneClean });
+  if (existingCust) {
+    await customers_.updateOne(
+      { phone: phoneClean },
+      { $set: { name: (name || existingCust.name || '').trim(), lastLoginAt: new Date() } }
+    );
+    return { existing: true, referralBonus: 0 };
+  }
+  const newCust = {
+    phone: phoneClean, name: (name || '').trim(),
+    createdAt: new Date(), lastLoginAt: new Date(),
+    orderCount: 0, totalSpent: 0
+  };
+  let referralBonus = 0;
+  // Referral: when a new shopper signs in with a friend's phone code, BOTH
+  // earn bonus loyalty points (once per referred phone — no double dips).
+  const refCode = String(referralCodeRaw || '').replace(/[^0-9]/g, '');
+  if (refCode && refCode !== phoneClean) {
+    try {
+      const referrer = await customers_.findOne({ phone: refCode });
+      if (referrer && !(Array.isArray(referrer.referrals) && referrer.referrals.includes(phoneClean))) {
+        newCust.referredBy = refCode;
+        await addLoyaltyPoints(refCode, REFERRER_BONUS_POINTS);
+        await customers_.updateOne(
+          { phone: refCode },
+          { $push: { referrals: phoneClean }, $inc: { referralCount: 1 } }
+        );
+      }
+    } catch (e) { console.error('Referral award failed:', e); }
+  }
+  await customers_.insertOne(newCust);
+  if (newCust.referredBy) {
+    await addLoyaltyPoints(phoneClean, REFEREE_BONUS_POINTS);
+    referralBonus = REFEREE_BONUS_POINTS;
+  }
+  return { existing: false, referralBonus };
+}
+
 app.post('/api/auth', authLimiter, async (req, res) => {
   const { name, phone } = req.body;
   if (!name || !phone) return res.status(400).json({ error: 'Name and phone required' });
-  let referralBonus = 0;
   try {
     const phoneClean = String(phone).replace(/[^0-9]/g, '');
+    if (!phoneClean) return res.status(400).json({ error: 'Valid phone number required' });
     const existingCust = await customers_.findOne({ phone: phoneClean });
+    // Returning customer — the number is already registered (verified before),
+    // so they sign straight in with no OTP.
     if (existingCust) {
       await customers_.updateOne(
         { phone: phoneClean },
         { $set: { name: (name || existingCust.name || '').trim(), lastLoginAt: new Date() } }
       );
-    } else {
-      const newCust = {
-        phone: phoneClean, name: (name || '').trim(),
-        createdAt: new Date(), lastLoginAt: new Date(),
-        orderCount: 0, totalSpent: 0
-      };
-      // Referral: when a new shopper signs in with a friend's phone code, BOTH
-      // earn bonus loyalty points (once per referred phone — no double dips).
-      const refCode = String(req.body.referralCode || '').replace(/[^0-9]/g, '');
-      if (refCode && refCode !== phoneClean) {
-        try {
-          const referrer = await customers_.findOne({ phone: refCode });
-          if (referrer && !(Array.isArray(referrer.referrals) && referrer.referrals.includes(phoneClean))) {
-            newCust.referredBy = refCode;
-            await addLoyaltyPoints(refCode, REFERRER_BONUS_POINTS);
-            await customers_.updateOne(
-              { phone: refCode },
-              { $push: { referrals: phoneClean }, $inc: { referralCount: 1 } }
-            );
-          }
-        } catch (e) { console.error('Referral award failed:', e); }
-      }
-      await customers_.insertOne(newCust);
-      if (newCust.referredBy) {
-        await addLoyaltyPoints(phoneClean, REFEREE_BONUS_POINTS);
-        referralBonus = REFEREE_BONUS_POINTS;
-      }
+      const orders = await orders_.find({ customerId: phoneClean }).toArray();
+      return res.json({ success: true, customerId: phoneClean, returning: true, message: `Welcome back, ${name}!`, referralBonus: 0 });
     }
-    const orders = await orders_.find({ customerId: phoneClean }).toArray();
-    res.json({ success: true, customerId: phoneClean, returning: !!existingCust || orders.length > 0, message: `Welcome ${name}!`, referralBonus });
+    // FIRST-TIME number: no account exists yet — require OTP proof of ownership.
+    // The account is NOT created here; it is only created after verify-otp.
+    const prev = otpStore.get(phoneClean);
+    const wait = prev ? OTP_RESEND_COOLDOWN_MS - (Date.now() - prev.lastSentAt) : 0;
+    if (wait > 0) {
+      return res.status(429).json({ success: false, otpRequired: true, phone: phoneClean, resendAfter: Math.ceil(wait / 1000), error: 'A code was just sent — please wait before requesting another.' });
+    }
+    const code = genOtp();
+    otpStore.set(phoneClean, {
+      codeHash: hashOtp(code, phoneClean),
+      expiresAt: Date.now() + OTP_TTL_MS,
+      attempts: 0,
+      lastSentAt: Date.now()
+    });
+    // Echo the code back ONLY when SMS could not deliver it (no gateway
+    // configured, or the API call failed) so the sign-in never dead-ends.
+    // With a healthy SMS delivery it is NEVER returned to the client.
+    const sentOk = await sendOtpSms(phoneClean, code);
+    const devOtp = sentOk ? undefined : code;
+    return res.json({ success: false, otpRequired: true, phone: phoneClean, resendAfter: OTP_RESEND_COOLDOWN_MS / 1000, devOtp, message: 'We sent a 6-digit code — enter it to finish signing in.' });
   } catch (err) {
-    res.json({ success: true, customerId: String(phone).replace(/[^0-9]/g, ''), returning: false, message: `Welcome ${name}!`, referralBonus });
+    console.error('auth error:', err);
+    res.status(500).json({ error: 'Sign-in failed. Please try again.' });
+  }
+});
+
+app.post('/api/auth/verify-otp', otpLimiter, async (req, res) => {
+  const { phone, otp, name, referralCode } = req.body;
+  if (!phone || !otp) return res.status(400).json({ error: 'Phone and code required' });
+  try {
+    const phoneClean = String(phone).replace(/[^0-9]/g, '');
+    const code = String(otp).trim();
+    if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter the 6-digit code' });
+    const entry = otpStore.get(phoneClean);
+    if (!entry) return res.status(400).json({ error: 'No pending code for this number — request a new one.' });
+    if (Date.now() > entry.expiresAt) {
+      otpStore.delete(phoneClean);
+      return res.status(400).json({ error: 'Code expired — request a new one.' });
+    }
+    if (entry.attempts >= OTP_MAX_ATTEMPTS) {
+      otpStore.delete(phoneClean);
+      return res.status(400).json({ error: 'Too many wrong attempts — request a new code.' });
+    }
+    if (hashOtp(code, phoneClean) !== entry.codeHash) {
+      entry.attempts += 1; // stored entry is the same object — persists
+      return res.status(400).json({ error: 'Incorrect code. Please try again.' });
+    }
+    // Verified! Burn the code and create the account (referral applies now).
+    otpStore.delete(phoneClean);
+    const { referralBonus } = await createCustomerAccount(name || '', phoneClean, referralCode);
+    const orders = await orders_.find({ customerId: phoneClean }).toArray();
+    res.json({ success: true, customerId: phoneClean, returning: orders.length > 0, message: `Welcome ${name || ''}!`, referralBonus });
+  } catch (err) {
+    console.error('verify-otp error:', err);
+    res.status(500).json({ error: 'Verification failed. Please try again.' });
   }
 });
 app.post('/api/orders', orderLimiter, async (req, res) => {
@@ -4735,4 +4883,4 @@ app.use((err, req, res, next) => {
 });
 const PORT = process.env.PORT || 5000;
 
-module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => db_ } };
+module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => db_, otpStore } };
