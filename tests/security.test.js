@@ -247,6 +247,37 @@ describe('Points Redemption Store (owner currency)', () => {
   });
 });
 
+describe('Notification token registration (staff push)', () => {
+  it('registers a staff token for a real staff account and refuses unknown usernames', async () => {
+    // Create a dedicated staff user so the test is deterministic in both the
+    // shared Mongo test DB and the offline mock.
+    const uname = 'notif_staff_' + Date.now();
+    const created = await request(app)
+      .post('/api/admin/users')
+      .set(auth())
+      .send({ username: uname, password: 'pass12345', name: 'Notif Staff', role: 'cashier', permissions: ['sales'] });
+    expect(created.body.success).toBe(true);
+
+    const good = await request(app)
+      .post('/api/notifications/register')
+      .send({ role: 'staff', staffUsername: uname, token: 'STAFF-TOKEN-' + Date.now(), platform: 'android' });
+    expect(good.statusCode).toBe(200);
+    expect(good.body.success).toBe(true);
+
+    const bad = await request(app)
+      .post('/api/notifications/register')
+      .send({ role: 'staff', staffUsername: 'no_such_user', token: 'STAFF-TOKEN-BAD-' + Date.now() });
+    expect(bad.statusCode).toBe(403);
+  });
+
+  it('a customer token still requires a real customer', async () => {
+    const r = await request(app)
+      .post('/api/notifications/register')
+      .send({ phone: '07999999999', token: 'CUST-TOKEN-' + Date.now() });
+    expect(r.statusCode).toBe(403);
+  });
+});
+
 describe('Promo atomicity', () => {
   it('two simultaneous spins never both win — at most one is granted', async () => {
     const phone = freshPhone();

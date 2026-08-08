@@ -1132,10 +1132,8 @@ function App() {
           </React.Suspense>
         </ErrorBoundary>
         <button className="back-to-shop-btn" onClick={() => {
-          sessionStorage.removeItem('bm_token');
-          sessionStorage.removeItem('bm_user');
-          localStorage.removeItem('bm_token');
-          localStorage.removeItem('bm_user');
+          // Switching views never logs the staff user out — the admin session
+          // persists (localStorage) until they tap Exit in the admin section.
           setIsAdmin(false);
         }}>← Back to Blitz Mall</button>
       </div>

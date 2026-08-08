@@ -123,7 +123,9 @@ if (!JWT_SECRET) {
   console.error('FATAL ERROR: JWT_SECRET environment variable is not defined.');
   process.exit(1);
 }
-const JWT_EXPIRES = '24h';
+// Staff (owner/cashier/manager) stay logged in until they log out manually —
+// the token effectively never expires, and the apps persist it across restarts.
+const JWT_EXPIRES = '3650d';
 
 // Shop GPS coordinates (Point A for delivery tracking)
 const SHOP_COORDS = { lat: 0.8273, lng: 35.1207 }; // Matunda, Kakamega - Blitz Mall location
@@ -794,10 +796,14 @@ app.post('/api/orders', orderLimiter, async (req, res) => {
     }
 
     console.log('🔔 NEW ORDER:', order.customerName, 'KES', order.totalPrice);
-    // Native toasts for the shop PC (Electron) — polled via /api/notifications/feed.
-    // No customer name/payment method here — the feed endpoint is unauthenticated
+    // Real OS-level pop-up to every staff device that enabled notifications
+    // (owner/cashier/manager) — staff push is orders-only. The PC feed toast is
+    // written too, so the shop PC alerts even before FCM is configured. No
+    // customer name/payment method here — the feed endpoint is unauthenticated
     // (the shop PC polls it), so the body stays free of personally identifying data.
-    addFeedEvent({ audience: 'admin', title: '🛒 New Order', body: `New order received — KES ${order.totalPrice}` });
+    sendPushToStaff('🛒 New Order', `New order received — KES ${order.totalPrice}`);
+    // The customer gets a real pop-up confirmation as well (feed + OS push).
+    sendPushToPhone(phoneClean, '✅ Order received', `Your BlitzMall order is confirmed — KES ${order.totalPrice}. We'll let you know when it's on the way.`);
     res.json({ success: true, orderId: result.insertedId, message: 'Order placed! Pay on delivery.' });
   } catch (e) { console.error('Failed to place order:', e); res.status(500).json({ error: 'Failed to place order' }); }
 });
@@ -4610,6 +4616,21 @@ async function sendPushToAll(title, body, data = {}) {
   } catch (e) { console.error('sendPushToAll failed:', e.message); return { sent: 0 }; }
 }
 
+// Real OS-level push to every STAFF device (owner / cashier / manager) that
+// logged into the admin section and enabled notifications. Used for NEW ORDERS
+// only — staff pop-ups stay about orders, nothing else. The PC feed toast is
+// always written too, so the shop PC alerts even before FCM is configured.
+async function sendPushToStaff(title, body, data = {}) {
+  await addFeedEvent({ audience: 'admin', title, body });
+  if (!fcmConfigured()) return { sent: 0, skipped: 1 };
+  try {
+    const staff = await notification_tokens_.find({ role: 'staff' }).toArray();
+    const uniq = [...new Set(staff.map(t => t.token).filter(Boolean))];
+    if (!uniq.length) return { sent: 0 };
+    return await sendToTokens(uniq, title, body, data);
+  } catch (e) { console.error('sendPushToStaff failed:', e.message); return { sent: 0 }; }
+}
+
 const notifRegisterLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10, // 10 token registrations per minute per IP — stops token stuffing
@@ -4619,10 +4640,24 @@ const notifRegisterLimiter = rateLimit({
 
 // Customers register their device/browser token here after enabling notifications.
 // Requires an existing customer account so tokens can't be stuffed for random phones.
+// Staff (owner/cashier/manager) register with { role: 'staff', staffUsername } —
+// validated against the users table, and those tokens receive NEW-ORDER pushes.
 app.post('/api/notifications/register', notifRegisterLimiter, async (req, res) => {
-  const { phone, token, platform } = req.body;
-  if (!phone || !token) return res.status(400).json({ error: 'Phone and token required' });
+  const { phone, token, platform, role, staffUsername } = req.body;
+  if (!token) return res.status(400).json({ error: 'Token required' });
   try {
+    if (role === 'staff') {
+      if (!staffUsername) return res.status(400).json({ error: 'Staff username required' });
+      const staff = await users_.findOne({ username: String(staffUsername).toLowerCase().trim() });
+      if (!staff) return res.status(403).json({ error: 'Unknown staff account' });
+      await notification_tokens_.deleteMany({ token }); // one token belongs to one device/account
+      await notification_tokens_.insertOne({
+        role: 'staff', staffUser: staff.username, staffRole: staff.role,
+        token: String(token), platform: platform || 'android', updatedAt: new Date()
+      });
+      return res.json({ success: true });
+    }
+    if (!phone) return res.status(400).json({ error: 'Phone and token required' });
     const phoneClean = String(phone).replace(/[^0-9]/g, '');
     const cust = await customers_.findOne({ phone: phoneClean });
     if (!cust && !(await orders_.findOne({ customerId: phoneClean }))) {
@@ -4637,11 +4672,16 @@ app.post('/api/notifications/register', notifRegisterLimiter, async (req, res) =
   }
 });
 
-// Forget every token for a phone (called when the customer turns notifications off).
+// Forget a device's token (customer turns notifications off, or staff logs out).
 app.post('/api/notifications/unregister', notifRegisterLimiter, async (req, res) => {
-  const { phone } = req.body;
-  if (!phone) return res.status(400).json({ error: 'Phone required' });
+  const { phone, role, staffUsername } = req.body;
   try {
+    if (role === 'staff') {
+      if (!staffUsername) return res.status(400).json({ error: 'Staff username required' });
+      await notification_tokens_.deleteMany({ role: 'staff', staffUser: String(staffUsername).toLowerCase().trim() });
+      return res.json({ success: true });
+    }
+    if (!phone) return res.status(400).json({ error: 'Phone required' });
     const phoneClean = String(phone).replace(/[^0-9]/g, '');
     await notification_tokens_.deleteMany({ phone: phoneClean });
     res.json({ success: true });

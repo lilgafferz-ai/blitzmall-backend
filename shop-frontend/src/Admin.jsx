@@ -39,9 +39,12 @@ const RECORD_OPTIONS = [
   { key: 'audit_logs', label: 'Audit Logs', icon: '📋', desc: 'Admin action history' },
 ];
 
-// JWT auth helper — adds Bearer token to every admin fetch
+// JWT auth helper — adds Bearer token to every admin fetch. The token lives in
+// localStorage so staff stay logged in across app restarts (until they tap
+// Exit); sessionStorage is a fallback for sessions from older builds.
 const authHeaders = () => {
-  const token = sessionStorage.getItem('bm_token');
+  let token = null;
+  try { token = localStorage.getItem('bm_token') || sessionStorage.getItem('bm_token'); } catch (e) { token = sessionStorage.getItem('bm_token'); }
   return token ? { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
 };
 const money = (n) => 'KES ' + (Math.round((n || 0) * 100) / 100).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' });
@@ -324,8 +327,14 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
 });
 
 function Admin() {
-  const [loggedIn, setLoggedIn] = useState(false);
-  const [user, setUser] = useState(null); // { name, role, username }
+  // Staff session is restored from localStorage on every app launch — a logged-in
+  // owner/cashier/manager stays logged in until they tap Exit (no timeout).
+  const [loggedIn, setLoggedIn] = useState(() => {
+    try { return !!(localStorage.getItem('bm_token') && localStorage.getItem('bm_user')); } catch (e) { return false; }
+  });
+  const [user, setUser] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('bm_user') || 'null'); } catch (e) { return null; }
+  }); // { name, role, username }
   const [adminPerfMode, setAdminPerfMode] = useState(() => {
     try {
       return localStorage.getItem('blitz_perf_mode') === 'true';
@@ -1296,55 +1305,68 @@ const loadStockTransfers = async () => {
     loadProducts(); loadSales(); checkAlerts();
   };
 
-  // Auto-login on mount disabled for maximum security. Owner/Staff must always authenticate via login form.
+  // Manual logout ONLY — staff stay logged in until they tap Exit. Also drops
+  // this staff device's push token so it stops receiving new-order pop-ups.
+  const logout = () => {
+    try {
+      const uname = user && user.username ? user.username : null;
+      if (uname) fetch(API_URL + '/notifications/unregister', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'staff', staffUsername: uname })
+      }).catch(() => {});
+    } catch (e) {}
+    localStorage.removeItem('bm_token'); localStorage.removeItem('bm_user');
+    sessionStorage.removeItem('bm_token'); sessionStorage.removeItem('bm_user');
+    staffPushRegisteredRef.current = false; // next login re-registers this device
+    setLoggedIn(false); setUser(null);
+  };
+
+  // ===== STAFF PUSH — real OS pop-ups on the phone =====
+  // A staff device (owner/cashier/manager) registers as a 'staff' push token on
+  // login so the server can ping it with NEW-ORDER notifications (orders only).
+  // Native apps only — the PC app alerts via its order-polling toasts. The
+  // alert body is deliberately PII-free ("New order received — KES X"), so even
+  // a guessed staff username binding only ever yields order-count pings.
+  const staffPushRegisteredRef = useRef(false);
   useEffect(() => {
-    return () => {
-      localStorage.removeItem('bm_token');
-      localStorage.removeItem('bm_user');
-      sessionStorage.removeItem('bm_token');
-      sessionStorage.removeItem('bm_user');
-    };
-  }, []);
-
-  // Inactivity timeout (15 minutes) - throttled to prevent cursor lag during mousemove
-  useEffect(() => {
-    if (!loggedIn) return;
-    let timer;
-    let lastReset = 0;
-
-    const resetTimer = (force = false) => {
-      const now = Date.now();
-      if (!force && now - lastReset < 30000) return; // Throttle to max once per 30s for passive events like mousemove
-      lastReset = now;
-
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        localStorage.removeItem('bm_token');
-        localStorage.removeItem('bm_user');
-        sessionStorage.removeItem('bm_token');
-        sessionStorage.removeItem('bm_user');
-        setLoggedIn(false);
-        setUser(null);
-        alert('You have been logged out due to inactivity.');
-      }, 15 * 60 * 1000);
-    };
-
-    const passiveEvents = ['mousemove', 'scroll'];
-    const activeEvents = ['keydown', 'click', 'touchstart'];
-
-    const handlePassive = () => resetTimer(false);
-    const handleActive = () => resetTimer(true);
-
-    passiveEvents.forEach(e => window.addEventListener(e, handlePassive, { passive: true }));
-    activeEvents.forEach(e => window.addEventListener(e, handleActive, { passive: true }));
-    resetTimer(true);
-
-    return () => {
-      clearTimeout(timer);
-      passiveEvents.forEach(e => window.removeEventListener(e, handlePassive));
-      activeEvents.forEach(e => window.removeEventListener(e, handleActive));
-    };
-  }, [loggedIn]);
+    if (!loggedIn || !user || !user.username) return;
+    if (staffPushRegisteredRef.current) return;
+    const native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+    if (!native) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { PushNotifications } = await import('@capacitor/push-notifications');
+        let perm = await PushNotifications.checkPermissions();
+        if (perm.receive === 'prompt') perm = await PushNotifications.requestPermissions();
+        if (perm.receive !== 'granted') return;
+        await PushNotifications.register();
+        const token = await new Promise(resolve => {
+          const unsubs = [];
+          const finish = (t) => { try { unsubs.forEach(u => u.remove()); } catch (e) {} resolve(t); };
+          unsubs.push(PushNotifications.addListener('registration', (r) => finish(r && r.value)));
+          unsubs.push(PushNotifications.addListener('registrationError', () => finish(null)));
+          setTimeout(() => finish(null), 15000);
+        });
+        if (cancelled || !token) return;
+        staffPushRegisteredRef.current = true;
+        // Foreground parity with the customer app: toast pushes received while
+        // the admin screen is open (background ones pop from the OS itself).
+        try {
+          PushNotifications.addListener('pushNotificationReceived', (n) => {
+            if (n && n.notification) {
+              try { new Notification(n.notification.title || 'BlitzMall', { body: n.notification.body || '' }); } catch (e) {}
+            }
+          });
+        } catch (e) {}
+        await fetch(API_URL + '/notifications/register', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: 'staff', staffUsername: user.username, token, platform: 'android' })
+        }).catch(() => {});
+      } catch (e) { console.error('Staff push registration failed:', e); }
+    })();
+    return () => { cancelled = true; };
+  }, [loggedIn, user]);
 
   const login = async (e) => {
     e.preventDefault();
@@ -1353,6 +1375,9 @@ const loadStockTransfers = async () => {
       const r = await fetch(API_URL + '/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: loginUsername, password: loginPassword }) });
       const d = await r.json();
       if (d.success) {
+        // Persist across restarts (localStorage) + keep sessionStorage in sync.
+        localStorage.setItem('bm_token', d.token);
+        localStorage.setItem('bm_user', JSON.stringify(d.user));
         sessionStorage.setItem('bm_token', d.token);
         sessionStorage.setItem('bm_user', JSON.stringify(d.user));
         setUser(d.user);
@@ -2033,11 +2058,7 @@ ${div}
           >
             🏎️ {adminPerfMode ? 'Fast' : 'Rich'}
           </button>
-          <button className="blitz-admin-exit" onClick={() => { 
-            localStorage.removeItem('bm_token'); localStorage.removeItem('bm_user'); 
-            sessionStorage.removeItem('bm_token'); sessionStorage.removeItem('bm_user'); 
-            setLoggedIn(false); setUser(null); 
-          }}>Exit</button>
+          <button className="blitz-admin-exit" onClick={logout}>Exit</button>
         </div>
       </header>
 
