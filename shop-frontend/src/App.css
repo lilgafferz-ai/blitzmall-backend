@@ -238,10 +238,11 @@ input, textarea {
   .rail-item .rail-name{font-size:.82rem;}
   .home-main{overflow:visible;}
 }
-/* TABLET / PC — the desktop customer side fills the ENTIRE window edge to
-   edge (no width caps), with a wide vertical category rail, a multi-column
-   product grid that scales up to 6 columns on big monitors, larger images
-   and a split product detail page. */
+/* TABLET / PC — the desktop customer side feels like a real PC app: the
+   window chrome (screen, top bar, bottom nav) spans the full window edge to
+   edge, but the CONTENT sits in a comfortable centered column so cards and
+   text aren't absurdly stretched. The product grid scales 3/4/5 columns,
+   images are larger and the product detail page is split into two panes. */
 @media (min-width:641px){
   .screen:not(.center-screen){width:100%;max-width:none;min-height:100vh;}
   .bottomnav{width:100%;max-width:none;}
@@ -252,11 +253,19 @@ input, textarea {
   .prod-img{height:170px;}
   .detail-wrap{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;}
   .detail-img{height:460px;}
+  /* Content containers: centered column instead of full-bleed stretch. */
+  .scroll{max-width:1200px;margin:0 auto;padding:18px 28px 32px;}
+  .profile-scroll{max-width:820px;}
+  .home-layout{max-width:1200px;margin:12px auto 24px;}
+  .searchbar.wide{max-width:1200px;margin:14px auto 4px;}
+  .promo-banner-slider{max-width:1200px;margin:16px auto 0;}
+  .flash-sale-card{max-width:1200px;margin:16px auto 0;}
+  .scratch-card-wrap{max-width:1200px;margin:16px auto 0;}
+  .deal-banner-chip{max-width:1200px;margin:8px auto 6px !important;}
 }
 @media (min-width:641px) and (max-width:999px){ .prod-grid{grid-template-columns:repeat(3,1fr);} }
 @media (min-width:1000px) and (max-width:1399px){ .prod-grid{grid-template-columns:repeat(4,1fr);} }
-@media (min-width:1400px) and (max-width:1799px){ .prod-grid{grid-template-columns:repeat(5,1fr);} }
-@media (min-width:1800px){ .prod-grid{grid-template-columns:repeat(6,1fr);} }
+@media (min-width:1400px){ .prod-grid{grid-template-columns:repeat(5,1fr);} }
 
 /* ===== PC CUSTOMER SIDE = FULL DESKTOP APP =====
    The desktop app (Electron window or PC browser) gives customers a real
