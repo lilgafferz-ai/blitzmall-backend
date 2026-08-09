@@ -499,6 +499,9 @@ function App() {
   // newer desktop build exists, null otherwise.
   const [pcLatest, setPcLatest] = useState(null);
   const [pcUpdateReady, setPcUpdateReady] = useState(false); // true once the new build is downloaded & can be applied in one click
+  const [restartIn, setRestartIn] = useState(0); // live auto-restart countdown (seconds) once an update is downloaded
+  const screenRef = useRef(screen);
+  useEffect(() => { screenRef.current = screen; });
   const [deliveryArea, setDeliveryArea] = useState('mall'); // 'mall' | 'standard'
   const [deliveryLocation, setDeliveryLocation] = useState('');
   const [gpsCoords, setGpsCoords] = useState(null);
@@ -1165,7 +1168,15 @@ function App() {
         // later "checking/up-to-date/error" events never hide the button.
         setPcUpdateReady(true);
         setPcUpdateStatus('Update downloaded — restart to apply');
-        showToast('✅ Update downloaded! Tap Restart to apply it now.');
+        // Hands-off auto-restart, but never yank the app out from under the
+        // user: only count down when they're on the Profile screen (where the
+        // countdown is visible) or the window isn't focused (they're away).
+        // Otherwise it applies silently on close instead.
+        const canAutoRestart = screenRef.current === 'profile' || (typeof document !== 'undefined' && !document.hasFocus());
+        setRestartIn(canAutoRestart ? 20 : 0);
+        showToast(canAutoRestart
+          ? '✅ Update downloaded — the app restarts automatically in 20s (cancel in Profile → Updates)'
+          : '✅ Update downloaded — it applies the next time you close the app (or tap Restart in Profile)');
       } else if (s.status === 'up-to-date') {
         setPcUpdateStatus('You are up to date');
         showToast('✅ PC app is up to date!');
@@ -1177,6 +1188,51 @@ function App() {
     return () => { if (off && typeof off === 'function') off(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Apply the downloaded build right now (silent install + auto relaunch).
+  // Shared by the one-click Restart button and the auto countdown; checks the
+  // IPC result so a failed install surfaces a message instead of dying silently.
+  const applyUpdateNow = async () => {
+    try {
+      const bridge = typeof window !== 'undefined' ? window.blitzUpdater : null;
+      if (bridge && typeof bridge.install === 'function') {
+        showToast('🔄 Restarting to apply the update…');
+        const res = await bridge.install();
+        if (!res || !res.ok) {
+          showToast('Could not restart — please close & reopen the app');
+          return false;
+        }
+        return true;
+      }
+      showToast('Update is ready — please close & reopen the app');
+      return false;
+    } catch (e) {
+      console.error(e);
+      showToast('Could not restart — please close & reopen the app');
+      return false;
+    }
+  };
+
+  // Live auto-restart: once an update is downloaded, count down and apply it
+  // silently (the app quits + relaunches the new build by itself). Cancelling
+  // stops the countdown; the manual Restart button still applies it anytime.
+  useEffect(() => {
+    if (restartIn <= 0) return;
+    if (restartIn === 1) {
+      applyUpdateNow().then(ok => { if (!ok) setRestartIn(0); });
+      return;
+    }
+    const t = setTimeout(() => setRestartIn(restartIn - 1), 1000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restartIn]);
+
+  // Leaving the Profile screen during the countdown cancels it — never restart
+  // the app while the user is doing something else.
+  useEffect(() => {
+    if (restartIn > 0 && screen !== 'profile') setRestartIn(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen]);
 
   if (isAdmin) {
     return (
@@ -1955,11 +2011,20 @@ function App() {
   );
 
   const BottomNav = () => (
-    <nav className="bottomnav">
-      <button className={['home', 'category'].includes(screen) ? 'on' : ''} onClick={() => { setActiveCategory('All'); setScreen('home'); }}><span>🏠</span>Home</button>
-      <button className={screen === 'cart' ? 'on' : ''} onClick={() => setScreen('cart')}><span>🛒{cartCount > 0 && <i className="dot" />}</span>Cart</button>
-      <button className={['profile', 'orders'].includes(screen) ? 'on' : ''} onClick={() => setScreen('profile')}><span>👤</span>Profile</button>
-    </nav>
+    <>
+      {/* Phone: fixed bottom tab bar (hidden on desktop by CSS). */}
+      <nav className="bottomnav">
+        <button className={['home', 'category'].includes(screen) ? 'on' : ''} onClick={() => { setActiveCategory('All'); setScreen('home'); }}><span>🏠</span>Home</button>
+        <button className={screen === 'cart' ? 'on' : ''} onClick={() => setScreen('cart')}><span>🛒{cartCount > 0 && <i className="dot" />}</span>Cart</button>
+        <button className={['profile', 'orders'].includes(screen) ? 'on' : ''} onClick={() => setScreen('profile')}><span>👤</span>Profile</button>
+      </nav>
+      {/* Desktop: PC-style nav strip pinned under the header (hidden on phones). */}
+      <nav className="desktopnav">
+        <button className={['home', 'category'].includes(screen) ? 'on' : ''} onClick={() => { setActiveCategory('All'); setScreen('home'); }}><span>🏠</span>Home</button>
+        <button className={screen === 'cart' ? 'on' : ''} onClick={() => setScreen('cart')}><span>🛒{cartCount > 0 && <i className="dot" />}</span>Cart</button>
+        <button className={['profile', 'orders'].includes(screen) ? 'on' : ''} onClick={() => setScreen('profile')}><span>👤</span>Profile</button>
+      </nav>
+    </>
   );
 
   // HOME — left category rail + search + trending
@@ -2952,23 +3017,7 @@ function App() {
           )}
           {pcUpdateReady && (
             <button
-              onClick={async () => {
-                try {
-                  const bridge = typeof window !== 'undefined' ? window.blitzUpdater : null;
-                  if (bridge && typeof bridge.install === 'function') {
-                    showToast('🔄 Restarting to apply the update…');
-                    const res = await bridge.install();
-                    if (!res || !res.ok) {
-                      showToast('Could not restart — please close & reopen the app');
-                    }
-                  } else {
-                    showToast('Update is ready — please close & reopen the app');
-                  }
-                } catch (e) {
-                  console.error(e);
-                  showToast('Could not restart — please close & reopen the app');
-                }
-              }}
+              onClick={applyUpdateNow}
               style={{
                 marginTop: 10, width: '100%', padding: '10px 12px',
                 background: 'linear-gradient(135deg,#22c55e,#16a34a)', color: '#fff',
@@ -2978,6 +3027,17 @@ function App() {
             >
               🔄 Restart to Update (applies now)
             </button>
+          )}
+          {restartIn > 0 && (
+            <div style={{ marginTop: 8, fontSize: '.74rem', color: 'var(--gold)', textAlign: 'center' }}>
+              🔄 Restarting automatically in {restartIn}s to finish the update…{' '}
+              <button
+                onClick={() => setRestartIn(0)}
+                style={{ background: 'none', border: 'none', color: 'var(--orange)', textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit', fontSize: '.74rem', fontWeight: 700 }}
+              >
+                Cancel
+              </button>
+            </div>
           )}
         </div>
 

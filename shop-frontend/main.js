@@ -83,8 +83,21 @@ app.whenReady().then(() => {
 
   // Stream updater events to the renderer so the in-app "Check for Updates"
   // button (Settings → App Updates) shows real status instead of a silent
-  // background check that gives the user no feedback.
+  // background check that gives the user no feedback. Every event is ALSO
+  // appended to a log file so a stuck install can be diagnosed afterwards:
+  //   %APPDATA%\BlitzMall\logs\updater.log
+  const updaterLogPath = () => path.join(app.getPath('userData'), 'logs', 'updater.log');
+  const logUpdater = (line) => {
+    try {
+      const fs = require('fs');
+      const p = updaterLogPath();
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.appendFileSync(p, `${new Date().toISOString()} ${line}\n`);
+    } catch (e) { /* logging must never break the updater */ }
+  };
+  logUpdater(`app start, installed version v${app.getVersion()}, feed=${GITHUB_DL_FEED}`);
   const broadcastUpdaterStatus = (status) => {
+    logUpdater(`event: ${status.status}${status.newVersion ? ' (new ' + status.newVersion + ')' : ''}${status.message ? ' — ' + status.message : ''}`);
     for (const w of BrowserWindow.getAllWindows()) {
       if (!w.isDestroyed()) w.webContents.send('updater:status', { ...status, version: app.getVersion() });
     }
@@ -105,7 +118,7 @@ app.whenReady().then(() => {
       if (Notification.isSupported()) {
         new Notification({
           title: 'BlitzMall update ready',
-          body: `v${info.version} downloaded — it will apply automatically when you close the app.`,
+          body: `v${info.version} downloaded — the app will restart itself to finish updating.`,
           silent: true
         }).show();
       }
@@ -193,8 +206,17 @@ app.whenReady().then(() => {
   });
 
   // Apply a downloaded update right now (the "Restart to update" button).
+  // Apply the downloaded update NOW: silent install + force relaunch, so the
+  // app swaps itself to the new build without the user running anything.
   ipcMain.handle('updater:install', async () => {
-    try { autoUpdater.quitAndInstall(); } catch (e) { console.error('[updater] quitAndInstall failed:', e && e.message); return { ok: false }; }
+    try {
+      logUpdater('applying update: quitAndInstall(silent, relaunch)');
+      autoUpdater.quitAndInstall(true, true);
+    } catch (e) {
+      console.error('[updater] quitAndInstall failed:', e && e.message);
+      logUpdater('quitAndInstall failed: ' + (e && e.message));
+      return { ok: false };
+    }
     return { ok: true };
   });
 

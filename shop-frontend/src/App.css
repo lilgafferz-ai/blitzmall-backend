@@ -225,6 +225,9 @@ input, textarea {
 .bottomnav button.on{color:var(--orange);}
 .bottomnav button.on span{filter:drop-shadow(0 0 8px rgba(255,122,26,.7));}
 .bottomnav .dot{position:absolute;top:-2px;right:-4px;width:8px;height:8px;background:var(--red);border-radius:50%;box-shadow:0 0 8px var(--red);}
+/* Desktop navigation strip (Home | Cart | Profile) — hidden on phones, shown
+   under the header on PC via the min-width media block above. */
+.desktopnav{display:none;}
 
 .back-to-shop-btn{position:fixed;bottom:calc(env(safe-area-inset-bottom) + 80px);left:20px;background:var(--grad);color:#1a0a00;border:none;padding:12px 20px;border-radius:12px;font-weight:700;cursor:pointer;box-shadow:var(--glow);z-index:100;}
 
@@ -245,7 +248,16 @@ input, textarea {
    stretched, never cramped. */
 @media (min-width:641px){
   .screen:not(.center-screen){width:100%;max-width:none;min-height:100vh;}
-  .bottomnav{width:100%;max-width:none;}
+  /* PC apps don't use a phone-style bottom bar — hidden on desktop, replaced by
+     the .desktopnav strip that sits under the header (rendered by <BottomNav/>). */
+  .bottomnav{display:none;}
+  .with-nav{padding-bottom:0;}
+  /* Flex order pulls the desktop nav right under the header, before content. */
+  .topbar{order:-3;}
+  .desktopnav{order:-2;display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 28px;background:rgba(10,10,12,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);position:sticky;top:68px;z-index:19;}
+  .desktopnav button{display:flex;align-items:center;gap:8px;background:transparent;border:none;color:var(--muted);font-family:inherit;font-size:.88rem;font-weight:600;padding:9px 24px;border-radius:10px;cursor:pointer;transition:.2s;}
+  .desktopnav button:hover{color:var(--text);background:var(--card);}
+  .desktopnav button.on{color:var(--orange);background:rgba(255,122,26,.12);}
   /* Header and content share the same 28px side padding so nothing looks
      misaligned under the full-width top bar. */
   .topbar{padding:14px 28px;}
@@ -253,24 +265,28 @@ input, textarea {
   .rail-item{flex-direction:row;justify-content:flex-start;gap:10px;padding:13px 14px;}
   .rail-item .rail-emoji{font-size:1.2rem;}
   .rail-item .rail-name{font-size:.85rem;}
-  .prod-img{height:180px;}
+  .prod-img{height:210px;}
   .detail-wrap{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;}
   .detail-img{height:480px;}
-  /* Content spans the full window — aligned with the full-width header. */
-  .scroll{width:100%;max-width:none;padding:18px 28px 32px;}
+  /* Amazon-style content column: everything sits in a wide centered column
+     (~1500px) so the header spans the window but the content reads as a tidy
+     desktop page with no stretched elements and no wasted gaps. */
+  .scroll{width:100%;max-width:1500px;margin:0 auto;padding:18px 28px 32px;}
   .profile-scroll{max-width:960px;}
-  .home-layout{width:100%;max-width:none;padding:12px 28px 24px;overflow:visible;}
-  .cat-rail{position:sticky;top:70px;align-self:flex-start;max-height:calc(100vh - 140px);}
-  .searchbar.wide{width:auto;max-width:none;margin:14px 28px 4px;}
-  .promo-banner-slider{width:auto;max-width:none;margin:16px 28px 0;}
-  .flash-sale-card{width:auto;max-width:none;margin:16px 28px 0;}
-  .scratch-card-wrap{width:auto;max-width:none;margin:16px 28px 0;}
-  .deal-banner-chip{width:auto;max-width:none;margin:8px 28px 6px !important;}
+  .home-layout{width:100%;max-width:1500px;margin:0 auto;padding:12px 28px 24px;overflow:visible;}
+  .cat-rail{position:sticky;top:112px;align-self:flex-start;max-height:calc(100vh - 190px);}
+  .searchbar.wide{width:auto;max-width:1500px;margin:14px auto 4px;}
+  .promo-banner-slider{width:auto;max-width:1500px;margin:16px auto 0;}
+  .flash-sale-card{width:auto;max-width:1500px;margin:16px auto 0;}
+  .scratch-card-wrap{width:auto;max-width:1500px;margin:16px auto 0;}
+  .deal-banner-chip{width:auto;max-width:1500px;margin:8px auto 6px !important;}
 }
-/* Products auto-fill: cards keep a healthy fixed size and extra space makes
-   MORE columns (never wider, stretched cards). */
-@media (min-width:641px) and (max-width:999px){ .prod-grid{grid-template-columns:repeat(auto-fill,minmax(170px,1fr));} }
-@media (min-width:1000px){ .prod-grid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr));} }
+/* Products fill the row: on wide windows auto-fit collapses empty tracks so the
+   last row always spans the full width and cards grow to a healthy size instead
+   of leaving blank space. Below 1000px auto-fill is kept (auto-fit there would
+   collapse to a single giant card on narrow desktop windows). */
+@media (min-width:641px) and (max-width:999px){ .prod-grid{grid-template-columns:repeat(auto-fill,minmax(180px,1fr));} }
+@media (min-width:1000px){ .prod-grid{grid-template-columns:repeat(auto-fit,minmax(210px,1fr));} }
 
 /* ===== PC CUSTOMER SIDE = FULL DESKTOP APP =====
    The desktop app (Electron window or PC browser) gives customers a real
