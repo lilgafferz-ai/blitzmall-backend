@@ -58,6 +58,29 @@ app.whenReady().then(() => {
   console.log('[updater] BlitzMall desktop version:', app.getVersion());
   const CHECK_INTERVAL_MS = 10 * 60 * 1000; // re-check every 10 min
 
+  // ===== FULLY HANDS-OFF UPDATES =====
+  // Updates download SILENTLY in the background and apply AUTOMATICALLY when
+  // the user quits the app — no dialog to miss, no manual installer to run,
+  // ever. (autoInstallOnAppQuit is what makes closing the app apply the new
+  // version; autoDownload starts the background download the moment an update
+  // is found.)
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  // Use the direct GitHub release-download feed (a plain file URL served from
+  // the release assets) instead of the api.github.com JSON API. The API is
+  // rate-limited to 60 req/hr per IP and can fail silently — the raw file URL
+  // is a static CDN download that is never throttled. This is the same URL we
+  // already use for the guaranteed "Download New Version" fallback.
+  const GITHUB_REPO = 'lilgafferz-ai/blitzmall-backend';
+  const GITHUB_DL_FEED = `https://github.com/${GITHUB_REPO}/releases/latest/download`;
+  try {
+    autoUpdater.setFeedURL({ provider: 'generic', url: GITHUB_DL_FEED });
+    console.log('[updater] feed switched to direct release-download URL (no API rate limits)');
+  } catch (e) {
+    console.error('[updater] setFeedURL failed (will keep packaged app-update.yml):', e && e.message);
+  }
+
   // Stream updater events to the renderer so the in-app "Check for Updates"
   // button (Settings → App Updates) shows real status instead of a silent
   // background check that gives the user no feedback.
@@ -75,23 +98,24 @@ app.whenReady().then(() => {
   });
   autoUpdater.on('update-downloaded', (info) => {
     broadcastUpdaterStatus({ status: 'downloaded', newVersion: info && info.version });
-    dialog.showMessageBox({
-      type: 'info',
-      title: 'Update Ready',
-      message: 'BlitzMall v' + info.version + ' has been downloaded. Restart the app to apply the updates.',
-      buttons: ['Restart Now', 'Later']
-    }).then((result) => {
-      if (result.response === 0) {
-        autoUpdater.quitAndInstall();
+    // Non-intrusive toast: the update applies on quit regardless (see
+    // autoInstallOnAppQuit above), so no modal blocks the user's work.
+    try {
+      const { Notification } = require('electron');
+      if (Notification.isSupported()) {
+        new Notification({
+          title: 'BlitzMall update ready',
+          body: `v${info.version} downloaded — it will apply automatically when you close the app.`,
+          silent: true
+        }).show();
       }
-    });
+    } catch (e) {}
   });
 
   // Belt-and-suspenders update source: read the raw `latest.yml` asset from
   // the GitHub release (a plain file download — NO api.github.com rate limits
   // and no JSON API at all), so we ALWAYS know the newest published version
   // even if the electron-updater API check is being throttled or fails.
-  const GITHUB_REPO = 'lilgafferz-ai/blitzmall-backend';
   const LATEST_YML_URL = `https://github.com/${GITHUB_REPO}/releases/latest/download/latest.yml`;
   const fetchLatestReleaseInfo = async () => {
     try {
@@ -165,6 +189,12 @@ app.whenReady().then(() => {
       ? url
       : `${githubHost}/releases/latest`;
     await shell.openExternal(target);
+    return { ok: true };
+  });
+
+  // Apply a downloaded update right now (the "Restart to update" button).
+  ipcMain.handle('updater:install', async () => {
+    try { autoUpdater.quitAndInstall(); } catch (e) { console.error('[updater] quitAndInstall failed:', e && e.message); return { ok: false }; }
     return { ok: true };
   });
 

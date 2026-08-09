@@ -498,6 +498,7 @@ function App() {
   // the GitHub API or electron-updater): { version, downloadUrl } when a
   // newer desktop build exists, null otherwise.
   const [pcLatest, setPcLatest] = useState(null);
+  const [pcUpdateReady, setPcUpdateReady] = useState(false); // true once the new build is downloaded & can be applied in one click
   const [deliveryArea, setDeliveryArea] = useState('mall'); // 'mall' | 'standard'
   const [deliveryLocation, setDeliveryLocation] = useState('');
   const [gpsCoords, setGpsCoords] = useState(null);
@@ -1160,8 +1161,11 @@ function App() {
         showToast('⬇️ Update found — downloading in the background');
       } else if (s.status === 'downloaded') {
         setPcLatest(null);
+        // Sticky: once a new build is downloaded it stays ready to apply, so
+        // later "checking/up-to-date/error" events never hide the button.
+        setPcUpdateReady(true);
         setPcUpdateStatus('Update downloaded — restart to apply');
-        showToast('✅ Update downloaded! Restart the app when prompted.');
+        showToast('✅ Update downloaded! Tap Restart to apply it now.');
       } else if (s.status === 'up-to-date') {
         setPcUpdateStatus('You are up to date');
         showToast('✅ PC app is up to date!');
@@ -1367,7 +1371,9 @@ function App() {
           const info = await bridge.latest();
           if (info && info.version && info.downloadUrl) {
             const cur = info.currentVersion || pcAppVersion;
-            if (isNewerVersion(info.version, cur)) {
+            // If the native updater already downloaded the new build, don't
+            // re-show the manual-download button — the Restart button applies it.
+            if (isNewerVersion(info.version, cur) && !pcUpdateReady) {
               setPcLatest({ version: info.version, downloadUrl: info.downloadUrl });
               setPcUpdateStatus(`New version v${info.version} available — tap Download`);
               showToast(`⬇️ New version v${info.version} is available!`);
@@ -2942,6 +2948,35 @@ function App() {
               }}
             >
               ⬇️ Download New Version v{pcLatest.version}
+            </button>
+          )}
+          {pcUpdateReady && (
+            <button
+              onClick={async () => {
+                try {
+                  const bridge = typeof window !== 'undefined' ? window.blitzUpdater : null;
+                  if (bridge && typeof bridge.install === 'function') {
+                    showToast('🔄 Restarting to apply the update…');
+                    const res = await bridge.install();
+                    if (!res || !res.ok) {
+                      showToast('Could not restart — please close & reopen the app');
+                    }
+                  } else {
+                    showToast('Update is ready — please close & reopen the app');
+                  }
+                } catch (e) {
+                  console.error(e);
+                  showToast('Could not restart — please close & reopen the app');
+                }
+              }}
+              style={{
+                marginTop: 10, width: '100%', padding: '10px 12px',
+                background: 'linear-gradient(135deg,#22c55e,#16a34a)', color: '#fff',
+                border: 'none', borderRadius: 10, fontWeight: 700, fontSize: '.82rem',
+                cursor: 'pointer', boxShadow: '0 4px 14px rgba(34,197,94,.35)'
+              }}
+            >
+              🔄 Restart to Update (applies now)
             </button>
           )}
         </div>

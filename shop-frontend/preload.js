@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('blitzUpdater', {
   // Opens the newest installer in the default browser — always works even if
   // the in-app auto-updater is being throttled or blocked.
   openDownload: (url) => ipcRenderer.invoke('updater:openDownload', url),
+  // Apply a downloaded update right now (the "Restart to update" button):
+  // quits the app and relaunches the new version immediately.
+  install: () => ipcRenderer.invoke('updater:install'),
   onStatus: (callback) => {
     const listener = (_event, status) => {
       try { callback(status); } catch (e) { /* renderer handler error — ignore */ }
