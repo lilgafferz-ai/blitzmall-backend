@@ -60,7 +60,11 @@ app.use((req, res, next) => {
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // Limit each IP to 200 requests per window
+  // Lift the per-IP cap under Jest too (see IS_TEST note above): the whole
+  // suite shares one IP and one cached server instance, so the global budget
+  // of 200 requests is exhausted mid-suite and later tests (e.g. the OTP
+  // referral test) get a bare 429 with no body fields. Production keeps 200.
+  max: IS_TEST ? 100000 : 200, // Limit each IP to 200 requests per window
   standardHeaders: true,
   legacyHeaders: false,
 });
