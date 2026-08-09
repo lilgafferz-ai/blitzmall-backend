@@ -22,9 +22,31 @@ jobs:
     # have no MongoDB, so without this every test file stalls ~5s+ on a
     # connection-refused before falling back to the same mock — slow and
     # timing-dependent. MOCK_DB=1 makes the suite fast and deterministic.
-    - run: npm test -- --runInBand
+    - run: |
+        set -o pipefail
+        npm test -- --runInBand 2>&1 | tee /tmp/jest.log
       env:
         MOCK_DB: '1'
+    # Surface failures as check-run annotations + upload the full log so a
+    # red CI can be diagnosed without repo-admin access to the raw logs.
+    - name: Surface backend test failures
+      if: failure()
+      run: |
+        echo "::group::Jest failure summary"
+        grep -nE '✕|●|FAIL|Tests:|Test Suites:' /tmp/jest.log | head -80 || true
+        echo "::endgroup::"
+        grep -E '^\s*✕' /tmp/jest.log | head -20 | while IFS= read -r l; do
+          esc=$(printf '%s' "$l" | sed 's/%/%25/g; s/:/%3A/g; s/\r//g')
+          echo "::error::FAILED TEST: $esc"
+        done
+      shell: bash
+    - name: Upload backend test log
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: backend-test-log
+        path: /tmp/jest.log
+        retention-days: 7
 
   frontend-tests:
     runs-on: ubuntu-latest
