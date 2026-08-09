@@ -4669,15 +4669,40 @@ app.delete('/api/admin/records', authenticate, authorize('owner'), async (req, r
 // tokens with /api/notifications/register; the server sends through the FCM
 // HTTP v1 API via firebase-admin.
 let fcmApp = null;
+let fcmProjectId = null;
+let fcmWarned = false;
+// Accept the service-account key in the common pasted forms: raw multi-line
+// JSON, single-line JSON, JSON wrapped in quotes, or base64-encoded JSON
+// (Render/env managers can mangle multi-line values — base64 sidesteps that).
+function parseServiceAccount(rawInput) {
+  if (!rawInput) return null;
+  let text = String(rawInput).trim();
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    text = text.slice(1, -1).trim();
+  }
+  try { return JSON.parse(text); } catch (e) { /* fall through */ }
+  if (/^[A-Za-z0-9+/=\s]+$/.test(text)) {
+    try { return JSON.parse(Buffer.from(text.replace(/\s+/g, ''), 'base64').toString('utf8')); } catch (e) { /* fall through */ }
+  }
+  return null;
+}
 function getFcmApp() {
   if (fcmApp) return fcmApp;
   try {
-    const raw = process.env.FCM_SERVICE_ACCOUNT_JSON;
-    if (!raw) return null;
+    const parsed = parseServiceAccount(process.env.FCM_SERVICE_ACCOUNT_JSON);
+    if (!parsed) return null; // no key configured yet — stay silent
+    if (!parsed.client_email || !parsed.private_key) {
+      if (!fcmWarned) { console.error('FCM init failed: FCM_SERVICE_ACCOUNT_JSON is set but not a valid Firebase service-account key (missing client_email/private_key)'); fcmWarned = true; }
+      return null;
+    }
     const { initializeApp, cert } = require('firebase-admin/app');
-    fcmApp = initializeApp({ credential: cert(JSON.parse(raw)) }, 'blitzmall');
+    fcmApp = initializeApp({ credential: cert(parsed) }, 'blitzmall');
+    fcmProjectId = parsed.project_id || null;
     return fcmApp;
-  } catch (e) { console.error('FCM init failed:', e.message); return null; }
+  } catch (e) {
+    if (!fcmWarned) { console.error('FCM init failed:', e.message); fcmWarned = true; }
+    return null;
+  }
 }
 const fcmConfigured = () => !!getFcmApp();
 
@@ -4852,7 +4877,13 @@ app.post('/api/notifications/unregister', notifRegisterLimiter, async (req, res)
 // Real device push only fires when FCM_SERVICE_ACCOUNT_JSON is set in the
 // server env; the in-app feed (polled toasts) works without it.
 app.get('/api/notifications/status', async (req, res) => {
-  res.json({ serverFcmConfigured: fcmConfigured() });
+  let registeredTokens = 0;
+  try { registeredTokens = await notification_tokens_.countDocuments({}); } catch (e) {}
+  res.json({
+    serverFcmConfigured: fcmConfigured(),
+    fcmProjectId: fcmProjectId || null,
+    registeredTokens
+  });
 });
 
 // Owner sends a push to one customer (phone) or to every registered device.
@@ -4892,4 +4923,4 @@ app.use((err, req, res, next) => {
 });
 const PORT = process.env.PORT || 5000;
 
-module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => db_, otpStore, moneyPrizeUnlocked } };
+module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => db_, otpStore, moneyPrizeUnlocked, parseServiceAccount } };

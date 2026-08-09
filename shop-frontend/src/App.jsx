@@ -2661,7 +2661,12 @@ function App() {
         <div className="profile-head">
           <Avatar profile={profile} size={88} />
           <h2>{profile?.name || customer?.name}</h2>
-          <span className="muted">{profile?.phone || customer?.customerId}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 999, padding: '7px 16px', fontSize: '.88rem', fontWeight: 700, color: 'var(--gold)', letterSpacing: '.5px' }}>
+            📱 {customer?.customerId || profile?.phone}
+          </div>
+          <span className="muted" style={{ fontSize: '.66rem', maxWidth: 280, textAlign: 'center', lineHeight: 1.4 }}>
+            Points, wallet &amp; orders are tied to this number — sign in with the same number on every device to keep them together.
+          </span>
           {custAccount?.isOwner && (
             <span style={{ marginTop: 8, background: 'linear-gradient(135deg, #ffd24a, #ff7a1a)', color: '#000', fontWeight: 'bold', fontSize: '.7rem', padding: '4px 14px', borderRadius: 20, letterSpacing: '.5px', boxShadow: '0 4px 12px rgba(255, 178, 26, 0.45)' }}>👑 OWNER</span>
           )}

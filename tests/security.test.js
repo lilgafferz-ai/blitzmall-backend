@@ -5,8 +5,9 @@ const request = require('supertest');
 process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
-const { app, connectDb, client } = require('../server');
+const { app, connectDb, client, _test } = require('../server');
 const { getOwnerToken } = require('./helpers');
+const { parseServiceAccount } = _test || {};
 
 // Unique 10-digit phone per call so a prior test run's data can never
 // interfere with a later run.
@@ -294,5 +295,33 @@ describe('Promo atomicity', () => {
     const refused = [a.body, b.body].filter(x => x && x.alreadyUsed === true).length;
     expect(granted).toBeLessThanOrEqual(1);
     expect(granted + refused).toBeGreaterThanOrEqual(2); // both requests got a definitive answer
+  });
+});
+
+describe('FCM service-account parsing', () => {
+  const key = { type: 'service_account', project_id: 'blitzmall-0', client_email: 'firebase-adminsdk@blitzmall-0.iam.gserviceaccount.com', private_key: '-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----\n' };
+
+  it('parses a raw multi-line JSON key', () => {
+    const parsed = parseServiceAccount(JSON.stringify(key, null, 2));
+    expect(parsed).toEqual(key);
+    expect(parsed.project_id).toBe('blitzmall-0');
+  });
+
+  it('parses a JSON key wrapped in surrounding quotes (accidental paste)', () => {
+    const parsed = parseServiceAccount('"' + JSON.stringify(key) + '"');
+    expect(parsed && parsed.project_id).toBe('blitzmall-0');
+  });
+
+  it('parses a base64-encoded JSON key (Render-safe pasting)', () => {
+    const b64 = Buffer.from(JSON.stringify(key)).toString('base64');
+    const parsed = parseServiceAccount(b64);
+    expect(parsed).toEqual(key);
+  });
+
+  it('returns null for garbage and missing input', () => {
+    expect(parseServiceAccount('not a key at all')).toBeNull();
+    expect(parseServiceAccount('')).toBeNull();
+    expect(parseServiceAccount(undefined)).toBeNull();
+    expect(parseServiceAccount(null)).toBeNull();
   });
 });
