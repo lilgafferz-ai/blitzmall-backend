@@ -379,21 +379,6 @@ function App() {
     } catch (e) {}
   }, [perfMode, isAdmin]);
 
-  // The desktop PC app shows customers the SAME mobile layout they get on
-  // their phones — a phone-width column, horizontal category chips and a
-  // 2-column product grid (see `body.pc-phone-mode` rules in App.css). The
-  // admin section removes the class and keeps the full desktop layout.
-  useEffect(() => {
-    try {
-      const ua = (navigator.userAgent || '').toLowerCase();
-      const isMobileNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
-      const isPhone = /android|iphone|ipad|ipod|mobile/.test(ua);
-      const isDesktop = /electron/.test(ua) || (!isMobileNative && !isPhone);
-      document.body.classList.toggle('pc-phone-mode', isDesktop && !isAdmin);
-    } catch (e) {}
-    return () => { try { document.body.classList.remove('pc-phone-mode'); } catch (e) {} };
-  }, [isAdmin]);
-
   // Futuristic addictive features — prizes are decided SERVER-SIDE so the
   // odds can't be cheated, every voucher is bound to the winning phone number
   // and actually works at checkout, and daily limits survive app restarts.

@@ -241,45 +241,36 @@ input, textarea {
 /* TABLET / PC */
 @media (min-width:641px){
   .prod-grid{grid-template-columns:repeat(3,1fr);}
-  .screen:not(.center-screen){max-width:1000px;margin:0 auto;border-left:1px solid var(--line);border-right:1px solid var(--line);min-height:100vh;}
-  .bottomnav{max-width:1000px;margin:0 auto;}
-  .cat-rail{width:150px;}
+  .screen:not(.center-screen){max-width:1280px;margin:0 auto;border-left:1px solid var(--line);border-right:1px solid var(--line);min-height:100vh;}
+  .bottomnav{max-width:1280px;margin:0 auto;}
+  .cat-rail{width:190px;}
   .rail-item{flex-direction:row;justify-content:flex-start;gap:10px;padding:13px 14px;}
   .rail-item .rail-emoji{font-size:1.2rem;}
   .rail-item .rail-name{font-size:.85rem;}
-  .prod-img{height:150px;}
+  .prod-img{height:170px;}
   .detail-wrap{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;}
-  .detail-img{height:420px;}
+  .detail-img{height:460px;}
 }
 @media (min-width:1000px){ .prod-grid{grid-template-columns:repeat(4,1fr);} }
+@media (min-width:1400px){ .prod-grid{grid-template-columns:repeat(5,1fr);} }
 
-/* ===== PC CUSTOMER SIDE = MOBILE LOOK =====
-   The desktop window is wide, but the customer experience should look exactly
-   like the phone app: a phone-width column, horizontal category chips, a
-   2-column product grid and a full-width bottom nav. App.jsx toggles the
-   `pc-phone-mode` body class only on the customer side — the admin section
-   removes it and keeps the full desktop layout. Specificity beats the
-   TABLET/PC media rules above, so the phone look wins on desktop.
-   The 460px column is centered over a subtle glow so the sides look
-   intentional instead of empty. */
-body.pc-phone-mode{background:radial-gradient(900px 480px at 50% -80px,rgba(255,122,26,.07),transparent 65%),var(--bg);}
-body.pc-phone-mode .screen{max-width:460px;margin:0 auto;box-shadow:0 0 90px rgba(0,0,0,.55);}
-body.pc-phone-mode .screen:not(.center-screen){border-left:1px solid var(--line);border-right:1px solid var(--line);}
-body.pc-phone-mode .home-layout{flex-direction:column;overflow:visible;gap:10px;}
-body.pc-phone-mode .cat-rail{flex-direction:row;width:auto;overflow-x:auto;padding-bottom:4px;gap:10px;scrollbar-width:none;}
-body.pc-phone-mode .cat-rail::-webkit-scrollbar{display:none;}
-body.pc-phone-mode .rail-item{flex-direction:row;min-width:max-content;padding:9px 14px;border-radius:999px;}
-body.pc-phone-mode .rail-item .rail-emoji{font-size:1.1rem;}
-body.pc-phone-mode .rail-item .rail-name{font-size:.82rem;}
-body.pc-phone-mode .home-main{overflow:visible;}
-body.pc-phone-mode .prod-grid{grid-template-columns:repeat(2,1fr);}
-body.pc-phone-mode .prod-img{height:120px;}
-body.pc-phone-mode .detail-wrap{display:block;}
-body.pc-phone-mode .detail-img{height:300px;}
-body.pc-phone-mode .bottomnav{max-width:460px;margin:0 auto;}
-/* Floating action buttons + AI chat drawer stay anchored to the phone column. */
-body.pc-phone-mode .futuristic-floating-actions{right:max(16px,calc(50% - 214px));}
-body.pc-phone-mode .ai-chat-drawer{left:50%;right:auto;width:460px;margin-left:-230px;}
+/* ===== PC CUSTOMER SIDE = FULL DESKTOP APP =====
+   The desktop app (Electron window or PC browser) gives customers a real
+   desktop experience: a wide centered content column, a vertical category
+   rail, a 4-5 column product grid with larger images, a split product
+   detail page and a docked bottom nav. Phones keep the mobile layout via
+   the max-width rules above. */
+
+/* Desktop AI assistant: a right-side panel instead of a full-width phone
+   sheet, so it feels like a proper PC app drawer. */
+@media (min-width:641px){
+  .ai-chat-drawer{left:auto;right:0;width:440px;height:100vh;border-top:none;border-left:2px solid var(--green);border-top-left-radius:0;border-top-right-radius:0;box-shadow:-8px 0 30px rgba(0,0,0,.7);animation:slideInRight .3s cubic-bezier(.25,1,.5,1);}
+  .ai-chat-header{border-top-left-radius:0;border-top-right-radius:0;}
+}
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
 
 /* ===== REVIEW (customer) ===== */
 .review-box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;}
