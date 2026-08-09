@@ -253,6 +253,34 @@ input, textarea {
 }
 @media (min-width:1000px){ .prod-grid{grid-template-columns:repeat(4,1fr);} }
 
+/* ===== PC CUSTOMER SIDE = MOBILE LOOK =====
+   The desktop window is wide, but the customer experience should look exactly
+   like the phone app: a phone-width column, horizontal category chips, a
+   2-column product grid and a full-width bottom nav. App.jsx toggles the
+   `pc-phone-mode` body class only on the customer side — the admin section
+   removes it and keeps the full desktop layout. Specificity beats the
+   TABLET/PC media rules above, so the phone look wins on desktop.
+   The 460px column is centered over a subtle glow so the sides look
+   intentional instead of empty. */
+body.pc-phone-mode{background:radial-gradient(900px 480px at 50% -80px,rgba(255,122,26,.07),transparent 65%),var(--bg);}
+body.pc-phone-mode .screen{max-width:460px;margin:0 auto;box-shadow:0 0 90px rgba(0,0,0,.55);}
+body.pc-phone-mode .screen:not(.center-screen){border-left:1px solid var(--line);border-right:1px solid var(--line);}
+body.pc-phone-mode .home-layout{flex-direction:column;overflow:visible;gap:10px;}
+body.pc-phone-mode .cat-rail{flex-direction:row;width:auto;overflow-x:auto;padding-bottom:4px;gap:10px;scrollbar-width:none;}
+body.pc-phone-mode .cat-rail::-webkit-scrollbar{display:none;}
+body.pc-phone-mode .rail-item{flex-direction:row;min-width:max-content;padding:9px 14px;border-radius:999px;}
+body.pc-phone-mode .rail-item .rail-emoji{font-size:1.1rem;}
+body.pc-phone-mode .rail-item .rail-name{font-size:.82rem;}
+body.pc-phone-mode .home-main{overflow:visible;}
+body.pc-phone-mode .prod-grid{grid-template-columns:repeat(2,1fr);}
+body.pc-phone-mode .prod-img{height:120px;}
+body.pc-phone-mode .detail-wrap{display:block;}
+body.pc-phone-mode .detail-img{height:300px;}
+body.pc-phone-mode .bottomnav{max-width:460px;margin:0 auto;}
+/* Floating action buttons + AI chat drawer stay anchored to the phone column. */
+body.pc-phone-mode .futuristic-floating-actions{right:max(16px,calc(50% - 214px));}
+body.pc-phone-mode .ai-chat-drawer{left:50%;right:auto;width:460px;margin-left:-230px;}
+
 /* ===== REVIEW (customer) ===== */
 .review-box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;}
 .star-pick{display:flex;gap:8px;justify-content:center;margin:8px 0 20px;}
