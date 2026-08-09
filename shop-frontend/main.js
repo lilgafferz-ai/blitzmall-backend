@@ -9,11 +9,27 @@ if (process.platform === 'win32') {
   app.setAppUserModelId("com.blitzmall.app");
 }
 
-function createWindow() {
-  const iconPath = fs.existsSync(path.join(__dirname, 'build', 'app-icon.ico'))
-    ? path.join(__dirname, 'build', 'app-icon.ico')
-    : path.join(__dirname, 'public', 'app-icon.ico');
+// ===== Path resolution =====
+// This file is BOTH the repo's entry point (package.json "main": "main.js")
+// AND the shipped desktop entry point: electron-builder auto-applies its
+// create-react-app preset, which rewrites the packaged "main" to
+// "build/electron.js" — and react-scripts copies public/electron.js into
+// build/electron.js during `npm run build`. So the SAME code must run
+// correctly from two different __dirname locations:
+//   1) repo root          -> ./build/index.html, ./preload.js
+//   2) app.asar/build/    -> ./index.html,       ../preload.js
+const runningFromBuild = fs.existsSync(path.join(__dirname, 'index.html'))
+  && !fs.existsSync(path.join(__dirname, 'build'));
+const APP_ROOT  = runningFromBuild ? path.join(__dirname, '..') : __dirname;
+const BUILD_DIR = runningFromBuild ? __dirname : path.join(__dirname, 'build');
 
+const indexHtmlPath = path.join(BUILD_DIR, 'index.html');
+const preloadPath = path.join(APP_ROOT, 'preload.js');
+const iconPath = fs.existsSync(path.join(BUILD_DIR, 'app-icon.ico'))
+  ? path.join(BUILD_DIR, 'app-icon.ico')
+  : path.join(APP_ROOT, 'public', 'app-icon.ico');
+
+function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -28,17 +44,90 @@ function createWindow() {
       contextIsolation: true,
       // Safe bridge for the in-app "Check for Updates" button (Settings →
       // App Updates) — exposes only the auto-updater, nothing else.
-      preload: path.join(__dirname, 'preload.js')
+      preload: preloadPath
     }
   });
 
   win.setMenuBarVisibility(false);
 
+  // Branded loading splash while React boots up
+  win.webContents.on('did-start-loading', () => {
+    win.webContents.insertCSS(`
+      #electron-splash {
+        position: fixed; inset: 0; z-index: 99999;
+        background: radial-gradient(circle at 50% 40%, #1a1206 0%, #0a0a0c 60%);
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        transition: opacity 0.5s ease;
+      }
+      #electron-splash .logo-glow {
+        width: 260px; height: 260px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(255,122,26,.3), transparent 70%);
+        position: absolute; filter: blur(40px);
+        animation: splashPulse 2.4s ease-in-out infinite;
+      }
+      #electron-splash img {
+        width: 120px; height: 120px; position: relative;
+        filter: drop-shadow(0 0 30px rgba(255,170,0,.5));
+        animation: splashFloat 2.8s ease-in-out infinite;
+      }
+      #electron-splash h1 {
+        margin-top: 18px; font-weight: 800; font-size: 2.2rem;
+        letter-spacing: 2px; position: relative;
+        background: linear-gradient(135deg, #ff7a1a 0%, #ffb800 50%, #ff7a1a 100%);
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+      }
+      #electron-splash h1 span { font-weight: 400; }
+      #electron-splash p {
+        color: #666; margin-top: 6px; font-size: 0.85rem;
+        letter-spacing: 1px; position: relative;
+      }
+      #electron-splash .loader {
+        margin-top: 32px; width: 44px; height: 44px;
+        border: 3px solid rgba(255,170,0,.15); border-top-color: #ffaa00;
+        border-radius: 50%; position: relative;
+        animation: splashSpin 0.8s linear infinite;
+      }
+      @keyframes splashPulse { 0%,100%{transform:scale(1);opacity:.7} 50%{transform:scale(1.15);opacity:1} }
+      @keyframes splashFloat { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-10px)} }
+      @keyframes splashSpin { to{transform:rotate(360deg)} }
+    `);
+  });
+
+  win.webContents.on('dom-ready', () => {
+    win.webContents.executeJavaScript(`
+      if (!document.getElementById('electron-splash')) {
+        const splash = document.createElement('div');
+        splash.id = 'electron-splash';
+        splash.innerHTML = \`
+          <div class="logo-glow"></div>
+          <img src="./app-icon.png" alt="BlitzMall" />
+          <h1>BLITZ<span>MALL</span></h1>
+          <p>Loading your store...</p>
+          <div class="loader"></div>
+        \`;
+        document.body.prepend(splash);
+      }
+    `);
+  });
+
+  win.webContents.on('did-finish-load', () => {
+    setTimeout(() => {
+      win.webContents.executeJavaScript(`
+        const splash = document.getElementById('electron-splash');
+        if (splash) {
+          splash.style.opacity = '0';
+          setTimeout(() => splash.remove(), 500);
+        }
+      `);
+    }, 800);
+  });
+
   win.once('ready-to-show', () => {
     win.show();
   });
 
-  win.loadFile(path.join(__dirname, 'build', 'index.html')).catch((err) => {
+  win.loadFile(indexHtmlPath).catch((err) => {
     console.error("Failed to load index.html. Make sure the React app is built first.", err);
   });
 }
