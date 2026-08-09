@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -25,7 +25,10 @@ function createWindow() {
     backgroundColor: '#0a0a0c',
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      // Safe bridge for the in-app "Check for Updates" button (Settings →
+      // App Updates) — exposes only the auto-updater, nothing else.
+      preload: path.join(__dirname, 'preload.js')
     }
   });
 
@@ -53,24 +56,25 @@ app.whenReady().then(() => {
   //  2) Log the current version + every updater event so a stuck install can
   //     be diagnosed from the log file.
   console.log('[updater] BlitzMall desktop version:', app.getVersion());
-  const CHECK_INTERVAL_MS = 30 * 60 * 1000; // re-check every 30 min
-  const checkForUpdates = () => {
-    autoUpdater
-      .checkForUpdatesAndNotify()
-      .then(() => console.log('[updater] Update check finished (next in 30 min)'))
-      .catch((err) => console.error('[updater] Update check failed:', err && err.message))
-      .finally(() => setTimeout(checkForUpdates, CHECK_INTERVAL_MS));
+  const CHECK_INTERVAL_MS = 10 * 60 * 1000; // re-check every 10 min
+
+  // Stream updater events to the renderer so the in-app "Check for Updates"
+  // button (Settings → App Updates) shows real status instead of a silent
+  // background check that gives the user no feedback.
+  const broadcastUpdaterStatus = (status) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('updater:status', { ...status, version: app.getVersion() });
+    }
   };
-  autoUpdater.on('error', (err) => console.error('[updater] Auto-updater error:', err && err.message));
-  autoUpdater.on('update-available', (info) => console.log('[updater] Update found:', info && info.version));
-  autoUpdater.on('update-not-available', () => console.log('[updater] Already up to date'));
+  autoUpdater.on('error', (err) => { console.error('[updater] Auto-updater error:', err && err.message); broadcastUpdaterStatus({ status: 'error', message: err && err.message }); });
+  autoUpdater.on('checking-for-update', () => broadcastUpdaterStatus({ status: 'checking' }));
+  autoUpdater.on('update-available', (info) => { console.log('[updater] Update found:', info && info.version); broadcastUpdaterStatus({ status: 'available', newVersion: info && info.version }); });
+  autoUpdater.on('update-not-available', () => { console.log('[updater] Already up to date'); broadcastUpdaterStatus({ status: 'up-to-date' }); });
   autoUpdater.on('download-progress', (p) => {
     if (p && (p.percent % 25 < 2)) console.log('[updater] Download progress:', Math.round(p.percent) + '%');
   });
-  // Give the window a moment to boot before hitting the update server
-  setTimeout(checkForUpdates, 10 * 1000);
-
   autoUpdater.on('update-downloaded', (info) => {
+    broadcastUpdaterStatus({ status: 'downloaded', newVersion: info && info.version });
     dialog.showMessageBox({
       type: 'info',
       title: 'Update Ready',
@@ -81,6 +85,33 @@ app.whenReady().then(() => {
         autoUpdater.quitAndInstall();
       }
     });
+  });
+
+  const checkForUpdates = () => {
+    autoUpdater
+      .checkForUpdatesAndNotify()
+      .then(() => console.log('[updater] Update check finished (next in 10 min)'))
+      .catch((err) => console.error('[updater] Update check failed:', err && err.message))
+      .finally(() => setTimeout(checkForUpdates, CHECK_INTERVAL_MS));
+  };
+  // Give the window a moment to boot before hitting the update server
+  setTimeout(checkForUpdates, 10 * 1000);
+
+  // In-app "Check for Updates" — invoked from Settings → App Updates. Runs the
+  // same updater; events flow back through broadcastUpdaterStatus().
+  let manualCheckInFlight = false;
+  ipcMain.handle('updater:check', async () => {
+    if (manualCheckInFlight) return { version: app.getVersion(), status: 'checking' };
+    manualCheckInFlight = true;
+    try {
+      await autoUpdater.checkForUpdates();
+    } catch (e) {
+      console.error('[updater] manual check failed:', e && e.message);
+      broadcastUpdaterStatus({ status: 'error', message: e && e.message });
+    } finally {
+      manualCheckInFlight = false;
+    }
+    return { version: app.getVersion() };
   });
 
   app.on('activate', () => {

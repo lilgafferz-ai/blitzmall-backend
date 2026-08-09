@@ -6,7 +6,7 @@ process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
 const { getOwnerToken } = require('./helpers');
-const { customerTier, tierFromPoints, earnPoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS } = _test || {};
+const { customerTier, tierFromPoints, earnPoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, moneyPrizeUnlocked } = _test || {};
 
 // Unique 10-digit phone per call so a prior test run's promo claim can never
 // interfere with a later run (claims persist in the test DB).
@@ -98,6 +98,20 @@ describe('Promo tables stay anti-exploit', () => {
     const outcomes = new Set(Array.from({ length: 200 }, () => pickWeighted(SCRATCH_OUTCOMES, 'Bronze', false).prize));
     expect(outcomes.has('jackpot')).toBe(false);
   });
+
+  it('money prizes unlock ONLY when the shopper spent MORE than the reward (5+ orders)', () => {
+    // The shop never gives away more than the customer has spent: a KES 50
+    // prize needs > KES 50 in total shopping (not just equal), and cash
+    // prizes are only for genuinely loyal shoppers (≥ 5 completed orders).
+    expect(moneyPrizeUnlocked({ orderCount: 5, totalSpent: 60, rewardValue: 50 })).toBe(true);  // spent more than the reward
+    expect(moneyPrizeUnlocked({ orderCount: 5, totalSpent: 5000, rewardValue: 100 })).toBe(true);
+    expect(moneyPrizeUnlocked({ orderCount: 5, totalSpent: 151, rewardValue: 150 })).toBe(true);  // free delivery is a KES 150 reward
+    expect(moneyPrizeUnlocked({ orderCount: 5, totalSpent: 50, rewardValue: 50 })).toBe(false);   // equal ≠ more
+    expect(moneyPrizeUnlocked({ orderCount: 5, totalSpent: 40, rewardValue: 50 })).toBe(false);   // spent less than the reward
+    expect(moneyPrizeUnlocked({ orderCount: 4, totalSpent: 9999, rewardValue: 50 })).toBe(false); // not enough orders
+    expect(moneyPrizeUnlocked({ orderCount: 2, totalSpent: 300, rewardValue: 50 })).toBe(false);  // 2 orders are never enough
+    expect(moneyPrizeUnlocked({ orderCount: 5, totalSpent: 9999, rewardValue: 0 })).toBe(false);  // points are not money prizes
+  });
 });
 
 describe('Promos API (spin wheel + scratch card)', () => {
@@ -155,9 +169,9 @@ describe('Promos API (spin wheel + scratch card)', () => {
 
   it('cash coupon prizes stay LOCKED for low-spend shoppers (rerolled to points/try-again)', async () => {
     const phone = freshPhone();
-    // Two small orders — total spend KES 300 is far below the smallest cash
-    // unlock threshold (KES 500 = KES 50 prize × 10), so a cash win must be
-    // rerolled to a non-cash outcome every single time.
+    // Two small orders — total spend KES 300. Cash prizes require ≥ 5 completed
+    // orders (loyal shoppers only), so a cash win must be rerolled to a
+    // non-cash outcome every single time for a 2-order shopper.
     for (let i = 0; i < 2; i++) {
       await request(app).post('/api/orders').send({
         customerId: phone, customerName: 'Low Spender', items: [{ _id: i === 0 ? PRODUCTS.item0 : PRODUCTS.item1, quantity: 1 }], paymentMethod: 'delivery'
@@ -167,9 +181,9 @@ describe('Promos API (spin wheel + scratch card)', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
     // Low spenders can NEVER win a fixed-cash coupon: the wheel rerolls any
-    // cash sector to points/try-again. Points (any amount), jackpot and free
-    // delivery are all legitimate low-spender wins — they cost the shop no
-    // cash — so the assertion is on "no cash", not on one specific roll.
+    // cash sector to points/try-again. Points (any amount) and jackpot are
+    // legitimate low-spender wins — they cost the shop no cash — so the
+    // assertion is on "no cash", not on one specific roll.
     expect(['fixed50', 'fixed100']).not.toContain(res.body.prizeName);
     expect(res.body.type || '').not.toBe('fixed');
     // A miss or points win must never fabricate a coupon code.

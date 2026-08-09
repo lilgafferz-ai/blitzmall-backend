@@ -2438,6 +2438,20 @@ const alreadyUsedPromoResponse = (claimed, cooldownHours, day) => ({
   sectorIndex: claimed.sectorIndex !== undefined ? claimed.sectorIndex : 1
 });
 
+// Money prizes (cash coupons + free delivery) are only ever granted when the
+// shopper's own shopping record is worth MORE than the reward being handed
+// out — the shop never gives away more than the customer has spent. Cash
+// coupons also need ≥ 5 completed orders (genuinely loyal shoppers); free
+// delivery is worth the standard KES 150 transport fee it saves the customer.
+const FREE_DELIVERY_REWARD_VALUE = 150;
+const promoMoneyPrizeValue = (outcome) => {
+  if (outcome && outcome.type === 'fixed') return outcome.value || 0;
+  if (outcome && outcome.type === 'free_delivery') return FREE_DELIVERY_REWARD_VALUE;
+  return 0;
+};
+const moneyPrizeUnlocked = ({ orderCount, totalSpent, rewardValue }) =>
+  rewardValue > 0 && orderCount >= 5 && totalSpent > rewardValue;
+
 async function runPromo({ phone, name, type }) {
   const phoneClean = String(phone || '').replace(/[^0-9]/g, '');
   if (!phoneClean) return { success: false, error: 'Phone required' };
@@ -2489,30 +2503,25 @@ async function runPromo({ phone, name, type }) {
   const picked = pickWeighted(list, tier, s.jackpotEnabled !== false);
   let finalPicked = { ...picked };
 
-  // Anti-abuse spending logic for cash coupon prizes (fixed-amount coupons).
-  // Cash is a reward for loyal, high-value shoppers ONLY: it can be won only
-  // after ≥ 5 completed orders AND total spending ≥ 10× the prize value (spent
-  // far more than the money offered). Everyone else is ALWAYS rerolled to a
-  // small non-cash consolation (points / try-again) — no 2% leak — and the
-  // wheel message says exactly why, so nothing feels rigged.
-  if (finalPicked.type === 'fixed') {
-    const cashValue = finalPicked.value || 0;
-    const totalSpent = completed.reduce((sum, o) => sum + (o.totalPrice || 0), 0);
-    const cashUnlocked = completed.length >= 5 && totalSpent >= (cashValue * 10);
-    if (!cashUnlocked) {
-      const safeOutcomes = list.filter(o => o.prize === 'again' || o.prize === 'lose' || (o.points && o.points <= 5));
-      const consolation = safeOutcomes.filter(o => o.points && o.points > 0);
-      const fallback = consolation.length ? consolation : safeOutcomes;
-      if (fallback.length > 0) {
-        finalPicked = { ...fallback[Math.floor(Math.random() * fallback.length)] };
-        const unlockAt = `KES ${cashValue * 10}`;
-        if (finalPicked.prize === 'again' || finalPicked.prize === 'lose') {
-          finalPicked.title = 'So Close!';
-          finalPicked.message = `Cash prizes unlock after 5+ orders and ${unlockAt} in total shopping — try again after your next order!`;
-        } else {
-          // Keep the win message, then explain why the bigger cash prize was not granted.
-          finalPicked.message = `${finalPicked.message} Cash prizes unlock after 5+ orders and ${unlockAt} in total shopping.`;
-        }
+  // Anti-abuse spending logic for money prizes (cash coupons + free delivery).
+  // A money reward is only ever granted to a shopper whose own shopping record
+  // is worth MORE than the reward (plus ≥ 5 completed orders) — the shop never
+  // gives away more than the customer has spent. Everyone else is ALWAYS
+  // rerolled to a small non-cash consolation (points / try-again) — no leak —
+  // and the message says exactly why, so nothing feels rigged.
+  const rewardValue = promoMoneyPrizeValue(finalPicked);
+  if (rewardValue > 0 && !moneyPrizeUnlocked({ orderCount: completed.length, totalSpent: completed.reduce((sum, o) => sum + (o.totalPrice || 0), 0), rewardValue })) {
+    const safeOutcomes = list.filter(o => o.prize === 'again' || o.prize === 'lose' || (o.points && o.points <= 5));
+    const consolation = safeOutcomes.filter(o => o.points && o.points > 0);
+    const fallback = consolation.length ? consolation : safeOutcomes;
+    if (fallback.length > 0) {
+      finalPicked = { ...fallback[Math.floor(Math.random() * fallback.length)] };
+      if (finalPicked.prize === 'again' || finalPicked.prize === 'lose') {
+        finalPicked.title = 'So Close!';
+        finalPicked.message = `Money prizes unlock after 5+ orders and more than KES ${rewardValue} in total shopping — try again after your next order!`;
+      } else {
+        // Keep the win message, then explain why the bigger money prize was not granted.
+        finalPicked.message = `${finalPicked.message} Money prizes unlock after 5+ orders and more than KES ${rewardValue} in total shopping.`;
       }
     }
   }
@@ -2581,10 +2590,10 @@ app.get('/api/promos/status/:phone', async (req, res) => {
     const tier = tierFromPoints(loyalty ? loyalty.points : 0);
     const spinInfo = spin ? { used: true, day, at: spin.at, nextAt: new Date(new Date(spin.at).getTime() + spinCooldownMs), prizeName: spin.prizeName, code: spin.code || '', title: spin.title || '', message: spin.message || '' } : { used: false, day };
     const scratchInfo = scratch ? { used: true, day, at: scratch.at, nextAt: new Date(new Date(scratch.at).getTime() + scratchCooldownMs), prizeName: scratch.prizeName, code: scratch.code || '', title: scratch.title || '', message: scratch.message || '' } : { used: false, day };
-    // Smallest cash-prize unlock threshold (prize × 10) so the app can tell
-    // shoppers exactly how much they must spend before cash coupons unlock.
+    // Smallest money-prize unlock threshold (the prize value itself: a prize
+    // is only handed to a shopper whose total shopping is worth more than it).
     const cashSectors = WHEEL_SECTORS.filter(o => o.type === 'fixed' && o.value);
-    const cashPrizeUnlockSpend = cashSectors.length ? Math.min(...cashSectors.map(o => o.value * 10)) : 0;
+    const cashPrizeUnlockSpend = cashSectors.length ? Math.min(...cashSectors.map(o => o.value)) : 0;
     res.json({
       phone,
       tier,
@@ -4883,4 +4892,4 @@ app.use((err, req, res, next) => {
 });
 const PORT = process.env.PORT || 5000;
 
-module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => db_, otpStore } };
+module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => db_, otpStore, moneyPrizeUnlocked } };

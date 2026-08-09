@@ -489,6 +489,11 @@ function App() {
   const [useWalletPayment, setUseWalletPayment] = useState(false);
   const [lastOrderWasDelivery, setLastOrderWasDelivery] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  // Desktop (Electron) update status surfaced by main.js through the preload
+  // bridge — lets the in-app "Check for Updates" button show real status
+  // (checking / downloading / restart / up-to-date) instead of reloading.
+  const [pcUpdateStatus, setPcUpdateStatus] = useState('');
+  const [pcAppVersion, setPcAppVersion] = useState('');
   const [deliveryArea, setDeliveryArea] = useState('mall'); // 'mall' | 'standard'
   const [deliveryLocation, setDeliveryLocation] = useState('');
   const [gpsCoords, setGpsCoords] = useState(null);
@@ -1130,6 +1135,37 @@ function App() {
     });
   }, []);
 
+  // Desktop app: main.js streams live updater events here so the in-app
+  // "Check for Updates" button can show exactly what the native auto-updater
+  // is doing. (Must live before the `if (isAdmin)` early return — hooks can't
+  // be conditional.)
+  useEffect(() => {
+    const bridge = typeof window !== 'undefined' ? window.blitzUpdater : null;
+    if (!bridge || typeof bridge.onStatus !== 'function') return;
+    const off = bridge.onStatus((s) => {
+      if (!s) return;
+      if (s.version) setPcAppVersion(s.version);
+      setCheckingUpdate(false);
+      if (s.status === 'checking') {
+        setPcUpdateStatus('Checking for updates…');
+      } else if (s.status === 'available') {
+        setPcUpdateStatus(`Update v${s.newVersion} found — downloading…`);
+        showToast('⬇️ Update found — downloading in the background');
+      } else if (s.status === 'downloaded') {
+        setPcUpdateStatus('Update downloaded — restart to apply');
+        showToast('✅ Update downloaded! Restart the app when prompted.');
+      } else if (s.status === 'up-to-date') {
+        setPcUpdateStatus('You are up to date');
+        showToast('✅ PC app is up to date!');
+      } else if (s.status === 'error') {
+        setPcUpdateStatus('Update check failed — try again later');
+        showToast('⚠️ Update check failed — please try again later');
+      }
+    });
+    return () => { if (off && typeof off === 'function') off(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   if (isAdmin) {
     return (
       <div className="app-container">
@@ -1287,6 +1323,26 @@ function App() {
 
   const handleManualUpdateCheck = async () => {
     if (checkingUpdate) return;
+    // Desktop app (Electron): hand it to the native auto-updater — it checks,
+    // downloads and prompts to restart, streaming status back here.
+    const bridge = typeof window !== 'undefined' ? window.blitzUpdater : null;
+    if (bridge && typeof bridge.checkForUpdates === 'function') {
+      setCheckingUpdate(true);
+      setPcUpdateStatus('Checking for updates…');
+      showToast('Checking for updates...');
+      try {
+        await bridge.checkForUpdates();
+      } catch (e) {
+        console.error(e);
+        setPcUpdateStatus('Update check failed — try again later');
+        setCheckingUpdate(false);
+        showToast('⚠️ Update check failed');
+      }
+      // Safety net: if no status event arrives (e.g. a check was already in
+      // flight), never leave the button stuck on "Checking…" — reset it.
+      setTimeout(() => setCheckingUpdate(false), 45000);
+      return;
+    }
     setCheckingUpdate(true);
     showToast('Checking for updates...');
     try {
@@ -2048,7 +2104,7 @@ function App() {
 
               {promoStatus?.cashPrizeUnlockSpend > 0 && !promoStatus?.promosLocked && !promoStatus?.spin?.used && (
                 <p className="modal-subtitle" style={{ fontSize: '.72rem', color: 'var(--gold)', marginTop: 6 }}>
-                  💰 Cash prizes unlock after {promoStatus.cashPrizeUnlockOrders || 5}+ orders and KES {promoStatus.cashPrizeUnlockSpend} in total shopping
+                  💰 Money prizes unlock after {promoStatus.cashPrizeUnlockOrders || 5}+ orders and more than KES {promoStatus.cashPrizeUnlockSpend} in total shopping
                 </p>
               )}
 
@@ -2799,7 +2855,9 @@ function App() {
         <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <b style={{ fontSize: '.88rem', color: '#fff' }}>🔄 Check for Updates</b>
-            <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>Sync changes & download new features</div>
+            <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>
+              {pcAppVersion ? `Desktop v${pcAppVersion}` : 'Sync changes & download new features'}{pcUpdateStatus ? ` · ${pcUpdateStatus}` : ''}
+            </div>
           </div>
           <button 
             className="btn-neon" 
