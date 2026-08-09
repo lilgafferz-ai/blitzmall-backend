@@ -8,6 +8,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('blitzUpdater', {
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  // Guaranteed fallback: reads the raw latest.yml (no GitHub API / no rate
+  // limits) and returns { currentVersion, version, downloadUrl }.
+  latest: () => ipcRenderer.invoke('updater:latest'),
+  // Opens the newest installer in the default browser — always works even if
+  // the in-app auto-updater is being throttled or blocked.
+  openDownload: (url) => ipcRenderer.invoke('updater:openDownload', url),
   onStatus: (callback) => {
     const listener = (_event, status) => {
       try { callback(status); } catch (e) { /* renderer handler error — ignore */ }

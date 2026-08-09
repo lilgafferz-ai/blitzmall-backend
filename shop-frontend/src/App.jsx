@@ -494,6 +494,10 @@ function App() {
   // (checking / downloading / restart / up-to-date) instead of reloading.
   const [pcUpdateStatus, setPcUpdateStatus] = useState('');
   const [pcAppVersion, setPcAppVersion] = useState('');
+  // Guaranteed-fallback update info from the raw latest.yml (never depends on
+  // the GitHub API or electron-updater): { version, downloadUrl } when a
+  // newer desktop build exists, null otherwise.
+  const [pcLatest, setPcLatest] = useState(null);
   const [deliveryArea, setDeliveryArea] = useState('mall'); // 'mall' | 'standard'
   const [deliveryLocation, setDeliveryLocation] = useState('');
   const [gpsCoords, setGpsCoords] = useState(null);
@@ -1149,9 +1153,13 @@ function App() {
       if (s.status === 'checking') {
         setPcUpdateStatus('Checking for updates…');
       } else if (s.status === 'available') {
+        // Native auto-update is progressing — drop the manual-download fallback
+        // so the two paths don't fight for attention.
+        setPcLatest(null);
         setPcUpdateStatus(`Update v${s.newVersion} found — downloading…`);
         showToast('⬇️ Update found — downloading in the background');
       } else if (s.status === 'downloaded') {
+        setPcLatest(null);
         setPcUpdateStatus('Update downloaded — restart to apply');
         showToast('✅ Update downloaded! Restart the app when prompted.');
       } else if (s.status === 'up-to-date') {
@@ -1321,10 +1329,19 @@ function App() {
     setScreen('login');
   };
 
+  // Compare dotted versions like "0.1.41" — returns true when a > b.
+  const isNewerVersion = (a, b) => {
+    const pa = String(a || '').split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(b || '').split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0, y = pb[i] || 0;
+      if (x !== y) return x > y;
+    }
+    return false;
+  };
+
   const handleManualUpdateCheck = async () => {
     if (checkingUpdate) return;
-    // Desktop app (Electron): hand it to the native auto-updater — it checks,
-    // downloads and prompts to restart, streaming status back here.
     const bridge = typeof window !== 'undefined' ? window.blitzUpdater : null;
     if (bridge && typeof bridge.checkForUpdates === 'function') {
       setCheckingUpdate(true);
@@ -1341,6 +1358,25 @@ function App() {
       // Safety net: if no status event arrives (e.g. a check was already in
       // flight), never leave the button stuck on "Checking…" — reset it.
       setTimeout(() => setCheckingUpdate(false), 45000);
+
+      // Guaranteed fallback: read the raw latest.yml so the "Download new
+      // version" button appears whenever GitHub has a newer build — even if
+      // electron-updater's API check is throttled or silently failing.
+      try {
+        if (typeof bridge.latest === 'function') {
+          const info = await bridge.latest();
+          if (info && info.version && info.downloadUrl) {
+            const cur = info.currentVersion || pcAppVersion;
+            if (isNewerVersion(info.version, cur)) {
+              setPcLatest({ version: info.version, downloadUrl: info.downloadUrl });
+              setPcUpdateStatus(`New version v${info.version} available — tap Download`);
+              showToast(`⬇️ New version v${info.version} is available!`);
+            } else if (info.error) {
+              console.warn('updater:latest error:', info.error);
+            }
+          }
+        }
+      } catch (e) { console.warn('Failed to fetch latest release info:', e); }
       return;
     }
     setCheckingUpdate(true);
@@ -2857,29 +2893,57 @@ function App() {
           </button>
         </div>
 
-        <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <b style={{ fontSize: '.88rem', color: '#fff' }}>🔄 Check for Updates</b>
-            <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>
-              {pcAppVersion ? `Desktop v${pcAppVersion}` : 'Sync changes & download new features'}{pcUpdateStatus ? ` · ${pcUpdateStatus}` : ''}
+        <div style={{ background: 'var(--card)', border: pcLatest ? '1px solid rgba(255,122,26,.55)' : '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+            <div>
+              <b style={{ fontSize: '.88rem', color: '#fff' }}>🔄 Check for Updates</b>
+              <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>
+                {pcAppVersion ? `Desktop v${pcAppVersion}` : 'Sync changes & download new features'}{pcUpdateStatus ? ` · ${pcUpdateStatus}` : ''}
+              </div>
             </div>
+            <button 
+              className="btn-neon" 
+              onClick={handleManualUpdateCheck}
+              disabled={checkingUpdate}
+              style={{
+                padding: '6px 12px', 
+                fontSize: '.75rem',
+                background: checkingUpdate ? 'var(--line)' : 'var(--grad)',
+                color: checkingUpdate ? 'var(--text)' : '#000',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                flexShrink: 0
+              }}
+            >
+              {checkingUpdate ? 'Checking...' : 'Check'}
+            </button>
           </div>
-          <button 
-            className="btn-neon" 
-            onClick={handleManualUpdateCheck}
-            disabled={checkingUpdate}
-            style={{
-              padding: '6px 12px', 
-              fontSize: '.75rem',
-              background: checkingUpdate ? 'var(--line)' : 'var(--grad)',
-              color: checkingUpdate ? 'var(--text)' : '#000',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: 'pointer'
-            }}
-          >
-            {checkingUpdate ? 'Checking...' : 'Check'}
-          </button>
+          {pcLatest && (
+            <button
+              onClick={async () => {
+                try {
+                  const bridge = typeof window !== 'undefined' ? window.blitzUpdater : null;
+                  if (bridge && typeof bridge.openDownload === 'function') {
+                    await bridge.openDownload(pcLatest.downloadUrl);
+                  } else {
+                    window.open(pcLatest.downloadUrl, '_blank');
+                  }
+                  showToast(`⬇️ Downloading v${pcLatest.version} — run the installer to update`);
+                } catch (e) {
+                  console.error(e);
+                  showToast('Could not open the download — check your browser');
+                }
+              }}
+              style={{
+                marginTop: 10, width: '100%', padding: '10px 12px',
+                background: 'var(--grad)', color: '#000', border: 'none', borderRadius: 10,
+                fontWeight: 700, fontSize: '.82rem', cursor: 'pointer', boxShadow: '0 4px 14px rgba(255,122,26,.35)'
+              }}
+            >
+              ⬇️ Download New Version v{pcLatest.version}
+            </button>
+          )}
         </div>
 
         <h3 className="section-h">Account</h3>

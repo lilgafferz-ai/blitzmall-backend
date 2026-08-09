@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -87,11 +87,46 @@ app.whenReady().then(() => {
     });
   });
 
+  // Belt-and-suspenders update source: read the raw `latest.yml` asset from
+  // the GitHub release (a plain file download — NO api.github.com rate limits
+  // and no JSON API at all), so we ALWAYS know the newest published version
+  // even if the electron-updater API check is being throttled or fails.
+  const GITHUB_REPO = 'lilgafferz-ai/blitzmall-backend';
+  const LATEST_YML_URL = `https://github.com/${GITHUB_REPO}/releases/latest/download/latest.yml`;
+  const fetchLatestReleaseInfo = async () => {
+    try {
+      // Hard 10s timeout so a stalled network can never hang the IPC call.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 10000);
+      try {
+        const r = await fetch(LATEST_YML_URL, { redirect: 'follow', headers: { Accept: 'text/plain' }, signal: ctrl.signal });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const txt = await r.text();
+        const ver = (txt.match(/^version:\s*(\S+)/m) || [])[1];
+        const file = (txt.match(/^path:\s*(\S+)/m) || [])[1];
+        if (!ver || !file) throw new Error('unparseable latest.yml');
+        return {
+          version: ver,
+          fileName: file,
+          downloadUrl: `https://github.com/${GITHUB_REPO}/releases/latest/download/${encodeURIComponent(file)}`
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (e) {
+      return { error: (e && e.message) || 'failed' };
+    }
+  };
+
   const checkForUpdates = () => {
     autoUpdater
       .checkForUpdatesAndNotify()
       .then(() => console.log('[updater] Update check finished (next in 10 min)'))
-      .catch((err) => console.error('[updater] Update check failed:', err && err.message))
+      .catch((err) => {
+        console.error('[updater] Update check failed:', err && err.message);
+        // Surface the failure in the UI too — never fail silently.
+        broadcastUpdaterStatus({ status: 'error', message: (err && err.message) || 'update check failed' });
+      })
       .finally(() => setTimeout(checkForUpdates, CHECK_INTERVAL_MS));
   };
   // Give the window a moment to boot before hitting the update server
@@ -112,6 +147,25 @@ app.whenReady().then(() => {
       manualCheckInFlight = false;
     }
     return { version: app.getVersion() };
+  });
+
+  // Raw latest.yml lookup — guaranteed path that never depends on the GitHub
+  // API or electron-updater: returns the newest published version + a direct
+  // installer download URL for the "Download new version" fallback button.
+  ipcMain.handle('updater:latest', async () => {
+    const info = await fetchLatestReleaseInfo();
+    return { currentVersion: app.getVersion(), ...info };
+  });
+
+  // Open the newest installer in the default browser (guaranteed download).
+  // Defense-in-depth: only ever open our own GitHub release URLs.
+  ipcMain.handle('updater:openDownload', async (_evt, url) => {
+    const githubHost = `https://github.com/${GITHUB_REPO}`;
+    const target = typeof url === 'string' && url.startsWith(githubHost)
+      ? url
+      : `${githubHost}/releases/latest`;
+    await shell.openExternal(target);
+    return { ok: true };
   });
 
   app.on('activate', () => {
