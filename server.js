@@ -4610,7 +4610,13 @@ app.get('/*path', (req, res, next) => {
 // Data cleanup tool: lets the owner wipe records by type (sales, expenses, …)
 // or everything at once. User accounts (login) and branches are deliberately
 // excluded so nobody can lock themselves out of the app.
-const RECORD_COLLS = {
+//
+// IMPORTANT: this must be a FUNCTION, not a plain object literal. The
+// collection variables (sales_, orders_, …) are only assigned when connectDb()
+// runs — which happens AFTER this module is loaded. A literal here would
+// capture `undefined` for every collection, so every count came back 0 and
+// every delete silently no-op'd.
+const getRecordColls = () => ({
   sales: sales_,
   orders: orders_,
   expenses: expenses_,
@@ -4627,13 +4633,13 @@ const RECORD_COLLS = {
   stock_transfers: stock_transfers_,
   shifts: shifts_,
   audit_logs: audit_logs_,
-};
+});
 
 app.get('/api/admin/records/counts', authenticate, authorize('owner'), async (req, res) => {
   try {
     const counts = {};
-    for (const key of Object.keys(RECORD_COLLS)) {
-      try { counts[key] = await RECORD_COLLS[key].countDocuments({}); } catch (e) { counts[key] = 0; }
+    for (const [key, coll] of Object.entries(getRecordColls())) {
+      try { counts[key] = await coll.countDocuments({}); } catch (e) { counts[key] = 0; }
     }
     res.json({ success: true, counts });
   } catch (e) {
@@ -4649,7 +4655,7 @@ app.delete('/api/admin/records', authenticate, authorize('owner'), async (req, r
     let deleted = 0;
     const done = [];
     for (const t of types) {
-      const coll = RECORD_COLLS[t];
+      const coll = getRecordColls()[t];
       if (!coll) continue;
       try {
         const r = await coll.deleteMany({});
