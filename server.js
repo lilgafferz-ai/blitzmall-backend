@@ -561,6 +561,12 @@ async function connectDb() {
       warm();
       setInterval(warm, 50 * 60 * 1000);
     }
+
+    // Background stock/expiry alert sweep — catches whatever the order/sale/
+    // product hooks miss (manual edits, bulk imports) every 30 minutes, with a
+    // first pass a minute after boot so existing problem items alert promptly.
+    setTimeout(() => scheduleAlertSweep(), 60 * 1000);
+    setInterval(scheduleAlertSweep, ALERT_SWEEP_MS);
   });
   }
 }
@@ -693,6 +699,8 @@ async function createCustomerAccount(name, phoneClean, referralCodeRaw) {
           { phone: refCode },
           { $push: { referrals: phoneClean }, $inc: { referralCount: 1 } }
         );
+        // Tell the referrer their bonus landed.
+        sendPushToPhone(refCode, '🎁 Referral bonus!', `You earned ${REFERRER_BONUS_POINTS} bonus points for referring a friend!`);
       }
     } catch (e) { console.error('Referral award failed:', e); }
   }
@@ -700,6 +708,7 @@ async function createCustomerAccount(name, phoneClean, referralCodeRaw) {
   if (newCust.referredBy) {
     await addLoyaltyPoints(phoneClean, REFEREE_BONUS_POINTS);
     referralBonus = REFEREE_BONUS_POINTS;
+    sendPushToPhone(phoneClean, '🎉 Welcome bonus!', `You got ${REFEREE_BONUS_POINTS} bonus points from your referral code!`);
   }
   return { existing: false, referralBonus };
 }
@@ -906,6 +915,9 @@ app.post('/api/orders', orderLimiter, async (req, res) => {
     };
     const result = await orders_.insertOne(order);
     for (const it of cleanItems) { const id = it._id || it.id; if (id && ObjectId.isValid(id)) await products_.updateOne({ _id: new ObjectId(id) }, { $inc: { stock: -Math.abs(it.quantity) } }); }
+    // Alert staff the moment a product drops out of stock / runs low / is
+    // expiring soon (throttled + fire-and-forget — never blocks the order response).
+    scheduleAlertSweep();
 
     // Keep the customer's shopping record (keyed by phone) up to date.
     try {
@@ -1401,6 +1413,7 @@ app.post('/api/admin/products', authenticate, requirePermission('inventory'), as
     };
     const result = await products_.insertOne(product);
     productCache.del('all_products');
+    scheduleAlertSweep(); // a product added with 0 / low stock should alert immediately
     res.json({ success: true, productId: result.insertedId, message: 'Product added!' });
   } catch (e) { console.error('Failed to add product:', e); res.status(500).json({ error: 'Failed to add product' }); }
 });
@@ -1420,6 +1433,7 @@ app.put('/api/admin/products/:productId', authenticate, requirePermission('inven
     const r = await products_.updateOne({ _id: new ObjectId(req.params.productId) }, { $set: u });
     if (!r.matchedCount) return res.status(404).json({ error: 'Product not found' });
     productCache.del('all_products');
+    scheduleAlertSweep(); // stock/expiry may have changed — re-check alerts immediately
     res.json({ success: true, message: 'Product updated!' });
   } catch (e) { console.error('Failed to update product:', e); res.status(500).json({ error: 'Failed to update product' }); }
 });
@@ -1605,6 +1619,7 @@ app.post('/api/admin/sales', authenticate, async (req, res) => {
     };
     const result = await sales_.insertOne(sale);
     for (const it of items) if (it.productId && ObjectId.isValid(it.productId)) await products_.updateOne({ _id: new ObjectId(it.productId) }, { $inc: { stock: -Math.abs(it.qty) } });
+    scheduleAlertSweep(); // stock just changed — check for out-of-stock / low / expiry alerts
     console.log('🧾 SALE: KES', total, '| by', sale.staff);
     if (sale.customerPhone) earnPoints(sale.customerPhone, total);
     res.json({ success: true, saleId: result.insertedId, change: sale.change, total });
@@ -2062,6 +2077,9 @@ app.post('/api/loyalty/convert-to-wallet', walletLimiter, async (req, res) => {
       type: 'wallet_conversion',
       redeemedAt: new Date()
     });
+
+    // Tell the customer their wallet cash just landed (feed + OS push).
+    sendPushToPhone(phoneClean, '💰 Wallet topped up', `KES ${cashAmount} was added to your wallet — use it on your next order!`);
 
     res.json({
       success: true,
@@ -2551,6 +2569,14 @@ async function runPromo({ phone, name, type }) {
     });
   } catch (e) { console.error('Failed to record promo claim:', e); }
 
+  // Pop the win straight to the customer's device (order confirmations and
+  // promo wins are the moments shoppers care about most).
+  if (finalPicked.prize !== 'again' && finalPicked.prize !== 'lose') {
+    const winTitle = title || 'You won!';
+    const winBody = [message, code ? `Use code: ${code}` : '', pointsAdded ? `+${pointsAdded} loyalty ${pointsAdded === 1 ? 'point' : 'points'} added!` : ''].filter(Boolean).join(' ');
+    sendPushToPhone(phoneClean, '🎉 ' + winTitle, winBody || 'Check the promo screen for your prize.');
+  }
+
   return {
     success: true, alreadyUsed: false, day, tier,
     prizeName: finalPicked.prize, title, message,
@@ -2855,6 +2881,7 @@ app.post('/api/mpesa/stk-push', async (req, res) => {
               await orders_.updateOne({ _id: new ObjectId(orderId) }, { $set: { paymentStatus: 'paid', paymentMethod: 'mpesa' } });
             }
             await finalizePosSale(mockCheckoutId);
+            await notifyPaymentConfirmed({ checkoutRequestId: mockCheckoutId, phone: formattedPhone, amount: mockAmount, orderId: orderId || null });
             console.log('✅ Mock M-Pesa payment confirmed:', mockCheckoutId);
           }
         } catch (e) {
@@ -2931,6 +2958,8 @@ app.post('/api/admin/banners', authenticate, authorize('owner', 'manager'), asyn
       createdAt: new Date()
     };
     const r = await banners_.insertOne(banner);
+    // "Offers arrival" — every customer device hears about a new live offer.
+    sendPushToAll('🚀 New offer!', `${banner.title}${banner.text ? ' — ' + banner.text : ''}`);
     res.json({ success: true, bannerId: r.insertedId });
   } catch (err) {
     res.status(500).json({ error: 'Failed to create banner' });
@@ -2953,6 +2982,13 @@ app.put('/api/admin/banners/:id', authenticate, authorize('owner', 'manager'), a
 
     const r = await banners_.updateOne({ _id: new ObjectId(id) }, { $set: u });
     if (!r.matchedCount) return res.status(404).json({ error: 'Banner not found' });
+    // Re-activating a banner announces the offer to every customer device.
+    // Creation already announces, and re-announcing on every edit (even a typo
+    // fix) would spam customers.
+    if (active === true) {
+      const banner = await banners_.findOne({ _id: new ObjectId(id) });
+      if (banner && banner.active) sendPushToAll('🚀 New offer!', `${banner.title}${banner.text ? ' — ' + banner.text : ''}`);
+    }
     res.json({ success: true, message: 'Banner updated successfully!' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update banner' });
@@ -2993,6 +3029,14 @@ app.post('/api/admin/products/:productId/flash-sale', authenticate, async (req, 
     const r = await products_.updateOne({ _id: new ObjectId(productId) }, { $set: u });
     if (!r.matchedCount) return res.status(404).json({ error: 'Product not found' });
     productCache.del('all_products');
+    // Turning a flash sale ON announces it to every customer device.
+    if (flashSale) {
+      const product = await products_.findOne({ _id: new ObjectId(productId) });
+      if (product) {
+        const disc = Math.round((parseFloat(flashSaleDiscount) || 0) * 100) / 100;
+        sendPushToAll('🔥 Flash sale!', `${product.name} — ${disc}% off for ${parseFloat(durationHours) || 24}h. Hurry!`);
+      }
+    }
     res.json({ success: true, message: 'Flash sale updated!' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update flash sale settings' });
@@ -3044,6 +3088,7 @@ async function finalizePosSale(checkoutRequestId) {
         await products_.updateOne({ _id: new ObjectId(it.productId) }, { $inc: { stock: -Math.abs(it.qty) } });
       }
     }
+    scheduleAlertSweep(); // stock just changed — check for out-of-stock / low / expiry alerts
     await db_.collection('mpesa_requests').updateOne({ checkoutRequestId }, { $set: { saleId: result.insertedId } });
     if (sale.customerPhone) earnPoints(sale.customerPhone, total);
     console.log('🧾 POS SALE auto-recorded from M-Pesa:', checkoutRequestId, '| KES', total, '| by', sale.staff);
@@ -3073,7 +3118,7 @@ app.post('/api/mpesa/callback', async (req, res) => {
         if (status === 'confirmed' && req_.orderId && ObjectId.isValid(req_.orderId)) {
           await orders_.updateOne({ _id: new ObjectId(req_.orderId) }, { $set: { paymentStatus: 'paid', paymentMethod: 'mpesa' } });
         }
-        if (status === 'confirmed') { await finalizePosSale(checkoutRequestId); }
+        if (status === 'confirmed') { await finalizePosSale(checkoutRequestId); await notifyPaymentConfirmed(req_); }
         console.log(status === 'confirmed' ? '✅ Payment confirmed' : '❌ Payment failed/cancelled');
       }
     }
@@ -3125,7 +3170,7 @@ app.get('/api/mpesa/status/:checkoutRequestId', async (req, res) => {
           if (status === 'confirmed' && req_.orderId && ObjectId.isValid(req_.orderId)) {
             await orders_.updateOne({ _id: new ObjectId(req_.orderId) }, { $set: { paymentStatus: 'paid', paymentMethod: 'mpesa' } });
           }
-          if (status === 'confirmed') { await finalizePosSale(req.params.checkoutRequestId); }
+          if (status === 'confirmed') { await finalizePosSale(req.params.checkoutRequestId); await notifyPaymentConfirmed(req_); }
           console.log(status === 'confirmed' ? '✅ Payment confirmed via query' : `❌ Payment failed: ${resultDesc}`);
           return res.json({ status, resultDesc });
         }
@@ -3134,6 +3179,10 @@ app.get('/api/mpesa/status/:checkoutRequestId', async (req, res) => {
       }
     }
     
+    // Belt-and-braces: if the stored status is already confirmed (a prior
+    // confirm point set it), make sure the payment notification fired — the
+    // atomic claim inside makes this a no-op if it already did.
+    if (req_.status === 'confirmed') await notifyPaymentConfirmed(req_);
     res.json({ status: req_.status, resultDesc: req_.resultDesc || '' });
   } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); }
 });
@@ -3632,6 +3681,9 @@ app.post('/api/loyalty/redeem-reward', async (req, res) => {
       couponCode: code || null,
       createdAt: new Date()
     });
+
+    // Confirm the redemption with a pop-up (feed + OS push).
+    sendPushToPhone(phoneClean, '🎟️ Reward redeemed', `${reward.name} — ${code ? 'your code: ' + code : 'it has been added to your account.'}`);
 
     res.json({ success: true, pointsCost: reward.pointsCost, couponCode: code, message: `Successfully redeemed ${reward.name}!` });
   } catch (err) {
@@ -4823,9 +4875,130 @@ async function sendPushToStaff(title, body, data = {}) {
   } catch (e) { console.error('sendPushToStaff failed:', e.message); return { sent: 0 }; }
 }
 
+// Push to ONE staff member's devices only (the "Send test" button in the
+// Admin Notify tab). Deliberately writes NO feed event, so a single-device
+// test doesn't toast on every shop PC.
+async function sendPushToStaffUser(staffUsername, title, body, data = {}) {
+  if (!staffUsername || !fcmConfigured()) return { sent: 0, skipped: 1 };
+  try {
+    const tokens = await notification_tokens_.find({ role: 'staff', staffUser: String(staffUsername).toLowerCase().trim() }).toArray();
+    const uniq = [...new Set(tokens.map(t => t.token).filter(Boolean))];
+    if (!uniq.length) return { sent: 0 };
+    return await sendToTokens(uniq, title, body, data);
+  } catch (e) { console.error('sendPushToStaffUser failed:', e.message); return { sent: 0 }; }
+}
+
+// ===== STAFF STOCK / EXPIRY ALERTS =====
+// The shop owner asked for push notifications when something goes out of
+// stock, runs low, or is about to expire. One push per alert TYPE per sweep
+// (listing the products involved) keeps it readable; marker fields on each
+// product (alertedOutAt / alertedLowAt / alertedExpiryAt / alertedExpiredAt)
+// mean an item alerts once per state CHANGE, not every sweep — restocking or
+// re-dating clears the marker so it can alert again next time it crosses.
+// Note: LOW_STOCK_THRESHOLD (5) is deliberately more proactive than the <2
+// threshold the in-dashboard alerts list uses — a push should warn staff well
+// before the item actually runs out.
+const LOW_STOCK_THRESHOLD = 5; // alert staff when stock falls below this
+const EXPIRY_ALERT_DAYS = 7;   // alert staff when a product expires within this window
+const ALERT_SWEEP_MS = 30 * 60 * 1000; // background re-check every 30 min
+// In-process throttle: hook-triggered sweeps (orders/sales/product edits) run
+// at most once every 30s. Keeps a burst of sales at the till from costing a
+// full catalogue scan each, and stops overlapping sweeps double-pushing the
+// same alert (the interval remains the authoritative catch-all).
+const ALERT_SWEEP_MIN_INTERVAL_MS = 30 * 1000;
+let lastAlertSweepAt = 0;
+const scheduleAlertSweep = () => {
+  const now = Date.now();
+  if (now - lastAlertSweepAt < ALERT_SWEEP_MIN_INTERVAL_MS) return;
+  lastAlertSweepAt = now;
+  notifyStaffAlerts();
+};
+
+const summarizeAlertProducts = (products) => {
+  const names = products.slice(0, 5).map(p => String(p.name || 'Product').trim()).filter(Boolean);
+  const extra = products.length - names.length;
+  return extra > 0 ? `${names.join(', ')} (+${extra} more)` : names.join(', ');
+};
+
+// Scan the catalogue and alert staff (real OS push + PC feed) about products
+// that are out of stock, running low, or expiring soon. Runs on a timer and
+// after every stock change (orders, sales, product edits), so the shop PC and
+// staff phones hear about it within seconds — no manual polling.
+async function notifyStaffAlerts() {
+  try {
+    if (!products_) return;
+    const products = await products_.find().toArray();
+    const now = Date.now();
+    const expiryCutoff = new Date(now + EXPIRY_ALERT_DAYS * 24 * 3600 * 1000);
+    const out = [], low = [], expired = [], expiring = [];
+
+    for (const p of products) {
+      const stock = parseInt(p.stock, 10);
+      const isOut = !isNaN(stock) && stock <= 0;
+      const isLow = !isNaN(stock) && stock > 0 && stock < LOW_STOCK_THRESHOLD;
+      const exp = p.expiryDate ? new Date(p.expiryDate) : null;
+      const isExpired = !!exp && !isNaN(exp.getTime()) && exp.getTime() < now;
+      const isExpiring = !!exp && !isNaN(exp.getTime()) && !isExpired && exp.getTime() <= expiryCutoff.getTime();
+      const id = p._id;
+
+      if (isOut && !p.alertedOutAt) { out.push(p); await products_.updateOne({ _id: id }, { $set: { alertedOutAt: new Date() } }); }
+      else if (!isOut && p.alertedOutAt) await products_.updateOne({ _id: id }, { $set: { alertedOutAt: null } });
+
+      if (isLow && !p.alertedLowAt) { low.push(p); await products_.updateOne({ _id: id }, { $set: { alertedLowAt: new Date() } }); }
+      else if (!isLow && p.alertedLowAt) await products_.updateOne({ _id: id }, { $set: { alertedLowAt: null } });
+
+      if (isExpired && !p.alertedExpiredAt) { expired.push(p); await products_.updateOne({ _id: id }, { $set: { alertedExpiredAt: new Date() } }); }
+      else if (!isExpired && p.alertedExpiredAt) await products_.updateOne({ _id: id }, { $set: { alertedExpiredAt: null } });
+
+      if (isExpiring && !p.alertedExpiryAt) { expiring.push(p); await products_.updateOne({ _id: id }, { $set: { alertedExpiryAt: new Date() } }); }
+      else if (!isExpiring && p.alertedExpiryAt) await products_.updateOne({ _id: id }, { $set: { alertedExpiryAt: null } });
+    }
+
+    if (out.length) sendPushToStaff('🚨 Out of stock', `${summarizeAlertProducts(out)} ${out.length === 1 ? 'is' : 'are'} out of stock`);
+    if (low.length) sendPushToStaff('⚠️ Low stock', `${summarizeAlertProducts(low)} ${low.length === 1 ? 'has' : 'have'} less than ${LOW_STOCK_THRESHOLD} left in stock`);
+    if (expired.length) sendPushToStaff('❌ Product expired', `${summarizeAlertProducts(expired)} ${expired.length === 1 ? 'has' : 'have'} expired`);
+    if (expiring.length) sendPushToStaff('⏰ Expiring soon', `${summarizeAlertProducts(expiring)} expire${expiring.length === 1 ? 's' : ''} within ${EXPIRY_ALERT_DAYS} days`);
+  } catch (e) { console.error('notifyStaffAlerts failed:', e.message); }
+}
+
+// One-time customer + staff notification when an M-Pesa payment is confirmed.
+// Atomically claimed per checkout id so the callback, the status-query and the
+// mock path can all call it without ever double-pushing the same payment.
+async function notifyPaymentConfirmed(reqDoc) {
+  try {
+    if (!reqDoc || !db_) return;
+    const claimed = await db_.collection('mpesa_requests').findOneAndUpdate(
+      { checkoutRequestId: reqDoc.checkoutRequestId, notifSent: { $ne: true } },
+      { $set: { notifSent: true, notifSentAt: new Date() } }
+    );
+    const doc = claimed && claimed.value !== undefined ? claimed.value : claimed;
+    if (!doc) return; // someone else already notified this payment
+    const amount = Math.round((doc.amount || 0) * 100) / 100;
+    // Staff alert — PII-free, so the unauthenticated PC feed stays safe.
+    sendPushToStaff('💵 Payment received', `M-Pesa payment of KES ${amount} confirmed`);
+    // Customer alert — keyed off the order's customerId (the same format their
+    // device token was registered under), then the POS sale draft, then the
+    // M-Pesa number converted back to the local 07... format.
+    let customerPhone = null;
+    if (doc.orderId && ObjectId.isValid(doc.orderId)) {
+      const order = await orders_.findOne({ _id: new ObjectId(doc.orderId) });
+      customerPhone = order ? order.customerId : null;
+    }
+    if (!customerPhone && doc.saleDraft && doc.saleDraft.customerPhone) {
+      customerPhone = String(doc.saleDraft.customerPhone).replace(/[^0-9]/g, '');
+    }
+    if (!customerPhone && doc.phone) {
+      const p = String(doc.phone);
+      customerPhone = p.startsWith('254') ? '0' + p.slice(3) : p;
+    }
+    if (customerPhone) sendPushToPhone(customerPhone, '✅ Payment received', `Your M-Pesa payment of KES ${amount} was received. Thank you!`);
+  } catch (e) { console.error('notifyPaymentConfirmed failed:', e.message); }
+}
+
 const notifRegisterLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 10, // 10 token registrations per minute per IP — stops token stuffing
+  // Lifted under Jest (whole suite shares one IP — see IS_TEST note near the top).
+  max: IS_TEST ? 1000 : 10, // 10 token registrations per minute per IP — stops token stuffing
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -4883,6 +5056,34 @@ app.post('/api/notifications/unregister', notifRegisterLimiter, async (req, res)
   }
 });
 
+// Send a test push to THIS device/account — the in-app "Send test
+// notification" buttons call this so the owner can verify push works on any
+// phone, PC or browser instantly. Customer tests also write a feed event
+// (audience customer) so the desktop app's feed poller confirms it too.
+app.post('/api/notifications/test', notifRegisterLimiter, async (req, res) => {
+  const { phone, role, staffUsername } = req.body;
+  try {
+    if (role === 'staff') {
+      if (!staffUsername) return res.status(400).json({ error: 'Staff username required' });
+      const staff = await users_.findOne({ username: String(staffUsername).toLowerCase().trim() });
+      if (!staff) return res.status(403).json({ error: 'Unknown staff account' });
+      const result = await sendPushToStaffUser(staffUsername, '🔔 Test notification', 'Push notifications are working on this device!');
+      return res.json({ success: true, ...result, message: 'Test push sent to this staff device.' });
+    }
+    if (!phone) return res.status(400).json({ error: 'Phone required' });
+    const phoneClean = String(phone).replace(/[^0-9]/g, '');
+    const cust = await customers_.findOne({ phone: phoneClean });
+    if (!cust && !(await orders_.findOne({ customerId: phoneClean }))) {
+      return res.status(403).json({ error: 'Unknown customer — sign in first' });
+    }
+    await sendPushToPhone(phoneClean, '🔔 Test notification', 'Push notifications are working on this device!');
+    res.json({ success: true, inApp: true, message: 'Test push sent — check this device.' });
+  } catch (e) {
+    console.error('notifications/test error:', e);
+    res.status(500).json({ error: 'Failed to send test push' });
+  }
+});
+
 // Public status — lets the app and admin panel self-diagnose push setup.
 // Real device push only fires when FCM_SERVICE_ACCOUNT_JSON is set in the
 // server env; the in-app feed (polled toasts) works without it.
@@ -4933,4 +5134,4 @@ app.use((err, req, res, next) => {
 });
 const PORT = process.env.PORT || 5000;
 
-module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => db_, otpStore, moneyPrizeUnlocked, parseServiceAccount } };
+module.exports = { app, connectDb, client, _test: { customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => db_, otpStore, moneyPrizeUnlocked, parseServiceAccount, notifyStaffAlerts, notifyPaymentConfirmed, sendPushToStaffUser, LOW_STOCK_THRESHOLD } };

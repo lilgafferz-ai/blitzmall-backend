@@ -1328,19 +1328,60 @@ const loadStockTransfers = async () => {
   // alert body is deliberately PII-free ("New order received — KES X"), so even
   // a guessed staff username binding only ever yields order-count pings.
   const staffPushRegisteredRef = useRef(false);
+  // Reused web FCM app instance for staff push (browser/PC-web path below).
+  const fcmWebAppRef = useRef(null);
   useEffect(() => {
     if (!loggedIn || !user || !user.username) return;
     if (staffPushRegisteredRef.current) return;
     const native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
-    if (!native) return;
     let cancelled = false;
     (async () => {
       try {
+        if (!native) {
+          // Web/PC browser: register a real FCM web token via the service
+          // worker so staff in a browser get true OS-level pushes too. The
+          // desktop app additionally toasts natively through its feed poller.
+          if (!('Notification' in window) || Notification.permission === 'denied') return;
+          if (Notification.permission === 'default') {
+            const p = await Notification.requestPermission();
+            if (p !== 'granted') return;
+          }
+          const cfg = window.BLITZ_FIREBASE_CONFIG;
+          if (!cfg || !cfg.apiKey || !cfg.vapidKey) return;
+          try {
+            const { initializeApp, getApps } = await import('firebase/app');
+            const { getMessaging, getToken, onMessage } = await import('firebase/messaging');
+            if (!fcmWebAppRef.current) {
+              fcmWebAppRef.current = getApps().length ? getApps()[0] : initializeApp({ apiKey: cfg.apiKey, authDomain: cfg.authDomain, projectId: cfg.projectId, messagingSenderId: cfg.messagingSenderId, appId: cfg.appId }, 'blitzmallWeb');
+            }
+            const messaging = getMessaging(fcmWebAppRef.current);
+            const reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+            const token = await getToken(messaging, { vapidKey: cfg.vapidKey, serviceWorkerRegistration: reg });
+            if (cancelled || !token) return;
+            staffPushRegisteredRef.current = true;
+            try {
+              onMessage(messaging, (payload) => {
+                if (payload && payload.notification) {
+                  try { new Notification(payload.notification.title || 'BlitzMall', { body: payload.notification.body || '' }); } catch (e) {}
+                }
+              });
+            } catch (e) {}
+            await fetch(API_URL + '/notifications/register', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ role: 'staff', staffUsername: user.username, token, platform: 'web' })
+            }).catch(() => {});
+          } catch (e) { console.error('Staff web push registration failed:', e); }
+          return;
+        }
         const { PushNotifications } = await import('@capacitor/push-notifications');
         let perm = await PushNotifications.checkPermissions();
         if (perm.receive === 'prompt') perm = await PushNotifications.requestPermissions();
         if (perm.receive !== 'granted') return;
         await PushNotifications.register();
+        // Branded Android channel (matches the manifest's
+        // default_notification_channel_id) so background pushes land in a
+        // "BlitzMall Alerts" channel instead of the system default.
+        try { await PushNotifications.createChannel({ id: 'blitzmall_alerts', name: 'BlitzMall Alerts', description: 'Orders, payments and offers', importance: 4 }); } catch (e) {}
         const token = await new Promise(resolve => {
           const unsubs = [];
           const finish = (t) => { try { unsubs.forEach(u => u.remove()); } catch (e) {} resolve(t); };
@@ -1846,6 +1887,20 @@ const loadStockTransfers = async () => {
     } catch (e) {
       console.error(e);
       setNotifyResult('❌ Network error — could not send.');
+    } finally { setNotifyBusy(false); }
+  };
+
+  // Send a test push to THIS admin device (phone, PC or browser) — the fastest
+  // way to confirm the whole push pipeline works for this staff account.
+  const sendStaffTestPush = async () => {
+    if (!user || !user.username || notifyBusy) return;
+    setNotifyBusy(true); setNotifyResult('');
+    try {
+      const r = await authPost(API_URL + '/notifications/test', { role: 'staff', staffUsername: user.username });
+      const d = await r.json().catch(() => ({}));
+      setNotifyResult(d && d.success ? '✅ Test push sent to this device.' : ('❌ ' + ((d && d.error) || 'Could not send test push.')));
+    } catch (e) {
+      setNotifyResult('❌ Network error — could not send test push.');
     } finally { setNotifyBusy(false); }
   };
 
@@ -3377,6 +3432,9 @@ ${div}
             <input className="owner-field" placeholder="Phone (optional — blank sends to everyone)" value={notifyPhone} onChange={e => setNotifyPhone(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
             <button className="blitz-admin-btn small" disabled={notifyBusy} onClick={sendNotification} style={{ alignSelf: 'flex-start', background: 'var(--grad)', color: '#000', border: 'none', padding: '10px 18px', borderRadius: 10, fontWeight: 700, cursor: notifyBusy ? 'not-allowed' : 'pointer' }}>
               {notifyBusy ? '⏳ Sending…' : '📣 Send push'}
+            </button>
+            <button className="blitz-admin-btn small" disabled={notifyBusy} onClick={sendStaffTestPush} style={{ alignSelf: 'flex-start', background: 'transparent', border: '1px solid var(--line)', color: 'var(--text)', padding: '10px 18px', borderRadius: 10, fontWeight: 600, cursor: notifyBusy ? 'not-allowed' : 'pointer' }}>
+              🔔 Test on this device
             </button>
             {notifyResult && <div style={{ fontSize: '.85rem' }}>{notifyResult}</div>}
           </div>

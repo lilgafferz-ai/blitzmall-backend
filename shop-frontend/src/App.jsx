@@ -452,6 +452,7 @@ function App() {
   const [notifEnabled, setNotifEnabled] = useState(() => {
     try { return localStorage.getItem('blitz_push_enabled') === 'true'; } catch { return false; }
   });
+  const [testPushBusy, setTestPushBusy] = useState(false);
   const [welcomeMsg, setWelcomeMsg] = useState(null);
   const [profile, setProfile] = useState(() => {
     try { return JSON.parse(localStorage.getItem('blitz_profile')) || null; } catch { return null; }
@@ -1802,6 +1803,10 @@ function App() {
           if (perm.receive !== 'granted') error = 'denied';
           else {
             await PushNotifications.register();
+            // Branded Android channel (matches the manifest's
+            // default_notification_channel_id) so background pushes land in a
+            // "BlitzMall Alerts" channel instead of the system default.
+            try { await PushNotifications.createChannel({ id: 'blitzmall_alerts', name: 'BlitzMall Alerts', description: 'Orders, payments and offers', importance: 4 }); } catch (e) {}
             token = await new Promise(resolve => {
               const unsubs = [];
               const finish = (t) => { try { unsubs.forEach(u => u.remove()); } catch (e) {} resolve(t); };
@@ -1917,6 +1922,24 @@ function App() {
       pushListenerRef.current = null;
     }
     showToast('🔕 Notifications turned off');
+  };
+
+  // Fire a test push from the server to THIS device — the quickest way to
+  // confirm push delivery works on any phone, PC or browser.
+  const sendTestPush = async () => {
+    if (!customer?.customerId || testPushBusy) return;
+    setTestPushBusy(true);
+    try {
+      const r = await fetch(`${API_URL}/notifications/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: customer.customerId })
+      });
+      const d = await r.json();
+      showToast(d && d.success ? '🔔 Test push sent — check this device!' : (d && d.error) || 'Could not send test push');
+    } catch (e) {
+      showToast('Could not send test push — check your connection');
+    }
+    setTestPushBusy(false);
   };
 
   const submitReview = async () => {
@@ -2935,6 +2958,30 @@ function App() {
             }}
           >
             {notifEnabled ? 'ON' : 'OFF'}
+          </button>
+        </div>
+
+        <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '10px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <b style={{ fontSize: '.82rem', color: '#fff' }}>Test push on this device</b>
+            <div style={{ fontSize: '.7rem', color: 'var(--muted)', marginTop: 2 }}>Confirms push delivery works here (turn notifications on first)</div>
+          </div>
+          <button
+            className="btn-neon"
+            onClick={sendTestPush}
+            disabled={!notifEnabled || testPushBusy}
+            style={{
+              padding: '6px 12px',
+              fontSize: '.75rem',
+              background: notifEnabled ? 'var(--grad)' : 'var(--line)',
+              color: notifEnabled ? '#000' : 'var(--muted)',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: notifEnabled && !testPushBusy ? 'pointer' : 'not-allowed',
+              opacity: notifEnabled ? 1 : 0.6
+            }}
+          >
+            {testPushBusy ? 'Sending…' : 'Send test'}
           </button>
         </div>
 
