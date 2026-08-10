@@ -12,7 +12,7 @@ const { notifyStaffAlerts } = _test || {};
 // Unique 10-digit phone per call so a prior test run's data can never
 // interfere with a later run.
 let seq = 7000;
-const freshPhone = () => { seq += 11; return '07' + String(Date.now() + seq).slice(-8); };
+const freshPhone = () => { seq += 11; return '07' + String(Date.now() + seq * 7919 + Math.floor(Math.random() * 1e8)).slice(-8); };
 
 let ownerToken = null;
 const auth = () => ({ Authorization: 'Bearer ' + ownerToken });
@@ -42,7 +42,7 @@ describe('Customer test push endpoint', () => {
       items: [{ _id: prod.body.productId, name: 'Notif Test Milk', quantity: 1 }]
     });
 
-    const since = new Date().toISOString();
+    const since = new Date(Date.now() - 1000).toISOString(); // 1s back: never miss same-ms writes
     const r = await request(app)
       .post('/api/notifications/test')
       .send({ phone, platform: 'web' });
@@ -89,13 +89,17 @@ describe('Staff test push endpoint', () => {
 describe('Staff stock / expiry alert engine', () => {
   it('pushes an out-of-stock alert to the admin feed when a product hits 0', async () => {
     const name = 'NotifOut_' + Date.now();
+    // Capture `since` BEFORE creating the product: the product hook fires the
+    // alert sweep fire-and-forget, and the direct call below is a no-op once
+    // that sweep has set the marker — so the event can be written at any point
+    // after `since` (by the hook sweep or by us) and still be found.
+    const since = new Date(Date.now() - 1000).toISOString();
     const prod = await request(app)
       .post('/api/admin/products')
       .set(auth())
       .send({ name, price: 100, buyingPrice: 60, stock: 0, image: [] });
     expect(prod.body.success).toBe(true);
 
-    const since = new Date().toISOString();
     await notifyStaffAlerts(); // deterministic — the fire-and-forget hook may already have fired too
 
     const feed = await request(app).get(`/api/notifications/feed?admin=1&since=${encodeURIComponent(since)}`);
@@ -107,13 +111,13 @@ describe('Staff stock / expiry alert engine', () => {
   it('pushes an expiring-soon alert to the admin feed for a product expiring within the window', async () => {
     const name = 'NotifExp_' + Date.now();
     const in3Days = new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString();
+    const since = new Date(Date.now() - 1000).toISOString(); // before creation — see out-of-stock test
     const prod = await request(app)
       .post('/api/admin/products')
       .set(auth())
       .send({ name, price: 100, buyingPrice: 60, stock: 20, expiryDate: in3Days, image: [] });
     expect(prod.body.success).toBe(true);
 
-    const since = new Date().toISOString();
     await notifyStaffAlerts();
 
     const feed = await request(app).get(`/api/notifications/feed?admin=1&since=${encodeURIComponent(since)}`);

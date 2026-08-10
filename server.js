@@ -4907,11 +4907,14 @@ const ALERT_SWEEP_MS = 30 * 60 * 1000; // background re-check every 30 min
 // same alert (the interval remains the authoritative catch-all).
 const ALERT_SWEEP_MIN_INTERVAL_MS = 30 * 1000;
 let lastAlertSweepAt = 0;
+let alertSweepBusy = false; // one sweep at a time — stops a slow scan overlapping a new one and double-pushing
 const scheduleAlertSweep = () => {
   const now = Date.now();
   if (now - lastAlertSweepAt < ALERT_SWEEP_MIN_INTERVAL_MS) return;
+  if (alertSweepBusy) return; // previous sweep still scanning — the per-product markers catch it next time
   lastAlertSweepAt = now;
-  notifyStaffAlerts();
+  alertSweepBusy = true;
+  notifyStaffAlerts().finally(() => { alertSweepBusy = false; });
 };
 
 const summarizeAlertProducts = (products) => {

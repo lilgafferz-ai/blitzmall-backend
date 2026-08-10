@@ -21,7 +21,11 @@ afterAll(async () => {
 });
 
 // Unique 10-digit Kenyan-style numbers so parallel/CI/repeat runs never collide.
-const newPhone = () => '07' + String(Date.now() + Math.floor(Math.random() * 1000)).slice(-8);
+// Mixes the wall clock, a per-call counter and a large random so phones can
+// never collide with another test file's phone created in the SAME millisecond
+// (under --runInBand every file shares one clock and one server instance).
+let seq = 0;
+const newPhone = () => '07' + String(Date.now() + (seq += 37) * 7919 + Math.floor(Math.random() * 1e8)).slice(-8);
 
 const requestOtp = async (phone, name = 'Test Shopper') =>
   request(app).post('/api/auth').send({ name, phone });

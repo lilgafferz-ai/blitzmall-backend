@@ -11,7 +11,7 @@ const { customerTier, tierFromPoints, earnPoints, issueVoucher, pickWeighted, WH
 // Unique 10-digit phone per call so a prior test run's promo claim can never
 // interfere with a later run (claims persist in the test DB).
 let seq = 1000;
-const freshPhone = () => { seq += 7; return '07' + String(Date.now() + seq).slice(-8); };
+const freshPhone = () => { seq += 7; return '07' + String(Date.now() + seq * 7919 + Math.floor(Math.random() * 1e8)).slice(-8); };
 
 // Orders now REQUIRE every item to resolve to a real catalogue product (server
 // prices are authoritative), so the promo tests create their own products.
