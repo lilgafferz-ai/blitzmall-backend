@@ -615,48 +615,82 @@ app.get('/api/admin/products', authenticate, async (req, res) => {
 // before the account is created — no OTP, no sign-in. Returning customers
 // (their number is already registered) sign straight in. OTPs live in a
 // short-lived in-memory store: hashed with the JWT secret, 10-minute expiry,
-// 5 attempts max, 60s resend cooldown, single use.
+// 5 attempts max, 30s resend cooldown, single use.
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
-const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+// Short on purpose: if the SMS never lands, the customer must not be stranded
+// on the code screen — they get a fresh code (and a fresh delivery attempt)
+// 30 seconds after the previous request.
+const OTP_RESEND_COOLDOWN_MS = 30 * 1000;
 const otpStore = new Map();
 
 const genOtp = () => String(Math.floor(100000 + Math.random() * 900000));
 const hashOtp = (code, phone) => crypto.createHmac('sha256', JWT_SECRET).update(`${phone}:${code}`).digest('hex');
-// Local 07xxxxxxxx / 01xxxxxxxx -> 2547xxxxxxxx / 2541xxxxxxxx for the SMS gateway.
+// Local 07xxxxxxxx / 01xxxxxxxx -> +2547xxxxxxxx / +2541xxxxxxxx for the SMS
+// gateway. Africa's Talking documents the `to` field in international format
+// WITH the leading +, so it is emitted that way.
 const toIntlPhone = (p) => {
   const d = String(p).replace(/[^0-9]/g, '');
   if (!d) return '';
-  if (d.startsWith('254')) return d;
-  if (d.startsWith('0')) return '254' + d.slice(1);
-  return '254' + d;
+  if (d.startsWith('254')) return '+' + d;
+  if (d.startsWith('0')) return '+254' + d.slice(1);
+  return '+254' + d;
 };
 // Africa's Talking (Nairobi-based, KES billing) via its plain HTTP v1 API — no
 // SDK, uses Node's global fetch. Until AT_USERNAME + AT_API_KEY are configured
 // the code is logged + echoed back (devOtp) so the whole flow works offline for
 // testing; real SMS lights up automatically once the credentials are set.
 const smsConfigured = () => !!(process.env.AT_USERNAME && process.env.AT_API_KEY);
+// The sandbox lives on its own host — the username "sandbox" (or AT_SANDBOX=true)
+// switches automatically so a test API key doesn't silently post to production.
+const atMessagingUrl = () =>
+  ((process.env.AT_SANDBOX === 'true' || process.env.AT_USERNAME === 'sandbox')
+    ? 'https://api.sandbox.africastalking.com/version1/messaging'
+    : 'https://api.africastalking.com/version1/messaging');
 async function sendOtpSms(phone, code) {
   const to = toIntlPhone(phone);
   const message = `Your BlitzMall verification code is ${code}. It expires in 10 minutes. Do not share it.`;
   if (smsConfigured() && to) {
     try {
-      const res = await fetch('https://api.africastalking.com/version1/messaging', {
+      const form = new URLSearchParams({ username: process.env.AT_USERNAME, to, message });
+      // Kenyan networks only deliver from a REGISTERED alphanumeric Sender ID /
+      // shortcode — Africa's Talking's shared default sender is dropped by the
+      // network. Set AT_SENDER_ID to the approved ID (leave unset if the account
+      // has no approved sender yet; AT will report the rejection and the code
+      // falls back to on-screen below).
+      if (process.env.AT_SENDER_ID) form.set('from', process.env.AT_SENDER_ID);
+      const res = await fetch(atMessagingUrl(), {
         method: 'POST',
         headers: {
           apiKey: process.env.AT_API_KEY,
           Accept: 'application/json',
           'Content-Type': 'application/x-www-form-urlencoded'
         },
-        body: new URLSearchParams({ username: process.env.AT_USERNAME, to, message }).toString()
+        body: form.toString()
       });
-      if (!res.ok) {
-        const detail = (await res.text()).slice(0, 200);
+      const raw = await res.text();
+      let payload = null;
+      try { payload = JSON.parse(raw); } catch (e) { /* non-JSON error page */ }
+      // Africa's Talking answers HTTP 200/201 even when the message FAILED per
+      // recipient — the real result is in SMSMessageData.Recipients[].status
+      // ("Success" | "Failed" with a statusCode: 101 invalid number,
+      // 102 insufficient balance, 103 user inactive, 104 sender ID not allowed).
+      // Treating res.ok as "delivered" is what stranded customers: the code was
+      // never echoed to the app, so nobody could finish signing in. Only an
+      // explicit per-recipient "Success" counts as delivered.
+      const recipients = (payload && payload.SMSMessageData && Array.isArray(payload.SMSMessageData.Recipients))
+        ? payload.SMSMessageData.Recipients : [];
+      const delivered = res.ok && recipients.some(r => String(r && r.status || '').toLowerCase() === 'success');
+      if (!delivered) {
+        const detail = recipients.length
+          ? recipients.map(r => `${r.number || to}: ${r.status || 'Failed'} (code ${r.statusCode})`).join(', ')
+          : `HTTP ${res.status} ${String(raw).slice(0, 200)}`;
         // Log the code loudly on delivery failure so support can recover a
         // sign-in (the caller also falls back to echoing it on-screen).
-        console.error(`[otp-sms-failed] ${phone} -> ${code} (HTTP ${res.status} ${detail})`);
+        console.error(`[otp-sms-failed] ${phone} -> ${code} (${detail})`);
         return false;
       }
+      console.log(`[otp-sms-sent] ${phone} (${(payload.SMSMessageData && payload.SMSMessageData.Message) || 'delivered'})`);
       return true;
     } catch (e) {
       console.error(`[otp-sms-failed] ${phone} -> ${code} (${e.message})`);
@@ -745,11 +779,20 @@ app.post('/api/auth', authLimiter, async (req, res) => {
       lastSentAt: Date.now()
     });
     // Echo the code back ONLY when SMS could not deliver it (no gateway
-    // configured, or the API call failed) so the sign-in never dead-ends.
-    // With a healthy SMS delivery it is NEVER returned to the client.
+    // configured, or Africa's Talking rejected the recipient) so the sign-in
+    // never dead-ends. With a healthy SMS delivery it is NEVER returned to the
+    // client.
     const sentOk = await sendOtpSms(phoneClean, code);
     const devOtp = sentOk ? undefined : code;
-    return res.json({ success: false, otpRequired: true, phone: phoneClean, resendAfter: OTP_RESEND_COOLDOWN_MS / 1000, devOtp, message: 'We sent a 6-digit code — enter it to finish signing in.' });
+    return res.json({
+      success: false, otpRequired: true, phone: phoneClean,
+      resendAfter: OTP_RESEND_COOLDOWN_MS / 1000,
+      smsDelivered: sentOk,
+      devOtp,
+      message: sentOk
+        ? 'We sent a 6-digit code — enter it to finish signing in.'
+        : 'The SMS could not be delivered — use the code shown on screen to finish signing in.'
+    });
   } catch (err) {
     console.error('auth error:', err);
     res.status(500).json({ error: 'Sign-in failed. Please try again.' });

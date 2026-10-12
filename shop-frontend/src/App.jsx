@@ -473,6 +473,11 @@ function App() {
   const [otpPending, setOtpPending] = useState(null); // { phone, name, referralCode } awaiting the code
   const [otpInput, setOtpInput] = useState('');
   const [otpError, setOtpError] = useState('');
+  // The code the SERVER echoes back only when it could not deliver the SMS
+  // (no gateway configured, or the network rejected the message). It is shown
+  // in a persistent panel so a customer whose text never arrives can still
+  // finish signing in.
+  const [otpDevCode, setOtpDevCode] = useState('');
   const [otpResendIn, setOtpResendIn] = useState(0);
   const [otpVerifying, setOtpVerifying] = useState(false);
   const [activeCategory, setActiveCategory] = useState('All');
@@ -1277,6 +1282,19 @@ function App() {
     return digits.length >= 10;
   };
 
+  // 0712345678 / +254712345678 / 254712345678 -> "0712 345 678"
+  const formatPhoneDisplay = (p) => {
+    let d = String(p || '').replace(/[^0-9]/g, '');
+    if (d.startsWith('254')) d = d.slice(3);
+    if (d.startsWith('0')) d = d.slice(1);
+    const m = d.match(/^(\d{3})(\d{3})(\d{3})$/);
+    return m ? `0${m[1]} ${m[2]} ${m[3]}` : String(p || '');
+  };
+
+  // The server's resend window (30s) drives the countdown; clamp defensively so
+  // a bad value can never lock the button forever.
+  const resendSeconds = (v) => Math.max(0, Math.min(120, Math.floor(v || 30)));
+
   // Completes a successful sign-in — used by the direct (returning customer)
   // path AND the OTP-verified (first-time) path. The server decides returning.
   const finishSignIn = (d, nameUsed) => {
@@ -1286,17 +1304,27 @@ function App() {
     try { localStorage.setItem(CUSTOMER_KEY, JSON.stringify(cust)); } catch {}
     if (!profile) saveProfile({ name: nameUsed, phone: d.customerId, avatarId: 'cat', photo: null });
     setName(''); setPhone(''); setReferralCode('');
-    setOtpPending(null); setOtpInput(''); setOtpError('');
+    setOtpPending(null); setOtpInput(''); setOtpError(''); setOtpDevCode('');
     setWelcomeMsg({ name: nameUsed, returning: !!d.returning });
     setScreen('welcome');
   };
 
-  const startOtpStep = (d, nameUsed) => {
+  const startOtpStep = (d, nameUsed, { alreadySent = false } = {}) => {
     setOtpPending({ phone: d.phone || phone, name: nameUsed, referralCode });
     setOtpInput(''); setOtpError('');
-    setOtpResendIn(Math.max(0, Math.min(60, Math.floor(d.resendAfter || 60))));
-    showToast('📲 We sent a 6-digit code to your phone');
-    if (d.devOtp) showToast(`🔑 Dev code (SMS not configured yet): ${d.devOtp}`);
+    setOtpResendIn(resendSeconds(d.resendAfter));
+    // Only present when the SMS could not be delivered — show it on screen
+    // (a 5-second toast is impossible to catch and strands the customer).
+    setOtpDevCode(d.devOtp || '');
+    if (alreadySent) {
+      // The server refused a second send (30s cooldown) — stay on the code step
+      // so a code the customer already has can still be entered.
+      setOtpError(d.error || 'A code was already sent — enter it below, or resend when the timer ends.');
+    } else if (d.smsDelivered === false) {
+      showToast('📲 SMS could not be delivered — use the code shown on screen');
+    } else {
+      showToast('📲 We sent a 6-digit code to your phone');
+    }
   };
 
   const handleLogin = async (e) => {
@@ -1315,9 +1343,11 @@ function App() {
         finishSignIn(d, name);
       } else if (d.otpRequired) {
         // First-time number: the server sent an OTP — swap to the code step.
+        // A 429 here means a code is ALREADY pending (resend cooldown): go to
+        // the code step anyway so the code they received can still be entered,
+        // instead of leaving them on the login form for 30s with no way in.
         if (r.status === 429 && d.resendAfter) {
-          setOtpResendIn(d.resendAfter);
-          alert(d.error || 'Please wait before requesting another code.');
+          startOtpStep(d, name, { alreadySent: true });
           return;
         }
         startOtpStep(d, name);
@@ -1348,7 +1378,7 @@ function App() {
         finishSignIn(d, otpPending.name);
       } else {
         setOtpError(d.error || 'Verification failed. Please try again.');
-        if (/expired|too many wrong/i.test(d.error || '')) setOtpPending(null);
+        if (/expired|too many wrong/i.test(d.error || '')) { setOtpPending(null); setOtpDevCode(''); }
       }
     } catch (err) {
       console.error(err);
@@ -1368,9 +1398,10 @@ function App() {
       });
       const d = await r.json().catch(() => ({}));
       if (d.otpRequired) {
-        setOtpResendIn(Math.max(0, Math.min(60, Math.floor(d.resendAfter || 60))));
-        showToast('📲 A new code was sent to your phone');
-        if (d.devOtp) showToast(`🔑 Dev code (SMS not configured yet): ${d.devOtp}`);
+        setOtpResendIn(resendSeconds(d.resendAfter));
+        setOtpDevCode(d.devOtp || '');
+        if (d.devOtp) showToast('📲 SMS still could not be delivered — a new code is shown on screen');
+        else showToast('📲 A new code was sent to your phone');
       } else if (d.success) {
         finishSignIn(d, otpPending.name);
       } else {
@@ -2006,7 +2037,14 @@ function App() {
         {otpPending ? (
           <>
             <p className="muted">Enter the 6-digit code sent to</p>
-            <p className="otp-phone">{(() => { const p = String(otpPending.phone); const m = p.match(/^0?(\d{3})(\d{3})(\d{4})$/); return m ? `0${m[1]} ${m[2]} ${m[3]}` : p; })()}</p>
+            <p className="otp-phone">{formatPhoneDisplay(otpPending.phone)}</p>
+            {otpDevCode && (
+              <div className="otp-devcode">
+                <span className="otp-devcode-warn">⚠️ The SMS could not be delivered — use this code</span>
+                <button type="button" className="otp-devcode-value" onClick={() => { try { navigator.clipboard && navigator.clipboard.writeText(otpDevCode); } catch (e) {} showToast('Code copied'); }}>{otpDevCode}</button>
+                <small className="otp-devcode-hint">tap to copy · enter it below to finish signing in</small>
+              </div>
+            )}
             <form onSubmit={handleVerifyOtp}>
               <input className="field otp-input" type="tel" inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="6-digit code" value={otpInput} onChange={e => setOtpInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} autoFocus />
               {otpError && <p className="form-error">{otpError}</p>}
@@ -2015,7 +2053,7 @@ function App() {
             <button className="owner-link" type="button" disabled={otpResendIn > 0} onClick={handleResendOtp}>
               {otpResendIn > 0 ? `Resend code in ${otpResendIn}s` : 'Resend code'}
             </button>
-            <button className="owner-link" type="button" onClick={() => { setOtpPending(null); setOtpInput(''); setOtpError(''); }}>← Change phone number</button>
+            <button className="owner-link" type="button" onClick={() => { setOtpPending(null); setOtpInput(''); setOtpError(''); setOtpDevCode(''); }}>← Change phone number</button>
           </>
         ) : (
           <>

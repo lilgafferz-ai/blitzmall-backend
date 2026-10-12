@@ -41,6 +41,11 @@ describe('OTP phone verification (first-time sign-in)', () => {
     expect(res.body.success).toBe(false);
     expect(res.body.otpRequired).toBe(true);
     expect(res.body.devOtp).toMatch(/^\d{6}$/);
+    // No SMS gateway in tests, so the server must flag the failed delivery
+    // (which is what makes the app show the code on screen) and hand back the
+    // short resend window instead of stranding the customer.
+    expect(res.body.smsDelivered).toBe(false);
+    expect(res.body.resendAfter).toBeLessThanOrEqual(30);
     // No account until the code is verified — signing in again still asks for OTP.
     const again = await requestOtp(phone);
     expect(again.body.otpRequired).toBe(true);
@@ -129,5 +134,58 @@ describe('OTP phone verification (first-time sign-in)', () => {
     const fresh = await requestOtp(phone);
     const ok = await verifyOtp(phone, fresh.body.devOtp);
     expect(ok.body.success).toBe(true);
+  });
+});
+
+// Africa's Talking answers HTTP 200/201 even when a message FAILED per
+// recipient (statusCode 101 invalid number, 102 insufficient balance, 103
+// inactive, 104 sender ID not allowed). Treating HTTP 200 as delivered is what
+// stranded first-time customers: no SMS arrived AND the code was never echoed
+// to the app, so the code step dead-ended. These pin the parsing.
+describe("Africa's Talking delivery detection", () => {
+  const originalFetch = global.fetch;
+  let savedEnv;
+
+  const atReply = (recipientStatus) => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      SMSMessageData: {
+        Message: 'Sent to 1/1 Total Cost: KES 0.8000',
+        Recipients: [{ statusCode: recipientStatus === 'Success' ? 100 : 102, number: '+254700000000', status: recipientStatus }]
+      }
+    })
+  });
+
+  beforeEach(() => {
+    savedEnv = { AT_USERNAME: process.env.AT_USERNAME, AT_API_KEY: process.env.AT_API_KEY };
+    process.env.AT_USERNAME = 'blitzmall';
+    process.env.AT_API_KEY = 'test-key';
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    if (savedEnv.AT_USERNAME === undefined) delete process.env.AT_USERNAME;
+    else process.env.AT_USERNAME = savedEnv.AT_USERNAME;
+    if (savedEnv.AT_API_KEY === undefined) delete process.env.AT_API_KEY;
+    else process.env.AT_API_KEY = savedEnv.AT_API_KEY;
+  });
+
+  it('treats HTTP 200 with a failed recipient as undelivered and echoes the code', async () => {
+    global.fetch = jest.fn(async () => atReply('Failed'));
+    const res = await requestOtp(newPhone());
+    expect(res.statusCode).toBe(200);
+    expect(res.body.smsDelivered).toBe(false);
+    expect(res.body.devOtp).toMatch(/^\d{6}$/);
+    // The gateway must be asked in Africa's Talking's documented +254 format.
+    const [, opts] = global.fetch.mock.calls[0];
+    expect(new URLSearchParams(opts.body).get('to')).toMatch(/^\+254\d{9}$/);
+  });
+
+  it('never echoes the code when the gateway accepts the recipient', async () => {
+    global.fetch = jest.fn(async () => atReply('Success'));
+    const res = await requestOtp(newPhone());
+    expect(res.body.smsDelivered).toBe(true);
+    expect(res.body.devOtp).toBeUndefined();
   });
 });

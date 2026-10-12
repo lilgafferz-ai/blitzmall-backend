@@ -86,6 +86,13 @@ input, textarea {
 .otp-phone{font-family:'Unbounded',sans-serif;font-size:1.05rem;font-weight:700;color:var(--text);margin-top:8px;letter-spacing:1px;}
 .otp-input{text-align:center;font-size:1.5rem;letter-spacing:12px;font-family:'Unbounded',sans-serif;font-weight:700;}
 .form-error{color:#ff5a5f;font-size:.8rem;margin-top:2px;text-align:center;}
+/* Shown ONLY when the SMS couldn't be delivered (server echoes the code) so a
+   customer is never stranded on the OTP screen without a way to continue. */
+.otp-devcode{margin-top:12px;padding:12px 14px;border:1px dashed rgba(255,180,60,.55);border-radius:12px;background:rgba(255,160,40,.08);display:flex;flex-direction:column;align-items:center;gap:6px;}
+.otp-devcode-warn{font-size:.72rem;color:#ffc46b;text-align:center;line-height:1.3;}
+.otp-devcode-value{background:none;border:none;cursor:pointer;font-family:'Unbounded',sans-serif;font-size:1.6rem;font-weight:800;letter-spacing:8px;color:var(--gold,#ffd24a);padding:2px 6px;border-radius:8px;transition:transform .15s ease,background .15s ease;}
+.otp-devcode-value:hover,.otp-devcode-value:active{background:rgba(255,210,74,.14);transform:scale(1.04);}
+.otp-devcode-hint{font-size:.65rem;color:var(--muted);}
 
 /* TOP BAR */
 .topbar{display:flex;align-items:center;gap:12px;padding:14px 16px;background:rgba(10,10,12,.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;}
