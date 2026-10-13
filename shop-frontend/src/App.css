@@ -1447,3 +1447,16 @@ input, textarea {
 .referral-stats div{flex:1;background:var(--bg-2);border:1px solid var(--line);border-radius:12px;padding:12px}
 .referral-stats b{display:block;font-size:1.15rem;color:var(--gold);font-family:'Unbounded',sans-serif}
 .referral-stats small{font-size:.68rem;color:var(--muted)}
+
+/* ===== Orders: status badges + actions ===== */
+.order-badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
+.order-badge{font-size:.7rem;font-weight:700;padding:4px 9px;border-radius:999px;background:var(--bg-2);border:1px solid var(--line);color:var(--muted);}
+.order-badge.green{color:#30d158;border-color:rgba(48,209,88,.4);background:rgba(48,209,88,.08);}
+.order-badge.gold{color:var(--gold);border-color:rgba(255,210,74,.4);background:rgba(255,210,74,.08);}
+.order-badge.red{color:#ff5a5f;border-color:rgba(255,69,58,.4);background:rgba(255,69,58,.08);}
+.order-actions{display:flex;gap:8px;margin-top:12px;}
+.order-actions .btn-ghost{flex:1;font-size:.8rem;padding:8px;}
+.order-actions .order-cancel{color:#ff5a5f;border-color:rgba(255,69,58,.4);}
+
+/* OTP step: "Resend" and "Change number" on their own lines */
+.login-card .owner-link{display:block;margin:12px auto 0;}

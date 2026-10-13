@@ -9,6 +9,7 @@ process.env.MOCK_DB = '1'; // force the offline mock — no real MongoDB needed
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
+const { customerToken, bearer } = require('./helpers');
 
 beforeAll(async () => {
   await connectDb();
@@ -65,7 +66,8 @@ describe('Notification feed via API ($or path)', () => {
     await feedCol.insertOne({ phone: '7000000001', audience: 'customer', title: 'mine', body: 'x', createdAt: new Date() });
     await feedCol.insertOne({ phone: '7000000002', audience: 'customer', title: 'other', body: 'x', createdAt: new Date() });
 
-    const feed = await request(app).get('/api/notifications/feed?phone=7000000001');
+    const tok = bearer(await customerToken(request, app, '7000000001'));
+    const feed = await request(app).get('/api/notifications/feed?phone=7000000001').set(tok);
     expect(feed.statusCode).toBe(200);
     const titles = feed.body.map(n => n.title || '');
     expect(titles).toContain('mine'); // own event visible

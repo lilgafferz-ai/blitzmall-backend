@@ -6,7 +6,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
-const { getOwnerToken } = require('./helpers');
+const { getOwnerToken, customerToken, bearer } = require('./helpers');
 const { notifyStaffAlerts } = _test || {};
 
 // Unique 10-digit phone per call so a prior test run's data can never
@@ -36,7 +36,8 @@ describe('Customer test push endpoint', () => {
       .send({ name: 'Notif Test Milk', price: 100, buyingPrice: 60, stock: 20, image: [] });
     expect(prod.body.success).toBe(true);
 
-    await request(app).post('/api/orders').send({
+    const tok = bearer(await customerToken(request, app, phone, 'Push Tester'));
+    await request(app).post('/api/orders').set(tok).send({
       customerId: phone,
       customerName: 'Push Tester',
       items: [{ _id: prod.body.productId, name: 'Notif Test Milk', quantity: 1 }]
@@ -45,27 +46,28 @@ describe('Customer test push endpoint', () => {
     const since = new Date(Date.now() - 1000).toISOString(); // 1s back: never miss same-ms writes
     const r = await request(app)
       .post('/api/notifications/test')
-      .send({ phone, platform: 'web' });
+      .set(tok)
+      .send({ platform: 'web' });
     expect(r.statusCode).toBe(200);
     expect(r.body.success).toBe(true);
 
     // The test push also wrote a customer feed event the PC app can poll.
-    const feed = await request(app).get(`/api/notifications/feed?phone=${phone}&since=${encodeURIComponent(since)}`);
+    const feed = await request(app).get(`/api/notifications/feed?phone=${phone}&since=${encodeURIComponent(since)}`).set(tok);
     expect(feed.statusCode).toBe(200);
     const hit = (feed.body || []).find(e => e && /test notification/i.test(String(e.title)));
     expect(hit).toBeTruthy();
   });
 
-  it('refuses a test push for an unknown phone', async () => {
+  it('refuses a test push without a customer session (a phone number is not enough)', async () => {
     const r = await request(app)
       .post('/api/notifications/test')
       .send({ phone: '07000000000' });
-    expect(r.statusCode).toBe(403);
+    expect(r.statusCode).toBe(401);
   });
 });
 
 describe('Staff test push endpoint', () => {
-  it('sends a test push to a real staff account and refuses unknown usernames', async () => {
+  it('sends a test push to a signed-in staff account and refuses anonymous callers', async () => {
     const uname = 'notiftest_staff_' + Date.now();
     const created = await request(app)
       .post('/api/admin/users')
@@ -73,16 +75,19 @@ describe('Staff test push endpoint', () => {
       .send({ username: uname, password: 'pass12345', name: 'Notif Staff', role: 'cashier', permissions: ['sales'] });
     expect(created.body.success).toBe(true);
 
+    const login = await request(app).post('/api/admin/login').send({ username: uname, password: 'pass12345' });
     const good = await request(app)
       .post('/api/notifications/test')
-      .send({ role: 'staff', staffUsername: uname });
+      .set(bearer(login.body.token))
+      .send({ role: 'staff' });
     expect(good.statusCode).toBe(200);
     expect(good.body.success).toBe(true);
 
+    // A username alone no longer identifies a staff device.
     const bad = await request(app)
       .post('/api/notifications/test')
-      .send({ role: 'staff', staffUsername: 'no_such_staff' });
-    expect(bad.statusCode).toBe(403);
+      .send({ role: 'staff', staffUsername: uname });
+    expect(bad.statusCode).toBe(401);
   });
 });
 

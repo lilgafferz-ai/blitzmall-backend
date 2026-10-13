@@ -6,7 +6,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
-const { getOwnerToken } = require('./helpers');
+const { getOwnerToken, customerToken, bearer } = require('./helpers');
 const { parseServiceAccount } = _test || {};
 
 // Unique 10-digit phone per call so a prior test run's data can never
@@ -53,7 +53,7 @@ describe('Order security (bank-grade)', () => {
 
     // Customer tries to pay KES 1 for 2 of them.
     const phone = freshPhone();
-    const order = await request(app).post('/api/orders').send({
+    const order = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
       customerId: phone,
       customerName: 'Tamperer',
       items: [{ _id: productId, name: 'Security Test Milk', price: 1, quantity: 2 }],
@@ -61,7 +61,7 @@ describe('Order security (bank-grade)', () => {
     });
     expect(order.body.success).toBe(true);
 
-    const orders = await request(app).get('/api/customer-orders/' + phone);
+    const orders = await request(app).get('/api/customer-orders/' + phone).set(bearer(await customerToken(request, app, phone)));
     const saved = orders.body[0];
     expect(saved.items[0].price).toBe(500);          // server price, not 1
     expect(saved.totalPrice).toBe(1000);             // 500 × 2, not 2
@@ -75,33 +75,33 @@ describe('Order security (bank-grade)', () => {
       items: [{ _id: P.dup, quantity: 1 }],
       paymentMethod: 'delivery'
     };
-    const first = await request(app).post('/api/orders').send(basket);
+    const first = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send(basket);
     expect(first.body.success).toBe(true);
 
     // Same basket, immediately → blocked.
-    const second = await request(app).post('/api/orders').send(basket);
+    const second = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send(basket);
     expect(second.statusCode).toBe(429);
     expect(second.body.success).toBe(false);
 
     // A DIFFERENT basket from the same phone is allowed right away.
-    const other = await request(app).post('/api/orders').send({
+    const other = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
       ...basket,
       items: [{ _id: P.other, quantity: 2 }]
     });
     expect(other.body.success).toBe(true);
   });
 
-  it('blocks placing an order without a real phone number', async () => {
+  it('refuses an order without a verified customer session (a phone number in the body is not enough)', async () => {
     const res = await request(app).post('/api/orders').send({
-      customerId: 'not-a-phone', customerName: 'Bot', items: [{ _id: P.dup, quantity: 1 }]
+      customerId: freshPhone(), customerName: 'Bot', items: [{ _id: P.dup, quantity: 1 }]
     });
-    expect(res.statusCode).toBe(400);
-    expect(res.body.error).toMatch(/phone/i);
+    expect(res.statusCode).toBe(401);
+    expect(res.body.authRequired).toBe(true);
   });
 
   it('REJECTS a basket whose items do not resolve to real catalogue products (no price-tampering hole)', async () => {
     // A hacked client strips the _id and invents a name/price → order refused.
-    const invented = await request(app).post('/api/orders').send({
+    const invented = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, freshPhone()))).send({
       customerId: freshPhone(), customerName: 'Hacker',
       items: [{ name: 'Invented Product That Does Not Exist', price: 1, quantity: 99 }]
     });
@@ -109,7 +109,7 @@ describe('Order security (bank-grade)', () => {
     expect(invented.body.error).toMatch(/catalogue/i);
 
     // A valid _id that no longer exists → order refused.
-    const stale = await request(app).post('/api/orders').send({
+    const stale = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, freshPhone()))).send({
       customerId: freshPhone(), customerName: 'Hacker',
       items: [{ _id: '000000000000000000000000', quantity: 1 }]
     });
@@ -149,7 +149,7 @@ describe('Loyalty endpoint security', () => {
 describe('Transport fee (set by the person processing the order)', () => {
   it('marks the fee confirmed, recomputes the total and notifies the customer', async () => {
     const phone = freshPhone();
-    const placed = await request(app).post('/api/orders').send({
+    const placed = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
       customerId: phone, customerName: 'Delivery Customer',
       items: [{ _id: P.bread, quantity: 2 }],
       paymentMethod: 'delivery', deliveryLocation: 'Matunda Town', deliveryFee: 0
@@ -158,7 +158,7 @@ describe('Transport fee (set by the person processing the order)', () => {
     const orderId = placed.body.orderId;
 
     // The provisional fee is NOT confirmed yet.
-    let saved = (await request(app).get('/api/customer-orders/' + phone)).body[0];
+    let saved = (await request(app).get('/api/customer-orders/' + phone).set(bearer(await customerToken(request, app, phone)))).body[0];
     expect(saved.deliveryFeeConfirmed).toBe(false);
 
     // Processor (owner) sets the transport fee to KES 300.
@@ -168,14 +168,15 @@ describe('Transport fee (set by the person processing the order)', () => {
       .send({ deliveryFee: 300 });
     expect(setFee.body.success).toBe(true);
 
-    saved = (await request(app).get('/api/customer-orders/' + phone)).body[0];
+    saved = (await request(app).get('/api/customer-orders/' + phone).set(bearer(await customerToken(request, app, phone)))).body[0];
     expect(saved.deliveryFee).toBe(300);
     expect(saved.deliveryFeeConfirmed).toBe(true);
     expect(saved.deliveryFeeSetBy).toBeTruthy();
     expect(saved.totalPrice).toBe(700); // 400 items + 300 transport − 0 discount − 0 wallet
+    expect(saved.paymentStatus).toBe('pending');
 
     // The customer got an in-app feed notification about the fee.
-    const feed = await request(app).get('/api/notifications/feed?phone=' + phone);
+    const feed = await request(app).get('/api/notifications/feed?phone=' + phone).set(bearer(await customerToken(request, app, phone)));
     expect(feed.body.some(n => /transport fee/i.test((n.title || '') + ' ' + (n.body || '')))).toBe(true);
   });
 });
@@ -197,21 +198,21 @@ describe('Points Redemption Store (owner currency)', () => {
       .set(auth())
       .send({ phone, points: 150 });
 
-    const redeem = await request(app).post('/api/loyalty/redeem-reward').send({ customerId: phone, rewardId: 'tier-100' });
+    const redeem = await request(app).post('/api/loyalty/redeem-reward').set(bearer(await customerToken(request, app, phone))).send({ customerId: phone, rewardId: 'tier-100' });
     expect(redeem.statusCode).toBe(200);
     expect(redeem.body.success).toBe(true);
     expect(redeem.body.pointsCost).toBe(100);
     expect(redeem.body.couponCode).toMatch(/^REDEEM_/);
 
     // Points deducted (150 - 100 = 50).
-    const prof = await request(app).get('/api/customers/' + phone);
+    const prof = await request(app).get('/api/customers/' + phone).set(bearer(await customerToken(request, app, phone)));
     expect(prof.body.loyaltyPoints).toBe(50);
 
     // The coupon only validates for this phone (phone-bound, single use).
-    const ok = await request(app).post('/api/coupons/validate').send({ code: redeem.body.couponCode, total: 5000, phone });
+    const ok = await request(app).post('/api/coupons/validate').set(bearer(await customerToken(request, app, phone))).send({ code: redeem.body.couponCode, total: 5000, phone });
     expect(ok.body.valid).toBe(true);
     expect(ok.body.discount).toBe(20);
-    const stranger = await request(app).post('/api/coupons/validate').send({ code: redeem.body.couponCode, total: 5000, phone: freshPhone() });
+    const stranger = await request(app).post('/api/coupons/validate').set(bearer(await customerToken(request, app, freshPhone()))).send({ code: redeem.body.couponCode, total: 5000, phone: freshPhone() });
     expect(stranger.body.valid).toBe(false);
   });
 
@@ -220,19 +221,19 @@ describe('Points Redemption Store (owner currency)', () => {
     await request(app).post('/api/admin/loyalty/add-points').set(auth()).send({ phone, points: 100 });
 
     // Non-multiple of 5 → refused.
-    const bad = await request(app).post('/api/loyalty/convert-to-wallet').send({ phone, points: 12 });
+    const bad = await request(app).post('/api/loyalty/convert-to-wallet').set(bearer(await customerToken(request, app, phone))).send({ phone, points: 12 });
     expect(bad.statusCode).toBe(400);
     expect(bad.body.error).toMatch(/multiples of 5/i);
 
     // 50 points = KES 10 wallet cash.
-    const ok = await request(app).post('/api/loyalty/convert-to-wallet').send({ phone, points: 50 });
+    const ok = await request(app).post('/api/loyalty/convert-to-wallet').set(bearer(await customerToken(request, app, phone))).send({ phone, points: 50 });
     expect(ok.statusCode).toBe(200);
     expect(ok.body.success).toBe(true);
     expect(ok.body.points).toBe(50);
     expect(ok.body.walletBalance).toBe(10);
 
     // Overdraw → refused.
-    const over = await request(app).post('/api/loyalty/convert-to-wallet').send({ phone, points: 55 });
+    const over = await request(app).post('/api/loyalty/convert-to-wallet').set(bearer(await customerToken(request, app, phone))).send({ phone, points: 55 });
     expect(over.statusCode).toBe(400);
   });
 
@@ -242,7 +243,7 @@ describe('Points Redemption Store (owner currency)', () => {
       .post('/api/admin/loyalty/add-points')
       .set(auth())
       .send({ phone, points: 50 });
-    const redeem = await request(app).post('/api/loyalty/redeem-reward').send({ customerId: phone, rewardId: 'tier-100' });
+    const redeem = await request(app).post('/api/loyalty/redeem-reward').set(bearer(await customerToken(request, app, phone))).send({ customerId: phone, rewardId: 'tier-100' });
     expect(redeem.statusCode).toBe(400);
     expect(redeem.body.error).toMatch(/insufficient/i);
   });
@@ -259,23 +260,32 @@ describe('Notification token registration (staff push)', () => {
       .send({ username: uname, password: 'pass12345', name: 'Notif Staff', role: 'cashier', permissions: ['sales'] });
     expect(created.body.success).toBe(true);
 
+    const login = await request(app).post('/api/admin/login').send({ username: uname, password: 'pass12345' });
     const good = await request(app)
       .post('/api/notifications/register')
-      .send({ role: 'staff', staffUsername: uname, token: 'STAFF-TOKEN-' + Date.now(), platform: 'android' });
+      .set(bearer(login.body.token))
+      .send({ role: 'staff', token: 'STAFF-TOKEN-' + Date.now(), platform: 'android' });
     expect(good.statusCode).toBe(200);
     expect(good.body.success).toBe(true);
 
+    // Knowing a staff username is no longer enough to subscribe to staff alerts.
     const bad = await request(app)
       .post('/api/notifications/register')
-      .send({ role: 'staff', staffUsername: 'no_such_user', token: 'STAFF-TOKEN-BAD-' + Date.now() });
-    expect(bad.statusCode).toBe(403);
+      .send({ role: 'staff', staffUsername: uname, token: 'STAFF-TOKEN-BAD-' + Date.now() });
+    expect(bad.statusCode).toBe(401);
   });
 
-  it('a customer token still requires a real customer', async () => {
+  it('a customer device token requires a signed-in customer', async () => {
     const r = await request(app)
       .post('/api/notifications/register')
       .send({ phone: '07999999999', token: 'CUST-TOKEN-' + Date.now() });
-    expect(r.statusCode).toBe(403);
+    expect(r.statusCode).toBe(401);
+    const phone = freshPhone();
+    const ok = await request(app)
+      .post('/api/notifications/register')
+      .set(bearer(await customerToken(request, app, phone)))
+      .send({ token: 'CUST-TOKEN-OK-' + Date.now() });
+    expect(ok.statusCode).toBe(200);
   });
 });
 
@@ -283,13 +293,13 @@ describe('Promo atomicity', () => {
   it('two simultaneous spins never both win — at most one is granted', async () => {
     const phone = freshPhone();
     for (let i = 0; i < 2; i++) {
-      await request(app).post('/api/orders').send({
+      await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
         customerId: phone, customerName: 'Racer', items: [{ _id: i === 0 ? P.item0 : P.item1, quantity: 1 }]
       });
     }
     const [a, b] = await Promise.all([
-      request(app).post('/api/promos/spin').send({ phone, name: 'Racer' }),
-      request(app).post('/api/promos/spin').send({ phone, name: 'Racer' })
+      request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'Racer' }),
+      request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'Racer' })
     ]);
     const granted = [a.body, b.body].filter(x => x && x.success === true).length;
     const refused = [a.body, b.body].filter(x => x && x.alreadyUsed === true).length;

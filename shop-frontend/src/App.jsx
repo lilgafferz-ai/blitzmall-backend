@@ -2,6 +2,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import ErrorBoundary from './ErrorBoundary';
+import { MeScreen, RewardsScreen, SettingsScreen, EditProfileScreen, AboutScreen } from './screens/CustomerScreens';
+import { ConfirmSheet } from './components/SettingsKit';
 import { SplashScreen } from '@capacitor/splash-screen';
 import { Capacitor } from '@capacitor/core';
 import L from 'leaflet';
@@ -24,6 +26,29 @@ const OFFLINE_ORDERS_KEY = 'blitz_offline_orders';
 const CUSTOMER_KEY = 'blitz_customer';
 const FAVORITES_KEY = 'blitz_favorites';
 const SHOP_COORDS = { lat: 0.8273, lng: 35.1207 }; // Blitz Mall, Matunda
+
+// Customer session: the server only trusts the signed token it issued after a
+// verified SMS code — never a phone number in the request. Every call to our
+// API carries it; a 401 with authRequired means the session ended (signed out
+// everywhere, or a pre-session install), so the app asks for a new code.
+const CUSTOMER_SESSION_EXPIRED = 'blitz_customer_session_expired';
+const readStoredCustomer = () => {
+  try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
+};
+const custFetch = async (url, opts = {}) => {
+  const stored = readStoredCustomer();
+  const token = stored && stored.token;
+  const headers = { ...(opts.headers || {}) };
+  if (token && String(url).startsWith(API_URL)) headers.Authorization = 'Bearer ' + token;
+  const res = await fetch(url, { ...opts, headers });
+  if (res.status === 401 && token) {
+    try {
+      const d = await res.clone().json();
+      if (d && d.authRequired) window.dispatchEvent(new Event(CUSTOMER_SESSION_EXPIRED));
+    } catch (e) { /* non-JSON 401 — leave the session alone */ }
+  }
+  return res;
+};
 
 let fcmWebApp = null; // reuse the Firebase web app across toggle on/off cycles
 
@@ -413,7 +438,7 @@ function App() {
       setAiInput('');
       setAiLoading(true);
       try {
-        const aiRes = await fetch(`${API_URL}/ai/chat`, {
+        const aiRes = await custFetch(`${API_URL}/ai/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: actionText, customerId: customer?.customerId })
@@ -447,7 +472,18 @@ function App() {
   const [scratchRevealed, setScratchRevealed] = useState(false);
 
   const [customer, setCustomer] = useState(() => {
-    try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return c && c.customerId ? c : null; } catch { return null; }
+    const c = readStoredCustomer();
+    return c && c.token ? c : null;
+  });
+  // Shown on the sign-in screen when a session ended (or an install from
+  // before sessions existed needs its number confirmed once).
+  const [sessionNotice, setSessionNotice] = useState(() => {
+    const c = readStoredCustomer();
+    if (c && !c.token) {
+      try { localStorage.removeItem(CUSTOMER_KEY); } catch {}
+      return 'For your security, confirm your number with a one-time code to sign back in. Your points, wallet and orders are all still there.';
+    }
+    return '';
   });
   const [notifEnabled, setNotifEnabled] = useState(() => {
     try { return localStorage.getItem('blitz_push_enabled') === 'true'; } catch { return false; }
@@ -468,8 +504,8 @@ function App() {
   const [referralCode, setReferralCode] = useState('');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
-  // Phone-verified sign-in: a first-time number must confirm a 6-digit OTP
-  // before its account is created (returning numbers sign straight in).
+  // Phone-verified sign-in: every new device confirms the number with a
+  // 6-digit code before the server issues a session (new AND returning numbers).
   const [otpPending, setOtpPending] = useState(null); // { phone, name, referralCode } awaiting the code
   const [otpInput, setOtpInput] = useState('');
   const [otpError, setOtpError] = useState('');
@@ -486,6 +522,7 @@ function App() {
   const [detailQty, setDetailQty] = useState(1);
   const [payMethod, setPayMethod] = useState('delivery');
   const [myOrders, setMyOrders] = useState([]);
+  const [cancelOrderTarget, setCancelOrderTarget] = useState(null); // order awaiting "cancel?" confirmation
   const [reviewStars, setReviewStars] = useState(0);
   const [couponInput, setCouponInput] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState(null);
@@ -508,7 +545,10 @@ function App() {
   const [restartIn, setRestartIn] = useState(0); // live auto-restart countdown (seconds) once an update is downloaded
   const screenRef = useRef(screen);
   useEffect(() => { screenRef.current = screen; });
-  const [deliveryArea, setDeliveryArea] = useState('mall'); // 'mall' | 'standard'
+  const [defaultArea, setDefaultAreaState] = useState(() => {
+    try { return localStorage.getItem('blitz_default_area') === 'standard' ? 'standard' : 'mall'; } catch { return 'mall'; }
+  });
+  const [deliveryArea, setDeliveryArea] = useState(defaultArea); // 'mall' | 'standard'
   const [deliveryLocation, setDeliveryLocation] = useState('');
   const [gpsCoords, setGpsCoords] = useState(null);
   const [gpsLoading, setGpsLoading] = useState(false);
@@ -534,11 +574,16 @@ function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showRefreshBtn, setShowRefreshBtn] = useState(false);
   const [appInfo, setAppInfo] = useState(null);
+  // Shop contact for Settings → Help (served by /api/shop-info).
+  const [shopInfo, setShopInfo] = useState(null);
+  // OTA content bundle running on the phone (Settings → App).
+  const [bundleVersion, setBundleVersion] = useState('');
+  const [pendingOfflineOrders, setPendingOfflineOrders] = useState(0);
   const [gallery, setGallery] = useState(null); // image URLs when the photo gallery is open
   const pullThreshold = 80;
   const loadProducts = useCallback(async () => {
     try {
-      const r = await fetch(`${API_URL}/products`);
+      const r = await custFetch(`${API_URL}/products`);
       const d = await r.json();
       if (Array.isArray(d)) {
         setProducts(d);
@@ -549,7 +594,7 @@ function App() {
 
   const loadBanners = useCallback(async () => {
     try {
-      const r = await fetch(`${API_URL}/banners`);
+      const r = await custFetch(`${API_URL}/banners`);
       const d = await r.json();
       if (Array.isArray(d)) {
         setBanners(d);
@@ -726,6 +771,10 @@ function App() {
     return () => { window.removeEventListener('online', onOn); window.removeEventListener('offline', onOff); };
   }, []);
 
+  const goBack = () => {
+    try { if (navStackRef.current.length > 1) { window.history.back(); return; } } catch (e) {}
+    setScreen('home');
+  };
   const saveProfile = (p) => { setProfile(p); try { localStorage.setItem('blitz_profile', JSON.stringify(p)); } catch {} };
 
   // OTP resend countdown — one tick per second while waiting to resend.
@@ -743,13 +792,12 @@ function App() {
     const poll = async () => {
       if (stopped) return;
       try {
-        const r = await fetch(`${API_URL}/mpesa/status/${stkCheckoutId}`);
+        const r = await custFetch(`${API_URL}/mpesa/status/${stkCheckoutId}`);
         const d = await r.json();
         if (d.status === 'confirmed') {
           stopped = true;
           setStkStatus('confirmed');
           setCart([]); setScreen('confirmation');
-          triggerSimulatedNotifications();
         } else if (d.status === 'failed') {
           stopped = true;
           setStkStatus('failed');
@@ -767,7 +815,7 @@ function App() {
   const loadSavedBaskets = async () => {
     if (!customer?.customerId) return;
     try {
-      const r = await fetch(`${API_URL}/customer/baskets/${customer.customerId}`);
+      const r = await custFetch(`${API_URL}/customer/baskets/${customer.customerId}`);
       const d = await r.json();
       setSavedBaskets(Array.isArray(d) ? d : []);
     } catch (e) { console.error('Failed to load saved baskets:', e); }
@@ -776,7 +824,7 @@ function App() {
   const saveCurrentBasket = async () => {
     if (!basketNameInput.trim()) return;
     try {
-      const r = await fetch(`${API_URL}/customer/baskets`, {
+      const r = await custFetch(`${API_URL}/customer/baskets`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -808,14 +856,21 @@ function App() {
     }
   };
 
+  // Refill the cart from today's catalogue (current price, photo and stock) —
+  // a saved basket only remembers which products and how many.
   const loadSavedBasketToCart = (basket) => {
-    setCart(basket.items);
-    alert(`🛒 Loaded basket "${basket.basketName}" into your cart!`);
+    const lines = (basket.items || []).map(it => {
+      const p = products.find(x => String(x._id || x.id) === String(it._id || it.id));
+      return p ? { ...p, quantity: it.quantity || 1 } : null;
+    }).filter(Boolean);
+    const missing = (basket.items || []).length - lines.length;
+    setCart(lines);
+    alert(`🛒 Loaded basket "${basket.basketName}" into your cart!${missing > 0 ? ` (${missing} item${missing > 1 ? 's are' : ' is'} no longer sold)` : ''}`);
   };
 
   const deleteSavedBasket = async (id) => {
     try {
-      const r = await fetch(`${API_URL}/customer/baskets/${id}`, { method: 'DELETE' });
+      const r = await custFetch(`${API_URL}/customer/baskets/${id}`, { method: 'DELETE' });
       const d = await r.json();
       if (d.success) {
         loadSavedBaskets();
@@ -825,7 +880,7 @@ function App() {
 
   const loadLoyaltyRewards = async () => {
     try {
-      const r = await fetch(`${API_URL}/loyalty/rewards`);
+      const r = await custFetch(`${API_URL}/loyalty/rewards`);
       const d = await r.json();
       setLoyaltyRewards(d || []);
     } catch (e) { console.error('Failed to load loyalty rewards:', e); }
@@ -833,7 +888,7 @@ function App() {
 
   const redeemReward = async (rewardId) => {
     try {
-      const r = await fetch(`${API_URL}/loyalty/redeem-reward`, {
+      const r = await custFetch(`${API_URL}/loyalty/redeem-reward`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ customerId: customer?.customerId, rewardId })
@@ -858,7 +913,7 @@ function App() {
   const loadPromoStatus = async () => {
     if (!customer?.customerId) return;
     try {
-      const r = await fetch(`${API_URL}/promos/status/${customer.customerId}`);
+      const r = await custFetch(`${API_URL}/promos/status/${customer.customerId}`);
       const d = await r.json();
       if (!d || d.error) return;
       setPromoStatus(d);
@@ -873,7 +928,7 @@ function App() {
   const loadCustLoyalty = async () => {
     if (!customer?.customerId) return;
     try {
-      const r = await fetch(`${API_URL}/customers/${customer.customerId}`);
+      const r = await custFetch(`${API_URL}/customers/${customer.customerId}`);
       const d = await r.json();
       if (d && !d.error) {
         setCustAccount(d);
@@ -888,7 +943,7 @@ function App() {
     if (scratchRevealing || !customer?.customerId) return;
     setScratchRevealing(true);
     try {
-      const r = await fetch(`${API_URL}/promos/scratch`, {
+      const r = await custFetch(`${API_URL}/promos/scratch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: customer.customerId, name: customer.name })
@@ -933,17 +988,74 @@ function App() {
     }, 5000);
   };
 
-  const triggerSimulatedNotifications = () => {
-    setTimeout(() => {
-      showToast("🛒 Your order has been received by Blitz Mall Cashier!");
-    }, 4000);
-    setTimeout(() => {
-      showToast("📦 Order Packing: Items are being packed and sealed.");
-    }, 12000);
-    setTimeout(() => {
-      showToast("🚴 Out for Delivery: A rider has picked up your parcel!");
-    }, 24000);
-  };
+
+  // Points → wallet cash converter. Rendered by every screen that offers it
+  // (home, Me, Rewards) — it used to live only on the home screen, so the
+  // Convert button on the profile page did nothing.
+  const renderWalletModal = () => (showWalletModal ? (
+    <div className="futuristic-modal-overlay" onClick={() => setShowWalletModal(false)}>
+      <div className="futuristic-modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: '340px' }}>
+        <button className="modal-close-btn" onClick={() => setShowWalletModal(false)}>✕</button>
+        <h2 className="modal-title" style={{ color: 'var(--gold)' }}>🪙 Convert Points to Cash</h2>
+        <p className="modal-subtitle" style={{ marginBottom: 16 }}>Redeem your loyalty points directly into your virtual wallet at a rate of 5 points = KES 1.</p>
+        
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
+          <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 10, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="muted" style={{ fontSize: '.75rem' }}>Available Points</span>
+            <b style={{ fontSize: '1.05rem', color: 'var(--orange)' }}>{custLoyalty?.points || 0} PTS</b>
+          </div>
+          
+          <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 10, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="muted" style={{ fontSize: '.75rem' }}>Est. Wallet Value</span>
+            <b style={{ fontSize: '1.05rem', color: 'var(--green)' }}>KES {Math.floor((custLoyalty?.points || 0) / 5).toLocaleString('en-KE')}</b>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: '.75rem', color: '#fff', fontWeight: 'bold' }}>Points to convert:</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input 
+                type="number"
+                className="field" 
+                placeholder="e.g. 50" 
+                value={pointsToConvert} 
+                onChange={e => setPointsToConvert(e.target.value)} 
+                style={{ flex: 1, padding: '10px', borderRadius: '8px', fontSize: '.9rem' }} 
+              />
+              <button 
+                type="button" 
+                className="btn-ghost" 
+                onClick={() => setPointsToConvert(String(Math.floor((custLoyalty?.points || 0) / 5) * 5))}
+                style={{ padding: '0 10px', fontSize: '.72rem', borderRadius: 8 }}
+              >
+                Max
+              </button>
+            </div>
+            <small className="muted" style={{ fontSize: '.68rem' }}>* Must be a multiple of 5 points (5 PTS = KES 1)</small>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button 
+            type="button" 
+            className="btn-ghost" 
+            onClick={() => setShowWalletModal(false)}
+            style={{ flex: 1, padding: '10px' }}
+          >
+            Cancel
+          </button>
+          <button 
+            type="button" 
+            className="btn-neon" 
+            onClick={handleConvertToWallet}
+            style={{ flex: 1, padding: '10px', background: 'var(--grad)', color: '#000' }}
+            disabled={!pointsToConvert || parseInt(pointsToConvert) <= 0 || parseInt(pointsToConvert) > (custLoyalty?.points || 0) || parseInt(pointsToConvert) % 5 !== 0}
+          >
+            Convert
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null);
 
   const renderToasts = () => (
     <div style={{position:'fixed',top:20,left:'50%',transform:'translateX(-50%)',zIndex:99999,display:'flex',flexDirection:'column',gap:10,width:'90%',maxWidth:360,pointerEvents:'none'}}>
@@ -995,8 +1107,9 @@ function App() {
       const synced = [];
       for (const order of queued) {
         try {
-          const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ customerId: order.customerId, customerName: order.customerName, items: order.items, paymentMethod: order.paymentMethod }) });
+          const { _queued, _id, createdAt, ...payload } = order;
+          const r = await custFetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload) });
           const d = await r.json();
           if (!d.success) {
             // A definitive rejection (4xx: product no longer in the catalogue,
@@ -1026,18 +1139,32 @@ function App() {
   }, [customer]);
 
   useEffect(() => {
-    if (screen === 'profile' || screen === 'referral') {
+    if (['profile', 'referral', 'rewards'].includes(screen)) {
       loadCustLoyalty();
       loadLoyaltyRewards();
     }
+    if (screen === 'profile' || screen === 'orders') loadMyOrders();
+    if (screen === 'settings') {
+      try { setPendingOfflineOrders(JSON.parse(localStorage.getItem(OFFLINE_ORDERS_KEY) || '[]').length); } catch { setPendingOfflineOrders(0); }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen]);
+
+  useEffect(() => {
+    custFetch(`${API_URL}/shop-info`).then(r => r.json()).then(d => { if (d && d.name) setShopInfo(d); }).catch(() => {});
+    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+      import('@capgo/capacitor-updater')
+        .then(({ CapacitorUpdater }) => CapacitorUpdater.current())
+        .then(cur => { const v = cur && cur.bundle && cur.bundle.version; if (v && v !== 'builtin') setBundleVersion(v); })
+        .catch(() => {});
+    }
+  }, []);
 
   // When the Share screen opens, ask the server for the newest APK so the QR
   // code and download link always point at the latest released build.
   useEffect(() => {
     if (screen !== 'share') return;
-    fetch(`${API_URL}/app-info`)
+    custFetch(`${API_URL}/app-info`)
       .then(r => r.json())
       .then(d => { if (d && d.apkUrl) setAppInfo(d); })
       .catch(() => {});
@@ -1052,7 +1179,7 @@ function App() {
     const pollInterval = setInterval(async () => {
       if (!active) return;
       try {
-        const r = await fetch(`${API_URL}/notifications/feed?phone=${customer.customerId}&since=${lastPollTimeRef.current}`);
+        const r = await custFetch(`${API_URL}/notifications/feed?phone=${customer.customerId}&since=${lastPollTimeRef.current}`);
         const data = await r.json();
         if (active && Array.isArray(data) && data.length > 0) {
           data.forEach(item => {
@@ -1089,7 +1216,7 @@ function App() {
 
   const loadMyOrders = async () => {
     try {
-      const r = await fetch(API_URL + '/customer-orders/' + customer.customerId);
+      const r = await custFetch(API_URL + '/customer-orders/' + customer.customerId);
       const d = await r.json();
       if (Array.isArray(d)) {
         setMyOrders(d.reverse());
@@ -1178,11 +1305,11 @@ function App() {
         // user: only count down when they're on the Profile screen (where the
         // countdown is visible) or the window isn't focused (they're away).
         // Otherwise it applies silently on close instead.
-        const canAutoRestart = screenRef.current === 'profile' || (typeof document !== 'undefined' && !document.hasFocus());
+        const canAutoRestart = screenRef.current === 'settings' || (typeof document !== 'undefined' && !document.hasFocus());
         setRestartIn(canAutoRestart ? 20 : 0);
         showToast(canAutoRestart
-          ? '✅ Update downloaded — the app restarts automatically in 20s (cancel in Profile → Updates)'
-          : '✅ Update downloaded — it applies the next time you close the app (or tap Restart in Profile)');
+          ? '✅ Update downloaded — the app restarts automatically in 20s (cancel in Settings → App)'
+          : '✅ Update downloaded — it applies the next time you close the app (or tap Restart in Settings → App)');
       } else if (s.status === 'up-to-date') {
         setPcUpdateStatus('You are up to date');
         showToast('✅ PC app is up to date!');
@@ -1240,6 +1367,23 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen]);
 
+  // The server ended this device's session (signed out everywhere, or the
+  // account needs its number confirmed again) — ask for a fresh code. Declared
+  // before the admin early-return so the hook order never changes.
+  useEffect(() => {
+    const onExpired = () => {
+      setSessionNotice('Your session ended — confirm your number with a one-time code to continue.');
+      setCustomer(null);
+      setCart([]);
+      setMyOrders([]);
+      setCustAccount(null);
+      try { localStorage.removeItem(CUSTOMER_KEY); } catch {}
+      setScreen('login');
+    };
+    window.addEventListener(CUSTOMER_SESSION_EXPIRED, onExpired);
+    return () => window.removeEventListener(CUSTOMER_SESSION_EXPIRED, onExpired);
+  }, []);
+
   if (isAdmin) {
     return (
       <div className="app-container">
@@ -1253,14 +1397,9 @@ function App() {
               </div>
             </div>
           }>
-            <Admin />
+            <Admin onExit={() => setIsAdmin(false)} />
           </React.Suspense>
         </ErrorBoundary>
-        <button className="back-to-shop-btn" onClick={() => {
-          // Switching views never logs the staff user out — the admin session
-          // persists (localStorage) until they tap Exit in the admin section.
-          setIsAdmin(false);
-        }}>← Back to Blitz Mall</button>
       </div>
     );
   }
@@ -1298,7 +1437,9 @@ function App() {
   // Completes a successful sign-in — used by the direct (returning customer)
   // path AND the OTP-verified (first-time) path. The server decides returning.
   const finishSignIn = (d, nameUsed) => {
-    const cust = { customerId: d.customerId, name: nameUsed, phone: d.customerId };
+    if (!d.token) { setOtpError('Sign-in failed — please request a new code.'); return; }
+    const cust = { customerId: d.customerId, name: nameUsed || d.name || '', phone: d.customerId, token: d.token };
+    setSessionNotice('');
     setCustomer(cust);
     if (d.referralBonus) showToast(`🎁 Welcome bonus: +${d.referralBonus} loyalty points — thanks for using a friend's code!`);
     try { localStorage.setItem(CUSTOMER_KEY, JSON.stringify(cust)); } catch {}
@@ -1331,7 +1472,7 @@ function App() {
     e.preventDefault();
     if (!validatePhone(phone)) { alert('Please enter a valid phone number (at least 10 digits, e.g. 0712345678)'); return; }
     try {
-      const r = await fetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone, referralCode }) });
+      const r = await custFetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone, referralCode }) });
       const d = await r.json().catch(() => ({}));
       // A rate-limit 429 (from the global/auth limiters) has a plain-text body
       // that can't be parsed as JSON — handle it before touching d.otpRequired.
@@ -1368,7 +1509,7 @@ function App() {
     setOtpVerifying(true);
     setOtpError('');
     try {
-      const r = await fetch(`${API_URL}/auth/verify-otp`, {
+      const r = await custFetch(`${API_URL}/auth/verify-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: otpPending.phone, otp: code, name: otpPending.name, referralCode: otpPending.referralCode })
@@ -1391,7 +1532,7 @@ function App() {
   const handleResendOtp = async () => {
     if (!otpPending || otpResendIn > 0) return;
     try {
-      const r = await fetch(`${API_URL}/auth`, {
+      const r = await custFetch(`${API_URL}/auth`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: otpPending.name, phone: otpPending.phone, referralCode: otpPending.referralCode })
@@ -1417,6 +1558,7 @@ function App() {
     setCustomer(null);
     setCart([]);
     setMyOrders([]);
+    setCustAccount(null);
     try { localStorage.removeItem(CUSTOMER_KEY); } catch {}
     setScreen('login');
   };
@@ -1476,7 +1618,7 @@ function App() {
     setCheckingUpdate(true);
     showToast('Checking for updates...');
     try {
-      const res = await fetch(`${API_URL}/native-update`);
+      const res = await custFetch(`${API_URL}/native-update`);
       const latest = await res.json();
       if (!latest || !latest.version || !latest.url) {
         showToast('Already up to date! (no updates on server)');
@@ -1519,7 +1661,7 @@ function App() {
     setCouponError('');
     if (!couponInput.trim()) return;
     try {
-      const r = await fetch(`${API_URL}/coupons/validate`, {
+      const r = await custFetch(`${API_URL}/coupons/validate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: couponInput.trim().toUpperCase(), total, phone: customer?.customerId || customer?.phone || '' })
@@ -1550,7 +1692,7 @@ function App() {
     }
 
     try {
-      const r = await fetch(`${API_URL}/loyalty/convert-to-wallet`, {
+      const r = await custFetch(`${API_URL}/loyalty/convert-to-wallet`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: customer?.customerId, points: pts })
@@ -1641,7 +1783,7 @@ function App() {
     setWheelSpinning(true);
     setWheelPrize(null);
     try {
-      const r = await fetch(`${API_URL}/promos/spin`, {
+      const r = await custFetch(`${API_URL}/promos/spin`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: customer.customerId, name: customer.name })
@@ -1693,7 +1835,7 @@ function App() {
     setAiLoading(true);
 
     try {
-      const aiRes = await fetch(`${API_URL}/ai/chat`, {
+      const aiRes = await custFetch(`${API_URL}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: messageText, customerId: customer?.customerId, conversationHistory: aiMessages.slice(-10) })
@@ -1729,31 +1871,36 @@ function App() {
     const orderData = {
       customerId: customer.customerId,
       customerName: customer.name,
-      items: cart,
+      items: cart.map(i => ({ _id: i._id || i.id, name: i.name, quantity: i.quantity })), // the server prices every line itself
       paymentMethod: payMethod,
       createdAt: new Date().toISOString(),
       deliveryLocation: `${deliveryArea === 'mall' ? 'Mall Area' : 'Standard Delivery'} - ${deliveryLocation}`,
       deliveryFee: finalFee,
       gpsCoords,
+      deliveryArea,
       couponCode: appliedCoupon ? appliedCoupon.code : null,
       discount: discountAmt,
       useWallet: useWalletPayment
     };
     try {
-      const r = await fetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(orderData) });
+      const r = await custFetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(orderData) });
       const d = await r.json();
       if (d.success) {
-        if (payMethod === 'mpesa' && finalTotal > 0) {
+        const amountDue = typeof d.totalPrice === 'number' ? d.totalPrice : finalTotal;
+        if (typeof d.totalPrice === 'number' && Math.abs(d.totalPrice - finalTotal) >= 1) {
+          showToast(`ℹ️ Prices were updated — your order total is KES ${d.totalPrice.toLocaleString()}`);
+        }
+        if (payMethod === 'mpesa' && amountDue > 0) {
           // Trigger STK push
           setStkStatus('waiting');
           setStkError('');
           try {
-            const stkRes = await fetch(API_URL + '/mpesa/stk-push', {
+            const stkRes = await custFetch(API_URL + '/mpesa/stk-push', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 phone: customer.phone || customer.customerId,
-                amount: finalTotal,
+                amount: amountDue, // informational — the server charges the order's own balance
                 orderId: d.orderId
               })
             });
@@ -1779,8 +1926,9 @@ function App() {
           setUseWalletPayment(false);
           loadCustLoyalty();
           setScreen('confirmation');
-          triggerSimulatedNotifications();
         }
+      } else if (r.status === 401) {
+        // Session ended — the expiry listener already sent the shopper to sign in.
       } else {
         alert(d.error || 'Failed to place order');
       }
@@ -1800,7 +1948,6 @@ function App() {
         setUseWalletPayment(false);
         loadCustLoyalty();
         setScreen('confirmation');
-        triggerSimulatedNotifications();
       } catch (err) {
         alert('Offline and failed to save order.');
       }
@@ -1904,7 +2051,7 @@ function App() {
 
     if (token) {
       try {
-        const r = await fetch(`${API_URL}/notifications/register`, {
+        const r = await custFetch(`${API_URL}/notifications/register`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phone: customer.customerId, token, platform })
         });
@@ -1917,7 +2064,7 @@ function App() {
           // in-app feed (polled toasts) is what actually delivers updates.
           let serverReady = true;
           try {
-            const s = await (await fetch(`${API_URL}/notifications/status`)).json();
+            const s = await (await custFetch(`${API_URL}/notifications/status`)).json();
             serverReady = !!(s && s.serverFcmConfigured);
           } catch (e) {}
           if (error === 'mock_fallback') {
@@ -1943,7 +2090,7 @@ function App() {
     try { localStorage.setItem('blitz_push_enabled', 'false'); } catch (e) {}
     // Tell the server to forget this phone's tokens so pushes actually stop.
     try {
-      await fetch(`${API_URL}/notifications/unregister`, {
+      await custFetch(`${API_URL}/notifications/unregister`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: customer?.customerId || '' })
       });
@@ -1961,7 +2108,7 @@ function App() {
     if (!customer?.customerId || testPushBusy) return;
     setTestPushBusy(true);
     try {
-      const r = await fetch(`${API_URL}/notifications/test`, {
+      const r = await custFetch(`${API_URL}/notifications/test`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: customer.customerId })
       });
@@ -1976,7 +2123,7 @@ function App() {
   const submitReview = async () => {
     if (!reviewStars) { alert('Please tap a star rating first'); return; }
     try {
-      const r = await fetch(`${API_URL}/reviews`, {
+      const r = await custFetch(`${API_URL}/reviews`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ customerId: customer?.customerId || '', customerName: customer?.name || profile?.name || 'Customer', rating: reviewStars, message: reviewMsg })
       });
@@ -2026,9 +2173,8 @@ function App() {
     </div>
   );
 
-  // LOGIN — direct sign-in for returning numbers; a 6-digit OTP step for
-  // first-time numbers (the server verifies the number before creating the
-  // account, so referral codes only apply to verified sign-ins).
+  // LOGIN — every sign-in on a new device confirms the number with a 6-digit
+  // code; only then does the server issue this device's session.
   if (screen === 'login') return (
     <div className="screen center-screen">
       <div className="ambient ambient-a" /><div className="ambient ambient-b" />
@@ -2058,6 +2204,7 @@ function App() {
         ) : (
           <>
             <p className="muted">Sign in to start shopping</p>
+            {sessionNotice && <p className="form-error session-notice">{sessionNotice}</p>}
             <form onSubmit={handleLogin}>
               <input className="field" placeholder="Your name" value={name} onChange={e => setName(e.target.value)} required />
               <input className="field" type="tel" placeholder="Phone (07xx xxx xxx)" value={phone} onChange={e => setPhone(e.target.value)} required />
@@ -2071,19 +2218,31 @@ function App() {
     </div>
   );
 
+  const goTab = (t) => {
+    if (t === 'home') setActiveCategory('All');
+    setScreen(t);
+  };
+  const NAV_TABS = [
+    { id: 'home', icon: '🏠', label: 'Home', on: ['home', 'category'] },
+    { id: 'offers', icon: '🏷️', label: 'Offers', on: ['offers'] },
+    { id: 'cart', icon: '🛒', label: 'Cart', on: ['cart', 'checkout'], dot: cartCount > 0 },
+    { id: 'orders', icon: '📦', label: 'Orders', on: ['orders'] },
+    { id: 'profile', icon: '👤', label: 'Me', on: ['profile', 'settings', 'rewards', 'edit-profile', 'about', 'favorites', 'referral', 'review', 'share'] },
+  ];
   const BottomNav = () => (
     <>
       {/* Phone: fixed bottom tab bar (hidden on desktop by CSS). */}
       <nav className="bottomnav">
-        <button className={['home', 'category'].includes(screen) ? 'on' : ''} onClick={() => { setActiveCategory('All'); setScreen('home'); }}><span>🏠</span>Home</button>
-        <button className={screen === 'cart' ? 'on' : ''} onClick={() => setScreen('cart')}><span>🛒{cartCount > 0 && <i className="dot" />}</span>Cart</button>
-        <button className={['profile', 'orders'].includes(screen) ? 'on' : ''} onClick={() => setScreen('profile')}><span>👤</span>Profile</button>
+        {NAV_TABS.map(t => (
+          <button key={t.id} className={t.on.includes(screen) ? 'on' : ''} onClick={() => goTab(t.id)}><span>{t.icon}{t.dot && <i className="dot" />}</span>{t.label}</button>
+        ))}
       </nav>
       {/* Desktop: PC-style nav strip pinned under the header (hidden on phones). */}
       <nav className="desktopnav">
-        <button className={['home', 'category'].includes(screen) ? 'on' : ''} onClick={() => { setActiveCategory('All'); setScreen('home'); }}><span>🏠</span>Home</button>
-        <button className={screen === 'cart' ? 'on' : ''} onClick={() => setScreen('cart')}><span>🛒{cartCount > 0 && <i className="dot" />}</span>Cart</button>
-        <button className={['profile', 'orders'].includes(screen) ? 'on' : ''} onClick={() => setScreen('profile')}><span>👤</span>Profile</button>
+        {NAV_TABS.map(t => (
+          <button key={t.id} className={t.on.includes(screen) ? 'on' : ''} onClick={() => goTab(t.id)}><span>{t.icon}{t.dot && <i className="dot" />}</span>{t.label}</button>
+        ))}
+        <button className={screen === 'settings' ? 'on' : ''} onClick={() => setScreen('settings')}><span>⚙️</span>Settings</button>
       </nav>
     </>
   );
@@ -2326,71 +2485,7 @@ function App() {
           </div>
         )}
 
-        {/* Wallet Points Conversion Modal */}
-        {showWalletModal && (
-          <div className="futuristic-modal-overlay" onClick={() => setShowWalletModal(false)}>
-            <div className="futuristic-modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: '340px' }}>
-              <button className="modal-close-btn" onClick={() => setShowWalletModal(false)}>✕</button>
-              <h2 className="modal-title" style={{ color: 'var(--gold)' }}>🪙 Convert Points to Cash</h2>
-              <p className="modal-subtitle" style={{ marginBottom: 16 }}>Redeem your loyalty points directly into your virtual wallet at a rate of 5 points = KES 1.</p>
-              
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
-                <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 10, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span className="muted" style={{ fontSize: '.75rem' }}>Available Points</span>
-                  <b style={{ fontSize: '1.05rem', color: 'var(--orange)' }}>{custLoyalty?.points || 0} PTS</b>
-                </div>
-                
-                <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 10, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span className="muted" style={{ fontSize: '.75rem' }}>Est. Wallet Value</span>
-                  <b style={{ fontSize: '1.05rem', color: 'var(--green)' }}>KES {Math.floor((custLoyalty?.points || 0) / 5).toLocaleString('en-KE')}</b>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <label style={{ fontSize: '.75rem', color: '#fff', fontWeight: 'bold' }}>Points to convert:</label>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input 
-                      type="number"
-                      className="field" 
-                      placeholder="e.g. 50" 
-                      value={pointsToConvert} 
-                      onChange={e => setPointsToConvert(e.target.value)} 
-                      style={{ flex: 1, padding: '10px', borderRadius: '8px', fontSize: '.9rem' }} 
-                    />
-                    <button 
-                      type="button" 
-                      className="btn-ghost" 
-                      onClick={() => setPointsToConvert(String(Math.floor((custLoyalty?.points || 0) / 5) * 5))}
-                      style={{ padding: '0 10px', fontSize: '.72rem', borderRadius: 8 }}
-                    >
-                      Max
-                    </button>
-                  </div>
-                  <small className="muted" style={{ fontSize: '.68rem' }}>* Must be a multiple of 5 points (5 PTS = KES 1)</small>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: 10 }}>
-                <button 
-                  type="button" 
-                  className="btn-ghost" 
-                  onClick={() => setShowWalletModal(false)}
-                  style={{ flex: 1, padding: '10px' }}
-                >
-                  Cancel
-                </button>
-                <button 
-                  type="button" 
-                  className="btn-neon" 
-                  onClick={handleConvertToWallet}
-                  style={{ flex: 1, padding: '10px', background: 'var(--grad)', color: '#000' }}
-                  disabled={!pointsToConvert || parseInt(pointsToConvert) <= 0 || parseInt(pointsToConvert) > (custLoyalty?.points || 0) || parseInt(pointsToConvert) % 5 !== 0}
-                >
-                  Convert
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        {renderWalletModal()}
 
         {/* AI Assistant Chat Drawer */}
         {showAiBot && (
@@ -2794,7 +2889,7 @@ function App() {
   if (screen === 'confirmation') return (
     <div className="screen center-screen"><div className="ambient ambient-a" />
       <div className="confirm-card"><div className="confirm-mark">⚡</div><h1>Order placed!</h1>
-        <p className="muted">Brilliant is preparing your order. Watch your phone for updates.</p>
+        <p className="muted">Blitz Mall is preparing your order. Watch your phone for updates.</p>
         {lastOrderWasDelivery && (
           <p className="muted" style={{ fontSize: '.75rem', marginTop: 6, background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.25)', borderRadius: 10, padding: '8px 12px' }}>
             🛵 Delivery order — our rider will confirm your transport fee and notify you with the final amount to pay.
@@ -2807,344 +2902,96 @@ function App() {
   );
 
   // PROFILE (doubles as settings)
-  if (screen === 'profile') return (
-    <div className="screen with-nav">
-      <header className="topbar"><div className="topbar-brand"><BlitzLogo size={30} /><span>BLITZ<b>MALL</b></span></div></header>
-      <div className="scroll profile-scroll">
-        <div className="profile-head">
-          <Avatar profile={profile} size={88} />
-          <h2>{profile?.name || customer?.name}</h2>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 999, padding: '7px 16px', fontSize: '.88rem', fontWeight: 700, color: 'var(--gold)', letterSpacing: '.5px' }}>
-            📱 {customer?.customerId || profile?.phone}
-          </div>
-          <span className="muted" style={{ fontSize: '.66rem', maxWidth: 280, textAlign: 'center', lineHeight: 1.4 }}>
-            Points, wallet &amp; orders are tied to this number — sign in with the same number on every device to keep them together.
-          </span>
-          {custAccount?.isOwner && (
-            <span style={{ marginTop: 8, background: 'linear-gradient(135deg, #ffd24a, #ff7a1a)', color: '#000', fontWeight: 'bold', fontSize: '.7rem', padding: '4px 14px', borderRadius: 20, letterSpacing: '.5px', boxShadow: '0 4px 12px rgba(255, 178, 26, 0.45)' }}>👑 OWNER</span>
-          )}
+  // ===== ME AREA (profile hub, rewards, settings, edit profile, about) =====
+  const openPcDownload = async () => {
+    if (!pcLatest) return;
+    try {
+      const bridge = typeof window !== 'undefined' ? window.blitzUpdater : null;
+      if (bridge && typeof bridge.openDownload === 'function') await bridge.openDownload(pcLatest.downloadUrl);
+      else window.open(pcLatest.downloadUrl, '_blank');
+      showToast(`⬇️ Downloading v${pcLatest.version} — run the installer to update`);
+    } catch (e) { showToast('Could not open the download — check your browser'); }
+  };
+  const meCtx = {
+    customer, profile, saveProfile, onUpload, Avatar, AVATARS, getAvatarSrc, BlitzLogo,
+    custAccount, custLoyalty, loyaltyRewards, redeemReward,
+    myOrders, favorites, cartCount,
+    go: setScreen, goBack, showToast,
+    openWallet: () => { loadCustLoyalty(); setShowWalletModal(true); },
+    notifEnabled, enablePush: registerPushToken, disablePush, sendTestPush, testPushBusy,
+    perfMode,
+    setPerfMode: (v) => { setPerfMode(v); try { localStorage.setItem('blitz_perf_mode', String(v)); } catch (e) {} },
+    defaultArea,
+    setDefaultArea: (v) => { setDefaultAreaState(v); setDeliveryArea(v); try { localStorage.setItem('blitz_default_area', v); } catch (e) {} },
+    pendingOfflineOrders,
+    syncOfflineOrders: async () => {
+      await syncOfflineOrders();
+      try { setPendingOfflineOrders(JSON.parse(localStorage.getItem(OFFLINE_ORDERS_KEY) || '[]').length); } catch {}
+      showToast('📤 Sent waiting orders');
+    },
+    clearCachedData: () => {
+      try {
+        Object.keys(localStorage)
+          .filter(k => k === PRODUCTS_CACHE_KEY || k.startsWith(ORDERS_CACHE_KEY) || k === 'bm_cached_products')
+          .forEach(k => localStorage.removeItem(k));
+      } catch (e) {}
+      loadProducts();
+      loadMyOrders();
+      showToast('🧹 Cache cleared — fresh data loading');
+    },
+    update: {
+      check: handleManualUpdateCheck, checking: checkingUpdate, status: pcUpdateStatus,
+      pcAppVersion, pcLatest, openDownload: openPcDownload,
+      ready: pcUpdateReady, apply: applyUpdateNow, restartIn
+    },
+    bundleVersion,
+    isNativeApp: !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()),
+    isDesktopApp: !!(typeof window !== 'undefined' && window.blitzUpdater),
+    shopInfo,
+    signOut: handleLogout,
+    signOutEverywhere: async () => {
+      try { await custFetch(`${API_URL}/auth/logout-all`, { method: 'POST' }); } catch (e) {}
+      handleLogout();
+      showToast('🛡️ Signed out of all devices');
+    },
+    exitApp
+  };
+  const ME_SCREENS = { profile: MeScreen, rewards: RewardsScreen, settings: SettingsScreen, 'edit-profile': EditProfileScreen, about: AboutScreen };
+  if (ME_SCREENS[screen]) {
+    const Screen = ME_SCREENS[screen];
+    return (
+      <div className="screen with-nav">
+        <div className="scroll" style={{ padding: 0 }}>
+          <Screen ctx={meCtx} />
         </div>
-
-        {/* Choose an avatar — kept up top so it's the first thing you see */}
-        <h3 className="section-h">Choose an avatar</h3>
-        <div className="avatar-row" style={{ marginBottom: 4 }}>
-          {AVATARS.map(a => (
-            <button key={a.id} className={`avatar-pick ${profile?.avatarId === a.id && !profile?.photo ? 'sel' : ''}`}
-              onClick={() => saveProfile({ ...(profile || {}), avatarId: a.id, photo: null })}>
-              <img src={getAvatarSrc(a.src)} alt={a.id} />
-            </button>
-          ))}
-          <label className="avatar-upload">＋<input type="file" accept="image/*" onChange={onUpload} hidden /></label>
-        </div>
-
-        {custLoyalty && (
-          <div className="loyalty-card-wrapper" style={{ margin: '16px 14px', background: 'var(--grad)', borderRadius: '14px', padding: '16px', color: '#000', position: 'relative', overflow: 'hidden', boxShadow: '0 8px 20px rgba(255, 122, 26, 0.25)' }}>
-            <div style={{ position: 'absolute', right: '-20px', bottom: '-20px', fontSize: '6rem', opacity: 0.12, transform: 'rotate(-15deg)' }}>⚡</div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
-              <div>
-                <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 'bold', opacity: 0.7 }}>Blitz Loyalty Card</span>
-                <h3 style={{ margin: '4px 0 0 0', fontFamily: 'Unbounded, sans-serif', fontSize: '1.2rem' }}>{custLoyalty.tier} Tier</h3>
-              </div>
-              <span style={{ fontSize: '1.5rem' }}>🎁</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
-              <div>
-                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Accumulated Points</span>
-                <div style={{ fontFamily: 'Unbounded, sans-serif', fontSize: '1.5rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>{custLoyalty.points} PTS</div>
-              </div>
-              {(() => {
-                // Cashback value follows the owner's redemption currency
-                // (Admin → Loyalty Controls → Points Redemption Store).
-                const tiers = (custAccount?.redeemTiers || []).filter(t => t && parseFloat(t.points) > 0);
-                const rate = tiers.length ? Math.max(...tiers.map(t => (parseFloat(t.value) || 0) / parseFloat(t.points))) : 0;
-                return (
-                  <div style={{ textAlign: 'right' }}>
-                    <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Est. Cashback</span>
-                    <div style={{ fontSize: '1.1rem', fontWeight: 'bold', margin: '2px 0 0 0' }}>KES {Math.floor((custLoyalty.points || 0) * rate).toLocaleString('en-KE')}</div>
-                    {rate > 0 && <div style={{ fontSize: '0.62rem', opacity: 0.8, marginTop: 2 }}>1 pt = KES {Math.round(rate * 100) / 100}</div>}
-                  </div>
-                );
-              })()}
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '14px', borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: '10px' }}>
-              <div>
-                <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Virtual Wallet Cash</span>
-                <div style={{ fontFamily: 'Unbounded, sans-serif', fontSize: '1.25rem', fontWeight: 'bold', margin: '2px 0 0 0', color: '#11998e' }}>KES {(custAccount?.walletBalance || 0).toLocaleString('en-KE')}</div>
-              </div>
-              <button
-                type="button"
-                className="btn-neon"
-                onClick={() => setShowWalletModal(true)}
-                style={{
-                  padding: '6px 12px',
-                  fontSize: '.72rem',
-                  background: '#000',
-                  color: '#fff',
-                  border: '1px solid #000',
-                  boxShadow: 'none'
-                }}
-              >
-                🪙 Convert Points
-              </button>
-            </div>
-            <small style={{ display: 'block', marginTop: '10px', fontSize: '0.65rem', opacity: 0.7, borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: '6px' }}>
-              {(() => { const ts = [...(custAccount?.redeemTiers || [])].sort((a, b) => (parseFloat(a.points) || 0) - (parseFloat(b.points) || 0)); const base = ts[0]; return base ? `* ${base.points} PTS = KES ${base.value} cashback. Trade points in the Redemption Store or ask cashier to redeem at counter!` : '* Trade points in the Redemption Store or ask cashier to redeem at counter!'; })()}
-            </small>
-          </div>
-        )}
-
-        {/* Account summary — everything keyed by the phone number they signed in with */}
-        {custAccount && (
-          <div style={{ margin: '16px 14px', background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: 16 }}>
-            <h3 style={{ margin: '0 0 10px 0', fontSize: '.95rem', fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)' }}>👤 My Account</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <div style={{ background: 'var(--bg-2)', borderRadius: 10, padding: '10px 12px' }}>
-                <div className="muted" style={{ fontSize: '.68rem' }}>Orders placed</div>
-                <b style={{ fontSize: '1.05rem' }}>{custAccount.orderCount || 0}</b>
-              </div>
-              <div style={{ background: 'var(--bg-2)', borderRadius: 10, padding: '10px 12px' }}>
-                <div className="muted" style={{ fontSize: '.68rem' }}>Total spent</div>
-                <b style={{ fontSize: '1.05rem' }}>KES {(custAccount.totalSpent || 0).toLocaleString('en-KE')}</b>
-              </div>
-              <div style={{ background: custAccount.outstandingDebt > 0 ? 'rgba(255,45,85,0.12)' : 'var(--bg-2)', borderRadius: 10, padding: '10px 12px', border: custAccount.outstandingDebt > 0 ? '1px solid rgba(255,45,85,0.5)' : 'none' }}>
-                <div className="muted" style={{ fontSize: '.68rem' }}>Outstanding balance</div>
-                <b style={{ fontSize: '1.05rem', color: custAccount.outstandingDebt > 0 ? '#ff6b81' : 'var(--text)' }}>KES {(custAccount.outstandingDebt || 0).toLocaleString('en-KE')}</b>
-              </div>
-              <div style={{ background: 'var(--bg-2)', borderRadius: 10, padding: '10px 12px' }}>
-                <div className="muted" style={{ fontSize: '.68rem' }}>Shopper tier</div>
-                <b style={{ fontSize: '.95rem', color: 'var(--gold)' }}>{TIER_LABELS[custAccount.tier] || custAccount.tier || 'New'}</b>
-              </div>
-            </div>
-            {custAccount.memberSince && (
-              <div className="muted" style={{ fontSize: '.7rem', marginTop: 10 }}>
-                📅 Member since {new Date(custAccount.memberSince).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}
-              </div>
-            )}
-            {custAccount.outstandingDebt > 0 && (
-              <div style={{ fontSize: '.72rem', color: '#ff6b81', marginTop: 8, background: 'rgba(255,45,85,0.08)', padding: '8px 10px', borderRadius: 8 }}>
-                ⚠️ You have an outstanding balance of KES {custAccount.outstandingDebt.toLocaleString('en-KE')} — please clear it at the counter to keep your account active.
-              </div>
-            )}
-            {custAccount.vouchers && custAccount.vouchers.length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontSize: '.78rem', color: 'var(--green)', marginBottom: 6 }}>🎟️ My vouchers:</div>
-                {custAccount.vouchers.filter(v => !v.used).map((v, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-2)', border: '1px dashed var(--gold)', borderRadius: 8, padding: '8px 10px', marginBottom: 6, fontSize: '.78rem' }}>
-                    <b style={{ fontFamily: 'monospace', color: 'var(--gold)' }}>{v.code}</b>
-                    <span className="muted">{v.type === 'percent' ? `${v.value}% off` : v.type === 'free_delivery' ? 'Free delivery' : `KES ${v.value} off`}{v.minPurchase ? ` · min KES ${v.minPurchase}` : ''}</span>
-                  </div>
-                ))}
-                {custAccount.vouchers.filter(v => !v.used).length === 0 && (
-                  <div className="muted" style={{ fontSize: '.72rem' }}>All your vouchers have been used 🎉</div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {custLoyalty && loyaltyRewards.length > 0 && (
-          <div style={{margin: '16px 14px', background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '16px'}}>
-            <h3 style={{margin: '0 0 10px 0', fontSize: '.95rem', fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)'}}>🎁 Points Redemption Store</h3>
-            <p className="muted" style={{fontSize: '.75rem', marginBottom: 12}}>Trade your accumulated loyalty points for checkout coupon codes!</p>
-            <div style={{display:'flex', flexDirection:'column', gap:8}}>
-              {loyaltyRewards.map(r => {
-                const canRedeem = custLoyalty.points >= r.pointsCost;
-                return (
-                  <div key={r._id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'var(--bg-2)', border:'1px solid var(--line)', borderRadius:10, padding:'10px 12px'}}>
-                    <div>
-                      <b style={{fontSize:'.82rem', color:'#fff'}}>{r.name}</b>
-                      <div className="muted" style={{fontSize:'.7rem', marginTop:2}}>Costs: <b style={{color:'var(--orange)'}}>{r.pointsCost} PTS</b> · Value: KES {r.rewardValue}</div>
-                    </div>
-                    <button 
-                      className="btn-neon" 
-                      disabled={!canRedeem} 
-                      onClick={() => redeemReward(r._id)} 
-                      style={{
-                        padding: '6px 12px', 
-                        fontSize: '.72rem', 
-                        background: canRedeem ? 'var(--grad)' : 'var(--line)',
-                        borderColor: canRedeem ? 'transparent' : 'var(--line)',
-                        color: canRedeem ? '#000' : 'var(--muted)'
-                      }}
-                    >
-                      Trade
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        <h3 className="section-h">Preferences</h3>
-        <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <b style={{ fontSize: '.88rem', color: '#fff' }}>🔔 Push Notifications</b>
-            <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>Order updates & promo alerts</div>
-          </div>
-          <button
-            className="btn-neon"
-            onClick={() => (notifEnabled ? disablePush() : registerPushToken())}
-            style={{
-              padding: '6px 12px',
-              fontSize: '.75rem',
-              background: notifEnabled ? 'var(--green)' : 'var(--line)',
-              color: notifEnabled ? '#000' : 'var(--text)',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: 'pointer'
-            }}
-          >
-            {notifEnabled ? 'ON' : 'OFF'}
-          </button>
-        </div>
-
-        <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '10px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <b style={{ fontSize: '.82rem', color: '#fff' }}>Test push on this device</b>
-            <div style={{ fontSize: '.7rem', color: 'var(--muted)', marginTop: 2 }}>Confirms push delivery works here (turn notifications on first)</div>
-          </div>
-          <button
-            className="btn-neon"
-            onClick={sendTestPush}
-            disabled={!notifEnabled || testPushBusy}
-            style={{
-              padding: '6px 12px',
-              fontSize: '.75rem',
-              background: notifEnabled ? 'var(--grad)' : 'var(--line)',
-              color: notifEnabled ? '#000' : 'var(--muted)',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: notifEnabled && !testPushBusy ? 'pointer' : 'not-allowed',
-              opacity: notifEnabled ? 1 : 0.6
-            }}
-          >
-            {testPushBusy ? 'Sending…' : 'Send test'}
-          </button>
-        </div>
-
-        <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <b style={{ fontSize: '.88rem', color: '#fff' }}>Performance Mode</b>
-            <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>Disable blurs & animations on low-end devices</div>
-          </div>
-          <button 
-            className="btn-neon" 
-            onClick={() => {
-              const newVal = !perfMode;
-              setPerfMode(newVal);
-              try { localStorage.setItem('blitz_perf_mode', String(newVal)); } catch (e) {}
-            }}
-            style={{
-              padding: '6px 12px', 
-              fontSize: '.75rem',
-              background: perfMode ? 'var(--green)' : 'var(--line)',
-              color: perfMode ? '#000' : 'var(--text)',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: 'pointer'
-            }}
-          >
-            {perfMode ? 'ON (Fast)' : 'OFF (Rich)'}
-          </button>
-        </div>
-
-        <div style={{ background: 'var(--card)', border: pcLatest ? '1px solid rgba(255,122,26,.55)' : '1px solid var(--line)', borderRadius: 14, padding: '12px 16px', margin: '0 14px 16px 14px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-            <div>
-              <b style={{ fontSize: '.88rem', color: '#fff' }}>🔄 Check for Updates</b>
-              <div style={{ fontSize: '.72rem', color: 'var(--muted)', marginTop: 2 }}>
-                {pcAppVersion ? `Desktop v${pcAppVersion}` : 'Sync changes & download new features'}{pcUpdateStatus ? ` · ${pcUpdateStatus}` : ''}
-              </div>
-            </div>
-            <button 
-              className="btn-neon" 
-              onClick={handleManualUpdateCheck}
-              disabled={checkingUpdate}
-              style={{
-                padding: '6px 12px', 
-                fontSize: '.75rem',
-                background: checkingUpdate ? 'var(--line)' : 'var(--grad)',
-                color: checkingUpdate ? 'var(--text)' : '#000',
-                border: 'none',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                flexShrink: 0
-              }}
-            >
-              {checkingUpdate ? 'Checking...' : 'Check'}
-            </button>
-          </div>
-          {pcLatest && (
-            <button
-              onClick={async () => {
-                try {
-                  const bridge = typeof window !== 'undefined' ? window.blitzUpdater : null;
-                  if (bridge && typeof bridge.openDownload === 'function') {
-                    await bridge.openDownload(pcLatest.downloadUrl);
-                  } else {
-                    window.open(pcLatest.downloadUrl, '_blank');
-                  }
-                  showToast(`⬇️ Downloading v${pcLatest.version} — run the installer to update`);
-                } catch (e) {
-                  console.error(e);
-                  showToast('Could not open the download — check your browser');
-                }
-              }}
-              style={{
-                marginTop: 10, width: '100%', padding: '10px 12px',
-                background: 'var(--grad)', color: '#000', border: 'none', borderRadius: 10,
-                fontWeight: 700, fontSize: '.82rem', cursor: 'pointer', boxShadow: '0 4px 14px rgba(255,122,26,.35)'
-              }}
-            >
-              ⬇️ Download New Version v{pcLatest.version}
-            </button>
-          )}
-          {pcUpdateReady && (
-            <button
-              onClick={applyUpdateNow}
-              style={{
-                marginTop: 10, width: '100%', padding: '10px 12px',
-                background: 'linear-gradient(135deg,#22c55e,#16a34a)', color: '#fff',
-                border: 'none', borderRadius: 10, fontWeight: 700, fontSize: '.82rem',
-                cursor: 'pointer', boxShadow: '0 4px 14px rgba(34,197,94,.35)'
-              }}
-            >
-              🔄 Restart to Update (applies now)
-            </button>
-          )}
-          {restartIn > 0 && (
-            <div style={{ marginTop: 8, fontSize: '.74rem', color: 'var(--gold)', textAlign: 'center' }}>
-              🔄 Restarting automatically in {restartIn}s to finish the update…{' '}
-              <button
-                onClick={() => setRestartIn(0)}
-                style={{ background: 'none', border: 'none', color: 'var(--orange)', textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit', fontSize: '.74rem', fontWeight: 700 }}
-              >
-                Cancel
-              </button>
-            </div>
-          )}
-        </div>
-
-        <h3 className="section-h">Account</h3>
-        <button className="row-btn" onClick={() => setScreen('favorites')}>❤️ My favorites<span>›</span></button>
-        <button className="row-btn" onClick={() => { loadMyOrders(); setScreen('orders'); }}>📦 My orders<span>›</span></button>
-        <button className="row-btn" onClick={() => setScreen('referral')}>🎁 Invite friends & earn points<span>›</span></button>
-        <button className="row-btn" onClick={() => setScreen('cart')}>🛒 My cart<span>›</span></button>
-        <button className="row-btn" onClick={() => setScreen('share')}>📲 Share / Download App<span>›</span></button>
-        <button className="row-btn" onClick={() => { setReviewStars(0); setReviewMsg(''); setReviewSent(false); setScreen('review'); }}>⭐ Rate us / Feedback<span>›</span></button>
-        <button className="row-btn danger" onClick={() => { if (window.confirm('Exit BlitzMall app?')) exitApp(); }}>🚪 Exit App<span>›</span></button>
-        <button className="row-btn danger" onClick={handleLogout}>↩️ Logout<span>›</span></button>
+        <BottomNav />
+        {renderWalletModal()}
+        {renderToasts()}
       </div>
-      <BottomNav />
-      {renderToasts()}
-    </div>
-  );
+    );
+  }
 
   // ORDERS / TRACKING
+  const confirmCancelOrder = async () => {
+    const o = cancelOrderTarget;
+    setCancelOrderTarget(null);
+    if (!o) return;
+    try {
+      const r = await custFetch(`${API_URL}/customer-orders/${o._id}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const d = await r.json().catch(() => ({}));
+      if (d.success) {
+        showToast(d.message || '❌ Order cancelled');
+        loadMyOrders();
+        loadCustLoyalty();
+      } else {
+        showToast(d.error || 'Could not cancel the order');
+      }
+    } catch (e) { showToast('Could not cancel — check your connection'); }
+  };
+
   if (screen === 'orders') return (
     <div className="screen with-nav">
-      <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('profile')}>‹</button><h2 className="topbar-title">My Orders</h2></header>
+      <header className="topbar"><h2 className="topbar-title">📦 My Orders</h2><button className="icon-btn" onClick={loadMyOrders} aria-label="Refresh orders">⟳</button></header>
       <div className="scroll">
         {myOrders.length === 0 ? (
           <div className="empty-cart"><span>📦</span><p>No orders yet</p><button className="btn-ghost" onClick={() => setScreen('home')}>Start shopping</button></div>
@@ -3160,6 +3007,22 @@ function App() {
             <div className="order-card" key={o._id}>
               <div className="order-top"><b>KES {o.totalPrice}</b><span className="muted">{new Date(o.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}</span></div>
               <div className="order-items">{o.items.map((it, k) => <span key={k}>{it.name} ×{it.quantity}</span>)}</div>
+              <div className="order-badges">
+                {o.status === 'cancelled' ? (
+                  <span className="order-badge red">❌ Cancelled{o.refundDue > 0 ? ` · KES ${o.refundDue} refund due from the shop` : ''}</span>
+                ) : o.paymentStatus === 'paid' ? (
+                  <span className="order-badge green">✅ Paid{o.paymentMethod === 'mpesa' ? ' · M-Pesa' : ''}</span>
+                ) : o.paymentStatus === 'partial' ? (
+                  <span className="order-badge gold">💳 Part-paid · KES {Math.max(0, (o.totalPrice || 0) - (o.amountPaid || 0))} due</span>
+                ) : o.paymentMethod === 'mpesa' ? (
+                  <span className="order-badge gold">⏳ Awaiting M-Pesa payment</span>
+                ) : (
+                  <span className="order-badge">💵 Pay on delivery</span>
+                )}
+                {o.walletApplied > 0 && <span className="order-badge">🪙 KES {o.walletApplied} wallet</span>}
+                {o.discount > 0 && <span className="order-badge">🏷️ KES {o.discount} off</span>}
+                {o.deliveryLocation && !o.deliveryFeeConfirmed && o.status !== 'cancelled' && <span className="order-badge">🚚 Transport fee being confirmed</span>}
+              </div>
               
               {o.status === 'on_the_way' && (
                 <>
@@ -3189,18 +3052,26 @@ function App() {
                 </div>
               )}
 
-              <div className="tracker">{steps.map((s, i) => (
-                <div className={`t-step ${i <= idx ? 'done' : ''} ${i === idx ? 'now' : ''}`} key={s}><i /><small>{stepLabel[s]}</small></div>
-              ))}</div>
+              {o.status !== 'cancelled' && (
+                <div className="tracker">{steps.map((s, i) => (
+                  <div className={`t-step ${i <= idx ? 'done' : ''} ${i === idx ? 'now' : ''}`} key={s}><i /><small>{stepLabel[s]}</small></div>
+                ))}</div>
+              )}
 
-              <button type="button" className="btn-ghost small" onClick={() => reOrderPastOrder(o)} style={{ marginTop: '12px', fontSize: '0.8rem', width: '100%', padding: '6px' }}>
-                🔄 Order Again
-              </button>
+              <div className="order-actions">
+                {o.status === 'pending' && (
+                  <button type="button" className="btn-ghost small order-cancel" onClick={() => setCancelOrderTarget(o)}>Cancel order</button>
+                )}
+                <button type="button" className="btn-ghost small" onClick={() => reOrderPastOrder(o)}>🔄 Order again</button>
+              </div>
             </div>
           );
         })}
       </div>
       <BottomNav />
+      <ConfirmSheet open={!!cancelOrderTarget} title="Cancel this order?"
+        message={cancelOrderTarget ? `KES ${cancelOrderTarget.totalPrice} order.${cancelOrderTarget.walletApplied > 0 ? ` KES ${cancelOrderTarget.walletApplied} goes back to your wallet.` : ''}${(cancelOrderTarget.amountPaid || 0) > 0 ? ' Your M-Pesa payment will be refunded by the shop.' : ''}` : ''}
+        confirmLabel="Cancel order" danger onCancel={() => setCancelOrderTarget(null)} onConfirm={confirmCancelOrder} />
       {renderToasts()}
     </div>
   );
@@ -3208,7 +3079,7 @@ function App() {
   // FAVORITES — products the shopper hearted on the grid or detail page.
   if (screen === 'favorites') return (
     <div className="screen with-nav">
-      <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('profile')}>‹</button><h2 className="topbar-title">❤️ My Favorites</h2></header>
+      <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button><h2 className="topbar-title">❤️ My Favorites</h2></header>
       <div className="scroll">
         <div className="offers-hero">
           <h2>❤️ Your favorites</h2>
@@ -3306,14 +3177,14 @@ function App() {
   // REVIEW
   if (screen === 'review') return (
     <div className="screen with-nav">
-      <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('profile')}>‹</button><h2 className="topbar-title">Rate us</h2></header>
+      <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button><h2 className="topbar-title">Rate us</h2></header>
       <div className="scroll">
         {reviewSent ? (
           <div className="empty-cart"><span>💛</span><p>Thank you for your feedback!</p>
             <button className="btn-ghost" onClick={() => setScreen('home')}>Back to shop</button></div>
         ) : (
           <div className="review-box">
-            <h3 className="section-h">How was your experience with Brilliant?</h3>
+            <h3 className="section-h">How was your experience with Blitz Mall?</h3>
             <div className="star-pick">
               {[1, 2, 3, 4, 5].map(n => (
                 <button key={n} className={n <= reviewStars ? 'on' : ''} onClick={() => setReviewStars(n)}>★</button>
@@ -3333,13 +3204,13 @@ function App() {
   if (screen === 'share') {
     // Prefer the live "latest APK" reported by the server; fall back to the
     // known URL if the server can't be reached.
-    const apkUrl = appInfo?.apkUrl || 'https://blitzmall-backend.onrender.com/apk/blitzmall-v3.apk';
+    const apkUrl = appInfo?.apkUrl || 'https://blitzmall-backend.onrender.com/';
     const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(apkUrl)}`;
     
     return (
       <div className="screen with-nav">
         <header className="topbar">
-          <button className="icon-btn back" onClick={() => setScreen('profile')}>‹</button>
+          <button className="icon-btn back" onClick={goBack}>‹</button>
           <h2 className="topbar-title">Share App</h2>
         </header>
         <div className="scroll">
@@ -3388,12 +3259,12 @@ function App() {
   // REFERRAL — share your phone code so friends get a welcome bonus and you
   // earn loyalty points every time someone new signs up with your code.
   if (screen === 'referral') {
-    const myCode = customer?.customerId || '';
+    const myCode = custAccount?.referralCode || '…';
     const refCount = custAccount?.referralCount || 0;
-    const waMsg = encodeURIComponent(`Hey! 👋 Shop at Blitz Mall and we BOTH earn bonus loyalty points. Use my referral code when signing in: ${myCode} — download the app: https://blitzmall-backend.onrender.com/apk/blitzmall-v3.apk`);
+    const waMsg = encodeURIComponent(`Hey! 👋 Shop at Blitz Mall and we BOTH earn bonus loyalty points. Use my referral code when signing in: ${myCode} — download the app: ${appInfo?.apkUrl || 'https://blitzmall-backend.onrender.com/'}`);
     return (
       <div className="screen with-nav">
-        <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('profile')}>‹</button><h2 className="topbar-title">Invite Friends</h2></header>
+        <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button><h2 className="topbar-title">Invite Friends</h2></header>
         <div className="scroll">
           <div className="referral-hero">
             <span style={{ fontSize: '3rem', display: 'block' }}>🎁</span>

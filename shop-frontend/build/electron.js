@@ -29,10 +29,34 @@ const iconPath = fs.existsSync(path.join(BUILD_DIR, 'app-icon.ico'))
   ? path.join(BUILD_DIR, 'app-icon.ico')
   : path.join(APP_ROOT, 'public', 'app-icon.ico');
 
+// ===== Window state (size, position, maximized) remembered between launches =====
+const windowStatePath = () => path.join(app.getPath('userData'), 'window-state.json');
+function loadWindowState() {
+  try { return JSON.parse(fs.readFileSync(windowStatePath(), 'utf8')); } catch (e) { return {}; }
+}
+function trackWindowState(win) {
+  let timer = null;
+  const save = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      try {
+        if (win.isDestroyed()) return;
+        const state = { ...(win.isMaximized() ? loadWindowState() : win.getBounds()), maximized: win.isMaximized() };
+        fs.writeFileSync(windowStatePath(), JSON.stringify(state));
+      } catch (e) { /* never block the app on this */ }
+    }, 400);
+  };
+  ['resize', 'move', 'maximize', 'unmaximize'].forEach(ev => win.on(ev, save));
+}
+
+let mainWindow = null;
+
 function createWindow() {
+  const saved = loadWindowState();
   const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: saved.width || 1280,
+    height: saved.height || 800,
+    ...(Number.isFinite(saved.x) && Number.isFinite(saved.y) ? { x: saved.x, y: saved.y } : {}),
     minWidth: 1024,
     minHeight: 720,
     title: "Blitz Mall HQ v" + app.getVersion(),
@@ -49,6 +73,20 @@ function createWindow() {
   });
 
   win.setMenuBarVisibility(false);
+  mainWindow = win;
+  if (saved.maximized) win.maximize();
+  trackWindowState(win);
+
+  // Links meant for the outside world (WhatsApp, maps, phone, GitHub
+  // downloads) open in the user's real browser/app — never inside the shop window.
+  const isExternal = (url) => /^(https?:|mailto:|tel:)/i.test(url) && !url.startsWith('file:');
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isExternal(url)) shell.openExternal(url).catch(() => {});
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (isExternal(url)) { event.preventDefault(); shell.openExternal(url).catch(() => {}); }
+  });
 
   // Branded loading splash while React boots up
   win.webContents.on('did-start-loading', () => {
@@ -132,7 +170,23 @@ function createWindow() {
   });
 }
 
+// One running copy only: launching the app again just brings the open window
+// to the front (two copies would double every notification and sale prompt).
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return; // a second copy — it is quitting
   createWindow();
 
   // Harden the auto-updater. Two gotchas fixed here:
@@ -297,6 +351,20 @@ app.whenReady().then(() => {
   // Apply a downloaded update right now (the "Restart to update" button).
   // Apply the downloaded update NOW: silent install + force relaunch, so the
   // app swaps itself to the new build without the user running anything.
+  // ===== Settings bridge (preload: window.blitzDesktop) =====
+  ipcMain.handle('app:info', async () => ({
+    version: app.getVersion(),
+    platform: process.platform,
+    electron: process.versions.electron
+  }));
+  ipcMain.handle('app:getOpenAtLogin', async () => {
+    try { return !!app.getLoginItemSettings().openAtLogin; } catch (e) { return false; }
+  });
+  ipcMain.handle('app:setOpenAtLogin', async (_evt, on) => {
+    try { app.setLoginItemSettings({ openAtLogin: !!on }); } catch (e) { /* unsupported platform */ }
+    try { return !!app.getLoginItemSettings().openAtLogin; } catch (e) { return false; }
+  });
+
   ipcMain.handle('updater:install', async () => {
     try {
       logUpdater('applying update: quitAndInstall(silent, relaunch)');

@@ -87,14 +87,77 @@ describe('OTP phone verification (first-time sign-in)', () => {
     expect(res.body.error).toMatch(/no pending code/i);
   });
 
-  it('lets a verified customer sign straight back in without OTP (returning)', async () => {
+  it('issues a customer session token only after the code is verified', async () => {
     const phone = newPhone();
     const { body } = await requestOtp(phone);
-    await verifyOtp(phone, body.devOtp);
+    expect(body.token).toBeUndefined(); // requesting a code never signs you in
+    const ok = await verifyOtp(phone, body.devOtp);
+    expect(ok.body.token).toBeTruthy();
+    const me = await request(app).get('/api/auth/me').set({ Authorization: 'Bearer ' + ok.body.token });
+    expect(me.statusCode).toBe(200);
+    expect(me.body.customerId).toBe(phone);
+  });
+
+  it('a RETURNING number must verify a fresh code too — a phone number alone never signs in', async () => {
+    const phone = newPhone();
+    const first = await requestOtp(phone);
+    await verifyOtp(phone, first.body.devOtp);
+    // Skip the 30s resend cooldown (test hook) and sign in again as if on a new device.
+    _test.otpStore.get(phone).lastSentAt = 0;
     const again = await requestOtp(phone, 'Test Shopper');
-    expect(again.body.success).toBe(true);
+    expect(again.body.success).toBe(false);
+    expect(again.body.otpRequired).toBe(true);
     expect(again.body.returning).toBe(true);
-    expect(again.body.otpRequired).toBeFalsy();
+    expect(again.body.token).toBeUndefined();
+    const wrong = await verifyOtp(phone, again.body.devOtp === '111111' ? '222222' : '111111');
+    expect(wrong.statusCode).toBe(400);
+    const ok = await verifyOtp(phone, again.body.devOtp);
+    expect(ok.body.success).toBe(true);
+    expect(ok.body.returning).toBe(true);
+    expect(ok.body.token).toBeTruthy();
+  });
+
+  it('with OTP_SCREEN_FALLBACK=false a failed SMS never reveals the code', async () => {
+    process.env.OTP_SCREEN_FALLBACK = 'false';
+    try {
+      const res = await requestOtp(newPhone());
+      expect(res.statusCode).toBe(503);
+      expect(res.body.devOtp).toBeUndefined();
+      expect(res.body.otpRequired).toBeFalsy();
+    } finally {
+      delete process.env.OTP_SCREEN_FALLBACK;
+    }
+  });
+
+  it('"sign out of all devices" kills every existing session token', async () => {
+    const phone = newPhone();
+    const { body } = await requestOtp(phone);
+    const { body: v } = await verifyOtp(phone, body.devOtp);
+    const auth = { Authorization: 'Bearer ' + v.token };
+    expect((await request(app).get('/api/auth/me').set(auth)).statusCode).toBe(200);
+    expect((await request(app).post('/api/auth/logout-all').set(auth)).statusCode).toBe(200);
+    const after = await request(app).get('/api/auth/me').set(auth);
+    expect(after.statusCode).toBe(401);
+    expect(after.body.authRequired).toBe(true);
+  });
+
+  it('gives every account a random referral code (never the phone number)', async () => {
+    const phone = newPhone();
+    const { body } = await requestOtp(phone);
+    const { body: v } = await verifyOtp(phone, body.devOtp);
+    expect(v.referralCode).toMatch(/^BM[A-Z0-9]{6}$/);
+    expect(v.referralCode).not.toContain(phone);
+  });
+
+  it('credits a referral made with the new random code', async () => {
+    const referrerPhone = newPhone();
+    const refReq = await requestOtp(referrerPhone, 'Referrer');
+    const { body: ref } = await verifyOtp(referrerPhone, refReq.body.devOtp);
+    const shopperPhone = newPhone();
+    const otpRes = await requestOtp(shopperPhone, 'Referee');
+    const ok = await verifyOtp(shopperPhone, otpRes.body.devOtp, { referralCode: ref.referralCode.toLowerCase() });
+    expect(ok.body.success).toBe(true);
+    expect(ok.body.referralBonus).toBeGreaterThan(0);
   });
 
   it('awards the referral bonus only after OTP verification', async () => {

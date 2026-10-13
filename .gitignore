@@ -7,3 +7,10 @@ shop-frontend/admin_diff.txt
 shop-frontend/app_diff.txt
 shop-frontend/fix_time.js
 .vscode/
+
+# IDE project files (Android Studio / IntelliJ)
+.idea/
+shop-frontend/android/.idea/
+
+# One-off archives and diffs
+shop-frontend/*.zip

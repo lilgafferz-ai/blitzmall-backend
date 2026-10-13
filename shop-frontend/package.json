@@ -1,6 +1,6 @@
 {
   "name": "shop-frontend",
-  "version": "0.1.49",
+  "version": "0.1.50",
   "private": true,
   "main": "main.js",
   "homepage": "./",
@@ -28,6 +28,10 @@
     "xlsx": "^0.18.5"
   },
   "scripts": {
+    "prestart": "node scripts/write-version.js",
+    "prebuild": "node scripts/write-version.js",
+    "prebuild:strict": "node scripts/write-version.js",
+    "prebuild:web": "node scripts/write-version.js",
     "start": "react-scripts start",
     "build": "react-scripts build && node scripts/make-ota-bundle.js",
     "build:web": "react-scripts build",

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './Admin.css';
+import AdminSettings from './screens/AdminSettings';
 import { cacheProducts, getCachedProducts, queueSale, syncQueuedSales, getPendingCount, onOnline, onOffline } from './offline';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import jsPDF from 'jspdf';
@@ -112,7 +113,7 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
     try {
       const res = await fetch(`${API_URL}/products/search-images`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ name, barcode })
       });
       const data = await res.json();
@@ -326,7 +327,9 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
   );
 });
 
-function Admin() {
+// onExit: back to the customer shop. Switching views never signs staff out —
+// the session persists until they sign out in Settings.
+function Admin({ onExit }) {
   // Staff session is restored from localStorage on every app launch — a logged-in
   // owner/cashier/manager stays logged in until they tap Exit (no timeout).
   const [loggedIn, setLoggedIn] = useState(() => {
@@ -652,10 +655,20 @@ function Admin() {
     } catch (e) { console.error('alarm', e); }
   };
 
-  const authGet = (url) => fetch(url, { headers: authHeaders() });
-  const authPost = (url, body) => fetch(url, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
-  const authPut = (url, body) => fetch(url, { method: 'PUT', headers: authHeaders(), body: JSON.stringify(body) });
-  const authDelete = (url) => fetch(url, { method: 'DELETE', headers: authHeaders() });
+  const authFetch = async (url, opts = {}) => {
+    const res = await fetch(url, { ...opts, headers: authHeaders() });
+    if (res.status === 401) {
+      try {
+        const d = await res.clone().json();
+        if (d && d.sessionRevoked) window.dispatchEvent(new Event('blitz_staff_session_revoked'));
+      } catch (e) { /* not JSON */ }
+    }
+    return res;
+  };
+  const authGet = (url) => authFetch(url);
+  const authPost = (url, body) => authFetch(url, { method: 'POST', body: JSON.stringify(body) });
+  const authPut = (url, body) => authFetch(url, { method: 'PUT', body: JSON.stringify(body) });
+  const authDelete = (url) => authFetch(url, { method: 'DELETE' });
 
   const checkAlerts = async () => {
     try {
@@ -979,7 +992,8 @@ const loadStockTransfers = async () => {
       else alert(d.error || 'Failed to create user');
     } catch (e) { console.error(e); alert('Network error'); }
   };
-  const delUser = async (id) => { if (!window.confirm('Delete this user?')) return; try { await authDelete(API_URL + '/admin/users/' + id); loadUsers(); } catch (e) { console.error(e); } };
+  const delUser = async (id) => { if (!window.confirm('Delete this user? They are signed out of every device immediately.')) return; try { const r = await authDelete(API_URL + '/admin/users/' + id); const d = await r.json(); if (!d.success) alert(d.error || 'Failed to delete user'); loadUsers(); } catch (e) { console.error(e); } };
+  const revokeUserSessions = async (id) => { if (!window.confirm('Sign this user out of every phone and PC now?')) return; try { const r = await authPost(API_URL + '/admin/users/' + id + '/revoke-sessions', {}); const d = await r.json(); alert(d.success ? 'Signed out everywhere.' : (d.error || 'Failed')); } catch (e) { console.error(e); } };
   const loadBranches = async () => { try { const r = await authGet(API_URL + '/admin/branches'); setBranches(asArray(await r.json())); } catch (e) { console.error(e); } };
   const loadPredictions = async () => {
     setPredLoading(true);
@@ -1046,7 +1060,7 @@ const loadStockTransfers = async () => {
   // Keep-alive ping to prevent Render backend from sleeping
   const keepAlive = async () => {
     try {
-      const r = await fetch(API_URL + '/admin/summary');
+      const r = await fetch(API_URL + '/health');
       if (!r.ok) throw new Error('Keep-alive ping returned ' + r.status);
       await r.json();
     } catch (e) { /* silently ignore, backend might be cold-starting */ }
@@ -1311,8 +1325,8 @@ const loadStockTransfers = async () => {
     try {
       const uname = user && user.username ? user.username : null;
       if (uname) fetch(API_URL + '/notifications/unregister', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: 'staff', staffUsername: uname })
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ role: 'staff' })
       }).catch(() => {});
     } catch (e) {}
     localStorage.removeItem('bm_token'); localStorage.removeItem('bm_user');
@@ -1320,6 +1334,20 @@ const loadStockTransfers = async () => {
     staffPushRegisteredRef.current = false; // next login re-registers this device
     setLoggedIn(false); setUser(null);
   };
+
+  // The server revoked this session (account deleted, role/permissions
+  // changed, or the owner signed this user out everywhere).
+  useEffect(() => {
+    const onRevoked = () => {
+      localStorage.removeItem('bm_token'); localStorage.removeItem('bm_user');
+      sessionStorage.removeItem('bm_token'); sessionStorage.removeItem('bm_user');
+      staffPushRegisteredRef.current = false;
+      setLoggedIn(false); setUser(null);
+      alert('Your session has ended — please sign in again.');
+    };
+    window.addEventListener('blitz_staff_session_revoked', onRevoked);
+    return () => window.removeEventListener('blitz_staff_session_revoked', onRevoked);
+  }, []);
 
   // ===== STAFF PUSH — real OS pop-ups on the phone =====
   // A staff device (owner/cashier/manager) registers as a 'staff' push token on
@@ -1367,8 +1395,8 @@ const loadStockTransfers = async () => {
               });
             } catch (e) {}
             await fetch(API_URL + '/notifications/register', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ role: 'staff', staffUsername: user.username, token, platform: 'web' })
+              method: 'POST', headers: authHeaders(),
+              body: JSON.stringify({ role: 'staff', token, platform: 'web' })
             }).catch(() => {});
           } catch (e) { console.error('Staff web push registration failed:', e); }
           return;
@@ -1401,8 +1429,8 @@ const loadStockTransfers = async () => {
           });
         } catch (e) {}
         await fetch(API_URL + '/notifications/register', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role: 'staff', staffUsername: user.username, token, platform: 'android' })
+          method: 'POST', headers: authHeaders(),
+          body: JSON.stringify({ role: 'staff', token, platform: 'android' })
         }).catch(() => {});
       } catch (e) { console.error('Staff push registration failed:', e); }
     })();
@@ -1531,7 +1559,19 @@ const loadStockTransfers = async () => {
 
   const editProduct = (p) => { setForm({ name: p.name||'', category: p.category||'', barcode: p.barcode||'', buyingPrice: p.buyingPrice??'', price: p.price??'', stock: p.stock??'', description: p.description||'', image: p.image||null, expiryDate: p.expiryDate ? new Date(p.expiryDate).toISOString().slice(0,10) : '' }); setEditingId(p._id); setShowForm(true); window.scrollTo(0,0); };
   const delProduct = async (id) => { if (!window.confirm('Delete this item?')) return; try { const r = await authDelete(API_URL + '/admin/products/' + id); const d = await r.json().catch(() => ({})); if (d && d.success) loadProducts(); else alert('❌ ' + ((d && d.error) || 'Could not delete item (HTTP ' + r.status + ').')); } catch (e) { console.error(e); alert('❌ Network error — could not delete.'); } };
-  const updateOrder = async (id, payload) => { try { const r = await authPut(API_URL + '/admin/orders/' + id, payload); if ((await r.json()).success) loadOrders(); } catch (e) { console.error(e); } };
+  const updateOrder = async (id, payload) => {
+    try {
+      const r = await authPut(API_URL + '/admin/orders/' + id, payload);
+      const d = await r.json();
+      if (d.success) {
+        if (d.refundDue) alert('Order cancelled. The customer already paid KES ' + d.refundDue + ' by M-Pesa — refund them.');
+        loadOrders();
+      } else {
+        alert(d.error || 'Could not update the order');
+        loadOrders();
+      }
+    } catch (e) { console.error(e); }
+  };
   const delOrder = async (id) => { if (!window.confirm('Delete this order?')) return; try { const r = await authDelete(API_URL + '/admin/orders/' + id); if ((await r.json()).success) loadOrders(); else alert('Failed or insufficient permissions'); } catch (e) { console.error(e); } };
 
   const handleAddCategory = async (e) => {
@@ -1617,7 +1657,7 @@ const loadStockTransfers = async () => {
         window._pendingSaleCart = [...saleCart];
         setStkStatus('waiting'); setStkError('');
         const saleDraft = { items: saleCart, staff: cashier, customerPhone: custPhone, branchId: activeBranchId || null };
-        const r = await fetch(API_URL + '/mpesa/stk-push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: custPhone, amount: saleTotal, saleDraft }) });
+        const r = await authPost(API_URL + '/mpesa/stk-push', { phone: custPhone, amount: saleTotal, saleDraft });
         const d = await r.json();
         if (d.success) { setStkCheckoutId(d.checkoutRequestId); }
         else { setStkStatus('failed'); setStkError(d.error + (d.details ? ': ' + d.details : '')); }
@@ -1896,7 +1936,7 @@ const loadStockTransfers = async () => {
     if (!user || !user.username || notifyBusy) return;
     setNotifyBusy(true); setNotifyResult('');
     try {
-      const r = await authPost(API_URL + '/notifications/test', { role: 'staff', staffUsername: user.username });
+      const r = await authPost(API_URL + '/notifications/test', { role: 'staff' });
       const d = await r.json().catch(() => ({}));
       setNotifyResult(d && d.success ? '✅ Test push sent to this device.' : ('❌ ' + ((d && d.error) || 'Could not send test push.')));
     } catch (e) {
@@ -1950,6 +1990,7 @@ const loadStockTransfers = async () => {
             <input className="owner-field" type="text" placeholder="Username" value={setupUsername} onChange={e => setSetupUsername(e.target.value)} required />
             <input className="owner-field" type="password" placeholder="Password (min 6 chars)" value={setupPassword} onChange={e => setSetupPassword(e.target.value)} minLength={6} required />
             <button className="blitz-admin-btn glow-pulse" type="submit">Create Owner Account</button>
+            {onExit && <button type="button" className="hq-login-back" onClick={onExit}>← Back to the shop</button>}
           </form>
         </div></div>
       );
@@ -1991,6 +2032,7 @@ const loadStockTransfers = async () => {
           </div>
           <button className="blitz-admin-btn glow-pulse" type="submit">Sign In</button>
         </form>
+        {onExit && <button type="button" className="hq-login-back" onClick={onExit}>← Back to the shop</button>}
       </div></div>
     );
   }
@@ -2012,10 +2054,20 @@ const loadStockTransfers = async () => {
     { id: 'branches', label: '🏪 Branches' },
     { id: 'notify', label: '📣 Notify' },
     { id: 'wipe', label: '🗑️ Delete' },
+    { id: 'settings', label: '⚙️ Settings' },
   ];
-  const visibleTabs = role === 'owner' 
-    ? allTabs 
-    : allTabs.filter(t => user?.permissions && user.permissions.includes(t.id));
+  // Navigation groups — shown as section headings in the PC sidebar.
+  const TAB_GROUP = {
+    sales: 'Sell', orders: 'Sell',
+    inventory: 'Store', banners: 'Store',
+    records: 'Money', expenses: 'Money', credit: 'Money',
+    loyalty: 'Customers', reviews: 'Customers', notify: 'Customers',
+    staff: 'Team', branches: 'Team', wipe: 'Team',
+    settings: 'App'
+  };
+  const visibleTabs = role === 'owner'
+    ? allTabs
+    : allTabs.filter(t => t.id === 'settings' || (user?.permissions && user.permissions.includes(t.id)));
   const isTabVisible = visibleTabs.some(t => t.id === tab);
   const safeTab = isTabVisible ? tab : (visibleTabs[0]?.id || 'sales');
 
@@ -2087,33 +2139,13 @@ ${div}
           <button className={"blitz-admin-bell" + (alerts.out.length ? " ring" : "")} onClick={() => setMuted(m => !m)}>
             {muted ? "🔕" : "🔔"}{totalAlerts > 0 && <i className="blitz-admin-bell-dot">{totalAlerts}</i>}
           </button>
-          {!isCashier && <span className="blitz-admin-muted" style={{fontSize:'.78rem'}}>{user?.name} · {user?.role}{user?.branchId ? ' · ' + (branches.find(b => b._id === user.branchId)?.name || 'Branch') : ''}</span>}
-          <button 
-            onClick={() => {
-              const newVal = !adminPerfMode;
-              setAdminPerfMode(newVal);
-              try { localStorage.setItem('blitz_perf_mode', String(newVal)); } catch (e) {}
-            }} 
-            style={{
-              background: adminPerfMode ? 'rgba(54, 211, 153, 0.12)' : 'var(--bg-2)',
-              border: '1px solid var(--line)',
-              color: adminPerfMode ? 'var(--green)' : 'var(--text)',
-              borderRadius: 8,
-              padding: '4px 10px',
-              fontSize: '0.72rem',
-              fontWeight: 600,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              fontFamily: 'inherit',
-              transition: 'all 0.15s ease',
-              marginRight: '6px'
-            }}
-            title="Toggle Performance / Graphics Mode"
-          >
-            🏎️ {adminPerfMode ? 'Fast' : 'Rich'}
+          <button type="button" className="hq-user-chip" onClick={() => setTab('settings')} title="Settings">
+            <span className="hq-side-avatar sm">{(user?.name || user?.username || '?').slice(0, 1).toUpperCase()}</span>
+            {!isCashier && <span>{user?.name} · {user?.role}{user?.branchId ? ' · ' + (branches.find(b => b._id === user.branchId)?.name || 'Branch') : ''}</span>}
           </button>
-          <button className="blitz-admin-exit" onClick={logout}>Exit</button>
+          {onExit && <button className="blitz-admin-bell hq-shop-btn" title="Customer shop" onClick={onExit}>🛍️</button>}
+          <button className="blitz-admin-bell" title="Settings" onClick={() => setTab('settings')}>⚙️</button>
+          <button className="blitz-admin-exit" onClick={logout}>Sign out</button>
         </div>
       </header>
 
@@ -2129,11 +2161,44 @@ ${div}
         </div>
       )}
 
-      <div className="blitz-admin-tabs">
-        {visibleTabs.map(t => (
-          <button key={t.id} className={safeTab===t.id?"on":""} onClick={() => setTab(t.id)}>{t.label}</button>
-        ))}
-      </div>
+      <nav className="blitz-admin-tabs" aria-label="Sections">
+        <div className="hq-side-brand"><span className="blitz-admin-logo sm">⚡</span> Blitz Mall <b>HQ</b></div>
+        {['Sell', 'Store', 'Money', 'Customers', 'Team', 'App'].map(group => {
+          const tabsInGroup = visibleTabs.filter(t => (TAB_GROUP[t.id] || 'App') === group);
+          if (!tabsInGroup.length) return null;
+          return (
+            <React.Fragment key={group}>
+              <span className="hq-tab-group">{group}</span>
+              {tabsInGroup.map(t => (
+                <button key={t.id} className={safeTab===t.id?"on":""} onClick={() => setTab(t.id)}>{t.label}</button>
+              ))}
+            </React.Fragment>
+          );
+        })}
+        {onExit && <button type="button" className="hq-side-shop" onClick={onExit}>🛍️ Customer shop</button>}
+        <div className="hq-side-user" onClick={() => setTab('settings')} role="button" tabIndex={0}>
+          <span className="hq-side-avatar">{(user?.name || user?.username || '?').slice(0, 1).toUpperCase()}</span>
+          <span><b>{user?.name || user?.username}</b><small>{user?.role}</small></span>
+        </div>
+      </nav>
+
+      {safeTab === "settings" && (
+        <div className="blitz-admin-body">
+          <h2>⚙️ Settings</h2>
+          <AdminSettings ctx={{
+            API_URL, user, authPost, logout, onExit,
+            branchName: user?.branchId ? (branches.find(b => b._id === user.branchId)?.name || '') : '',
+            onTokenRefreshed: (t) => {
+              try { localStorage.setItem('bm_token', t); sessionStorage.setItem('bm_token', t); } catch (e) {}
+            },
+            muted, setMuted, showBanner, setShowBanner,
+            perfMode: adminPerfMode,
+            setPerfMode: (v) => { setAdminPerfMode(v); try { localStorage.setItem('blitz_perf_mode', String(v)); } catch (e) {} },
+            pushStatus, sendStaffTestPush,
+            staffPushRegistered: staffPushRegisteredRef.current
+          }} />
+        </div>
+      )}
 
       {safeTab === "sales" && !activeShift && (
         <div className="blitz-admin-body shift-locked-overlay" style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'65vh',textAlign:'center'}}>
@@ -2142,35 +2207,7 @@ ${div}
             <h2 style={{fontFamily:'Unbounded, sans-serif',margin:'15px 0 10px 0',color:'var(--gold)'}}>POS Register Locked</h2>
             <p className="blitz-admin-muted" style={{fontSize:'.9rem',marginBottom:16}}>A cashier shift must be opened before you can scan products or record sales transactions.</p>
             
-            <div style={{ marginBottom: '20px', textAlign: 'left' }}>
-              <label style={{ fontSize: '0.75rem', color: 'var(--muted)', display: 'block', marginBottom: '4px', fontWeight: 600 }}>Database Connection:</label>
-              <select 
-                value={API_URL} 
-                onChange={e => {
-                  try {
-                    localStorage.setItem('blitz_api_url', e.target.value);
-                    window.location.reload();
-                  } catch (err) {}
-                }}
-                style={{
-                  width: '100%', 
-                  padding: '10px 12px', 
-                  borderRadius: '10px', 
-                  background: 'var(--bg-2)', 
-                  border: '1px solid var(--line)', 
-                  color: 'var(--text)',
-                  fontSize: '0.85rem',
-                  fontFamily: 'inherit',
-                  cursor: 'pointer'
-                }}
-              >
-                <option value="https://blitzmall-backend.onrender.com/api">Cloud (Live Online Database)</option>
-                {!window.Capacitor?.isNativePlatform?.() && (
-                  <option value={`http://${window.location.hostname || 'localhost'}:5000/api`}>Local Server (Development)</option>
-                )}
-              </select>
-            </div>
-
+            
             <form onSubmit={handleOpenShiftSubmit} style={{display:'flex',flexDirection:'column',gap:12}}>
               <input 
                 type="text" 
@@ -2672,9 +2709,23 @@ ${div}
                   <span className="blitz-admin-muted">{new Date(o.createdAt).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</span>
                 </div>
                 <div style={{display:'flex',gap:6,alignItems:'center',marginTop:6}}>
-                  <select value={o.status} onChange={e => updateOrder(o._id, { status: e.target.value })} style={{flex:1}}>
-                    <option value="pending">⏳ Pending</option><option value="packed">📦 Packed</option><option value="on_the_way">🚚 On the way</option><option value="delivered">✅ Delivered</option>
+                  <select value={o.status} disabled={o.status === 'cancelled'} onChange={e => {
+                    const next = e.target.value;
+                    if (next === 'cancelled' && !window.confirm('Cancel this order? Stock, wallet cash and any voucher go back to the customer.' + ((o.amountPaid || 0) > 0 ? ' They already paid KES ' + o.amountPaid + ' by M-Pesa — you will need to refund it.' : ''))) return;
+                    updateOrder(o._id, { status: next });
+                  }} style={{flex:1}}>
+                    <option value="pending">⏳ Pending</option><option value="packed">📦 Packed</option><option value="on_the_way">🚚 On the way</option><option value="delivered">✅ Delivered</option><option value="cancelled">❌ Cancelled</option>
                   </select>
+                  {(o.refundDue || 0) > 0 && (
+                    <div style={{fontSize:'.7rem', color:'var(--red, #ff453a)', flex:'1 0 100%', marginTop:2}}>
+                      ↩️ Refund due: <b>{money(o.refundDue)}</b> was paid by M-Pesa before this order was cancelled.
+                    </div>
+                  )}
+                  {o.paymentStatus === 'partial' && (
+                    <div style={{fontSize:'.7rem', color:'var(--gold)', flex:'1 0 100%', marginTop:2}}>
+                      💳 Part-paid: {money(o.amountPaid)} received — {money((o.totalPrice || 0) - (o.amountPaid || 0))} still due.
+                    </div>
+                  )}
                   {o.deliveryLocation && !o.deliveryFeeConfirmed && (
                     <div style={{fontSize:'.68rem', color:'var(--gold)', flex:'1 0 100%', marginTop:2}}>
                       ⚠️ Delivery order — set the <b>transport fee</b> above before dispatch so the customer knows the final total.
@@ -3593,7 +3644,8 @@ ${div}
                             🔑 Allowed Tabs: {u.permissions && u.permissions.length ? u.permissions.map(p => allTabs.find(t => t.id === p)?.label || p).join(', ') : 'None'}
                           </div>
                         </div>
-                        <button className="pos-void" onClick={() => delUser(u._id)}>delete</button>
+                        {u.role !== 'owner' && <button className="pos-void" onClick={() => revokeUserSessions(u._id)} title="Sign out of all devices">sign out</button>}
+                        {u.role !== 'owner' && <button className="pos-void" onClick={() => delUser(u._id)}>delete</button>}
                       </div>
                     );
                   })}

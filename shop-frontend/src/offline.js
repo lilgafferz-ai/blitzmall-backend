@@ -75,11 +75,19 @@ export const syncQueuedSales = async (authHeaders) => {
           branchId: sale.branchId,
         }),
       });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({}));
       if (d.success) {
         synced++;
+      } else if (r.status >= 400 && r.status < 500 && r.status !== 401 && r.status !== 429) {
+        // A definitive rejection (invalid basket) will never succeed — park it
+        // in the rejected list for the owner instead of retrying forever.
+        try {
+          const rejected = JSON.parse(localStorage.getItem(QUEUE_KEY + '_rejected') || '[]');
+          rejected.push({ ...sale, _rejectedAt: new Date().toISOString(), _error: (d && d.error) || ('HTTP ' + r.status) });
+          localStorage.setItem(QUEUE_KEY + '_rejected', JSON.stringify(rejected.slice(-50)));
+        } catch (e) { /* storage full — nothing more we can do */ }
       } else {
-        remaining.push(sale); // server rejected it — keep it to retry later
+        remaining.push(sale); // signed out / rate-limited / server error — retry later
       }
     } catch (e) {
       remaining.push(sale); // network error — keep it to retry later

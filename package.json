@@ -1,8 +1,8 @@
 {
   "name": "my-shop",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "BlitzMall backend — Express API, M-Pesa, loyalty and push notifications for the shop, POS and admin apps",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "test": "jest"

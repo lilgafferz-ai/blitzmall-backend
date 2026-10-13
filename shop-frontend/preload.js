@@ -25,3 +25,10 @@ contextBridge.exposeInMainWorld('blitzUpdater', {
     return () => ipcRenderer.removeListener('updater:status', listener);
   }
 });
+
+// Settings → Desktop app: version info and "open when Windows starts".
+contextBridge.exposeInMainWorld('blitzDesktop', {
+  info: () => ipcRenderer.invoke('app:info'),
+  getOpenAtLogin: () => ipcRenderer.invoke('app:getOpenAtLogin'),
+  setOpenAtLogin: (on) => ipcRenderer.invoke('app:setOpenAtLogin', !!on)
+});

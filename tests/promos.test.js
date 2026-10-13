@@ -5,7 +5,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
-const { getOwnerToken } = require('./helpers');
+const { getOwnerToken, customerToken, bearer } = require('./helpers');
 const { customerTier, tierFromPoints, earnPoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, moneyPrizeUnlocked } = _test || {};
 
 // Unique 10-digit phone per call so a prior test run's promo claim can never
@@ -118,33 +118,33 @@ describe('Promos API (spin wheel + scratch card)', () => {
   it('requires TWO completed orders before the spin unlocks', async () => {
     const phone = freshPhone();
     // One order is NOT enough — gate blocks the spin.
-    await request(app).post('/api/orders').send({
+    await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
       customerId: phone, customerName: 'One Order', items: [{ _id: PRODUCTS.milk, quantity: 1 }], paymentMethod: 'delivery'
     });
-    const blocked = await request(app).post('/api/promos/spin').send({ phone, name: 'One Order' });
+    const blocked = await request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'One Order' });
     expect(blocked.statusCode).toBe(200);
     expect(blocked.body.success).toBe(false);
     expect(blocked.body.error).toMatch(/two purchases/i);
     expect(blocked.body.orderCount).toBe(1);
 
     // Second order unlocks it — spin succeeds and lands on a real sector.
-    await request(app).post('/api/orders').send({
+    await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
       customerId: phone, customerName: 'One Order', items: [{ _id: PRODUCTS.bread, quantity: 1 }], paymentMethod: 'delivery'
     });
-    const res = await request(app).post('/api/promos/spin').send({ phone, name: 'One Order' });
+    const res = await request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'One Order' });
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
     expect(typeof res.body.sectorIndex).toBe('number');
     expect(WHEEL_SECTORS[res.body.sectorIndex]).toBeTruthy();
 
     // Rolling 24h cooldown — an immediate second spin is refused.
-    const again = await request(app).post('/api/promos/spin').send({ phone, name: 'One Order' });
+    const again = await request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'One Order' });
     expect(again.body.alreadyUsed).toBe(true);
   });
 
   it('brand-new phones are blocked from the scratch card', async () => {
     const phone = freshPhone();
-    const res = await request(app).post('/api/promos/scratch').send({ phone, name: 'New User' });
+    const res = await request(app).post('/api/promos/scratch').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'New User' });
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(false);
     expect(res.body.error).toMatch(/two purchases/i);
@@ -154,11 +154,11 @@ describe('Promos API (spin wheel + scratch card)', () => {
   it('the scratch card works after two orders and never guarantees a prize', async () => {
     const phone = freshPhone();
     for (let i = 0; i < 2; i++) {
-      await request(app).post('/api/orders').send({
+      await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
         customerId: phone, customerName: 'Scratcher', items: [{ _id: i === 0 ? PRODUCTS.item0 : PRODUCTS.item1, quantity: 1 }], paymentMethod: 'delivery'
       });
     }
-    const res = await request(app).post('/api/promos/scratch').send({ phone, name: 'Scratcher' });
+    const res = await request(app).post('/api/promos/scratch').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'Scratcher' });
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
     // Outcomes are only: miss, small points, coupon, delivery, jackpot.
@@ -173,11 +173,11 @@ describe('Promos API (spin wheel + scratch card)', () => {
     // orders (loyal shoppers only), so a cash win must be rerolled to a
     // non-cash outcome every single time for a 2-order shopper.
     for (let i = 0; i < 2; i++) {
-      await request(app).post('/api/orders').send({
+      await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
         customerId: phone, customerName: 'Low Spender', items: [{ _id: i === 0 ? PRODUCTS.item0 : PRODUCTS.item1, quantity: 1 }], paymentMethod: 'delivery'
       });
     }
-    const res = await request(app).post('/api/promos/spin').send({ phone, name: 'Low Spender' });
+    const res = await request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'Low Spender' });
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
     // Low spenders can NEVER win a fixed-cash coupon: the wheel rerolls any
@@ -202,6 +202,7 @@ describe('Phone-bound voucher flow', () => {
     // Correct owner + sufficient total → valid
     const ok = await request(app)
       .post('/api/coupons/validate')
+      .set(bearer(await customerToken(request, app, owner)))
       .send({ code, total: 500, phone: owner });
     expect(ok.body.valid).toBe(true);
     expect(ok.body.discount).toBe(50);
@@ -209,11 +210,12 @@ describe('Phone-bound voucher flow', () => {
     // Anyone else → rejected (discount is not for just anyone)
     const denied = await request(app)
       .post('/api/coupons/validate')
+      .set(bearer(await customerToken(request, app, stranger)))
       .send({ code, total: 500, phone: stranger });
     expect(denied.body.valid).toBe(false);
 
     // Using it in an order consumes it…
-    const order = await request(app).post('/api/orders').send({
+    const order = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, owner))).send({
       customerId: owner,
       customerName: 'Owner',
       items: [{ _id: PRODUCTS.bread, quantity: 2 }],
@@ -226,6 +228,7 @@ describe('Phone-bound voucher flow', () => {
     // …so a second use of the same voucher is refused for the owner too.
     const reused = await request(app)
       .post('/api/coupons/validate')
+      .set(bearer(await customerToken(request, app, owner)))
       .send({ code, total: 500, phone: owner });
     expect(reused.body.valid).toBe(false);
   });
@@ -233,6 +236,7 @@ describe('Phone-bound voucher flow', () => {
   it('seeded marketing coupons (BLITZ10) validate for any shopper', async () => {
     const res = await request(app)
       .post('/api/coupons/validate')
+      .set(bearer(await customerToken(request, app, freshPhone())))
       .send({ code: 'BLITZ10', total: 2000, phone: freshPhone() });
     expect(res.body.valid).toBe(true);
     expect(res.body.type).toBe('percent');
@@ -240,6 +244,7 @@ describe('Phone-bound voucher flow', () => {
 
     const tooSmall = await request(app)
       .post('/api/coupons/validate')
+      .set(bearer(await customerToken(request, app, freshPhone())))
       .send({ code: 'BLITZ10', total: 100, phone: freshPhone() });
     expect(tooSmall.body.valid).toBe(false); // min purchase KES 1000
   });

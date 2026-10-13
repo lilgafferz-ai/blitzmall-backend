@@ -29,3 +29,22 @@ services:
         sync: false
       - key: GOOGLE_CSE_ID
         sync: false
+      # Africa's Talking SMS for sign-in codes (AT_SENDER_ID only once approved)
+      - key: AT_USERNAME
+        sync: false
+      - key: AT_API_KEY
+        sync: false
+      - key: AT_SENDER_ID
+        sync: false
+      # TEMPORARY: shows the sign-in code on screen when an SMS fails. Anyone can
+      # then sign in to any account — set to "false" as soon as SMS delivers.
+      - key: OTP_SCREEN_FALLBACK
+        value: "true"
+      # Random string; append ?secret=<same value> to CALLBACK_URL
+      - key: MPESA_CALLBACK_SECRET
+        sync: false
+      # Firebase service-account JSON (raw or base64) for real device push
+      - key: FCM_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: NODE_ENV
+        value: production
