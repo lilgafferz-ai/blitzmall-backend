@@ -81,7 +81,9 @@ const SW = {
   'Say something about it (optional)': 'Sema kitu kuihusu (si lazima)', 'Post review': 'Tuma maoni', 'Saving…': 'Inahifadhi…',
   'Verified buyer': 'Mnunuzi aliyethibitishwa', 'Tap the stars to rate': 'Gusa nyota kutathmini',
   'Thanks for your review!': 'Asante kwa maoni yako!', 'Could not save your review': 'Imeshindwa kuhifadhi maoni',
-  'deal': 'ofa', 'You save': 'Unaokoa',
+  'deal': 'ofa', 'You save': 'Unaokoa', 'Security': 'Usalama', 'App lock': 'Kufuli ya programu', 'Change PIN': 'Badilisha PIN', 'Fingerprint + PIN': 'Alama ya kidole + PIN',
+  'The app locks every time you leave it. Unlock with your fingerprint, or your PIN as a backup.': 'Programu hujifunga kila unapoiacha. Ifungue kwa alama ya kidole, au PIN yako kama akiba.',
+  'The app locks with your PIN every time you leave it.': 'Programu hujifunga kwa PIN yako kila unapoiacha.',
   // main's v0.1.50 screens
   'Offers': 'Ofa',
   'Orders': 'Oda',

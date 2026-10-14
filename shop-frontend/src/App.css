@@ -1512,3 +1512,22 @@ input, textarea {
 .wallet-topup-msg.failed{color:var(--red);}
 .modal-divider{height:1px;background:var(--line);margin:6px 0 14px;}
 
+/* ===== APP LOCK (fingerprint / PIN) ===== */
+.applock-card{max-width:360px;width:100%;}
+.applock-lockicon{font-size:2.3rem;margin:6px 0 2px;}
+.applock-fingerprint{font-size:3rem;margin:10px 0 4px;animation:applockPulse 1.4s ease-in-out infinite;}
+@keyframes applockPulse{0%,100%{transform:scale(1);opacity:.85}50%{transform:scale(1.12);opacity:1}}
+.applock-title{font-size:1.15rem;margin:6px 0 2px;font-family:'Unbounded',sans-serif;}
+.applock-sub{font-size:.8rem;color:var(--muted);margin:0 0 14px;text-align:center;}
+.applock-dots{display:flex;gap:16px;justify-content:center;margin:4px 0 14px;}
+.applock-dot{width:14px;height:14px;border-radius:50%;border:2px solid var(--line);background:transparent;transition:.15s;}
+.applock-dot.filled{background:var(--orange);border-color:var(--orange);box-shadow:0 0 10px rgba(255,122,26,.6);}
+.applock-error{color:var(--red);font-size:.78rem;margin:-6px 0 10px;text-align:center;min-height:1em;}
+.applock-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;width:100%;max-width:260px;margin:4px auto 6px;}
+.applock-key{height:62px;border-radius:16px;border:1px solid var(--line);background:var(--bg-2);color:var(--text);font-size:1.5rem;font-weight:600;cursor:pointer;transition:.12s;display:flex;align-items:center;justify-content:center;font-family:'Unbounded',sans-serif;}
+.applock-key:active{transform:scale(.93);background:var(--card);border-color:var(--orange);}
+.applock-key:disabled{opacity:.45;cursor:default;}
+.applock-key-blank{visibility:hidden;}
+.applock-key-back{font-size:1.25rem;}
+.applock-alt{margin-top:10px;font-size:.82rem;}
+.applock-cancel{opacity:.75;}

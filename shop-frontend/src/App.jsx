@@ -11,6 +11,8 @@ import { SplashScreen } from '@capacitor/splash-screen';
 import { Capacitor } from '@capacitor/core';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import LockScreen from './LockScreen';
+import { isLockEnabled, onAppBackground, biometricCapability, hasPin } from './appLock';
 const Admin = React.lazy(() => import('./Admin'));
 
 const getDefaultApiUrl = () => {
@@ -564,6 +566,8 @@ function App() {
   const [restartIn, setRestartIn] = useState(0); // live auto-restart countdown (seconds) once an update is downloaded
   const screenRef = useRef(screen);
   useEffect(() => { screenRef.current = screen; });
+  const customerRef = useRef(customer);
+  useEffect(() => { customerRef.current = customer; });
   const [defaultArea, setDefaultAreaState] = useState(() => {
     try { return localStorage.getItem('blitz_default_area') === 'standard' ? 'standard' : 'mall'; } catch { return 'mall'; }
   });
@@ -599,6 +603,15 @@ function App() {
   const [bundleVersion, setBundleVersion] = useState('');
   const [pendingOfflineOrders, setPendingOfflineOrders] = useState(0);
   const [gallery, setGallery] = useState(null); // image URLs when the photo gallery is open
+  // --- App lock (M-Pesa-style fingerprint / PIN) ---
+  const [lockConfigured, setLockConfigured] = useState(() => isLockEnabled());
+  const [appLocked, setAppLocked] = useState(() => {
+    try { const c = JSON.parse(localStorage.getItem(CUSTOMER_KEY)); return !!(c && c.customerId && c.token) && isLockEnabled(); }
+    catch { return false; }
+  });
+  const [lockCap, setLockCap] = useState({ usable: false, isFingerprint: false });
+  const [lockCapReady, setLockCapReady] = useState(false);
+  const [forceLockSetup, setForceLockSetup] = useState(false); // Settings "Change PIN"
   const pullThreshold = 80;
   const loadProducts = useCallback(async () => {
     try {
@@ -803,6 +816,28 @@ function App() {
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [otpResendIn > 0]);
+
+  // App lock — probe whether this device has a fingerprint sensor (native APK
+  // with the biometric plugin) once a customer is signed in. Face-only / no
+  // sensor / web / old APK → PIN only.
+  useEffect(() => {
+    if (!customer?.customerId) return;
+    let alive = true;
+    biometricCapability()
+      .then(c => { if (alive) { setLockCap(c); setLockCapReady(true); } })
+      .catch(() => { if (alive) setLockCapReady(true); });
+    return () => { alive = false; };
+  }, [customer?.customerId]);
+
+  // App lock — the instant the app leaves the foreground, lock it (M-Pesa style).
+  // Native Android uses the reliable Activity-lifecycle event; web/PC uses
+  // visibilitychange. Only a signed-in customer with the lock enabled is locked.
+  useEffect(() => {
+    const unsub = onAppBackground(() => {
+      try { if (customerRef.current?.customerId && isLockEnabled()) setAppLocked(true); } catch {}
+    });
+    return unsub;
+  }, []);
 
   // M-Pesa STK polling — must be before any conditional returns
   useEffect(() => {
@@ -1413,6 +1448,40 @@ function App() {
     return () => window.removeEventListener(CUSTOMER_SESSION_EXPIRED, onExpired);
   }, []);
 
+  // ===== APP LOCK GATE =====
+  // Shown before every screen so a locked or not-yet-set-up signed-in customer
+  // sees only the lock. OTP sign-in/sign-up is untouched (guarded by
+  // customer?.customerId; the login/OTP screens have no customer yet).
+  if (customer?.customerId && (forceLockSetup || !lockConfigured || appLocked)) {
+    // Enabled-but-no-PIN (tampering / partial state) → setup, never an
+    // impossible-to-clear unlock screen.
+    const inSetup = forceLockSetup || !lockConfigured || !hasPin();
+    // Wait for the capability probe on an unlock screen so we don't flash the
+    // PIN pad and then jump to the fingerprint prompt.
+    if (!inSetup && !lockCapReady) {
+      return (
+        <div className="screen center-screen">
+          <div className="login-card applock-card" style={{ textAlign: 'center' }}>
+            <BlitzLogo size={64} />
+            <div className="applock-lockicon">🔒</div>
+            <p className="applock-sub">Locked</p>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <LockScreen
+        mode={inSetup ? 'setup' : 'unlock'}
+        hasBiometric={!inSetup && lockCap.usable && lockCap.isFingerprint}
+        allowCancel={forceLockSetup && lockConfigured}
+        logo={<BlitzLogo size={64} />}
+        onDone={() => { setLockConfigured(true); setForceLockSetup(false); setAppLocked(false); }}
+        onUnlock={() => setAppLocked(false)}
+        onCancel={() => setForceLockSetup(false)}
+      />
+    );
+  }
+
   if (isAdmin) {
     return (
       <div className="app-container">
@@ -1594,6 +1663,7 @@ function App() {
     setCart([]);
     setMyOrders([]);
     setCustAccount(null);
+    setAppLocked(false); setForceLockSetup(false); // the lock PIN itself stays set on the device
     try { localStorage.removeItem(CUSTOMER_KEY); } catch {}
     setScreen('login');
   };
@@ -3003,7 +3073,12 @@ function App() {
       handleLogout();
       showToast('🛡️ Signed out of all devices');
     },
-    exitApp
+    exitApp,
+    appLock: {
+      configured: lockConfigured,
+      hasFingerprint: lockCap.usable && lockCap.isFingerprint,
+      changePin: () => setForceLockSetup(true),
+    }
   };
   const ME_SCREENS = { profile: MeScreen, rewards: RewardsScreen, settings: SettingsScreen, 'edit-profile': EditProfileScreen, about: AboutScreen };
   if (ME_SCREENS[screen]) {

@@ -1,0 +1,2 @@
+/*! For license information please see 815.c8f7f283.chunk.js.LICENSE.txt */
+"use strict";(self.webpackChunkshop_frontend=self.webpackChunkshop_frontend||[]).push([[815],{3196(p,e,s){s.d(e,{getApps:()=>n.Dk,initializeApp:()=>n.Wp});var n=s(6798);(0,n.KO)("firebase","12.17.1","app")}}]);
