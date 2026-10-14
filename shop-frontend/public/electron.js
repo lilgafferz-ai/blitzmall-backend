@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell, Tray } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -49,9 +49,85 @@ function trackWindowState(win) {
   ['resize', 'move', 'maximize', 'unmaximize'].forEach(ev => win.on(ev, save));
 }
 
-let mainWindow = null;
+// ===== Desktop preferences (Settings → Desktop app, and the tray menu) =====
+const DEFAULT_PREFS = { closeToTray: true };
+const prefsPath = () => path.join(app.getPath('userData'), 'desktop-settings.json');
+function loadPrefs() {
+  try { return { ...DEFAULT_PREFS, ...JSON.parse(fs.readFileSync(prefsPath(), 'utf8')) }; } catch (e) { return { ...DEFAULT_PREFS }; }
+}
+function savePrefs(patch) {
+  const next = { ...loadPrefs(), ...patch };
+  try { fs.writeFileSync(prefsPath(), JSON.stringify(next)); } catch (e) { /* never block the app on this */ }
+  return next;
+}
 
-function createWindow() {
+// A silent update installed while the app sat in the tray relaunches it
+// hidden again (this flag file survives the installer), so a background
+// update never pops a window up in the cashier's face.
+const hiddenRelaunchFlag = () => path.join(app.getPath('userData'), 'relaunch-hidden.flag');
+function consumeHiddenRelaunch() {
+  try { fs.unlinkSync(hiddenRelaunchFlag()); return true; } catch (e) { return false; }
+}
+
+let mainWindow = null;
+let tray = null;
+let isQuitting = false;
+let updateDownloaded = false;
+let trayHintShown = false;
+// Assigned once the updater is set up (inside app.whenReady).
+let installUpdateNow = () => false;
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) { createWindow(); return; }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// Right-click menu: Electron ships none, so without this there is no
+// copy / paste / spelling fix anywhere in the app.
+function attachContextMenu(win) {
+  win.webContents.on('context-menu', (_event, params) => {
+    const template = [];
+    const flags = params.editFlags || {};
+    if (params.misspelledWord) {
+      for (const word of (params.dictionarySuggestions || []).slice(0, 5)) {
+        template.push({ label: word, click: () => win.webContents.replaceMisspelling(word) });
+      }
+      if (!template.length) template.push({ label: 'No spelling suggestions', enabled: false });
+      template.push({ label: 'Add to dictionary', click: () => win.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord) });
+      template.push({ type: 'separator' });
+    }
+    if (params.isEditable) {
+      template.push(
+        { label: 'Undo', role: 'undo', enabled: !!flags.canUndo },
+        { label: 'Redo', role: 'redo', enabled: !!flags.canRedo },
+        { type: 'separator' },
+        { label: 'Cut', role: 'cut', enabled: !!flags.canCut },
+        { label: 'Copy', role: 'copy', enabled: !!flags.canCopy },
+        { label: 'Paste', role: 'paste', enabled: !!flags.canPaste },
+        { type: 'separator' },
+        { label: 'Select all', role: 'selectAll' }
+      );
+    } else if (params.selectionText && params.selectionText.trim()) {
+      template.push({ label: 'Copy', role: 'copy' });
+    }
+    if (params.linkURL && /^(https?:|mailto:|tel:)/i.test(params.linkURL)) {
+      if (template.length) template.push({ type: 'separator' });
+      template.push(
+        { label: 'Open link in browser', click: () => shell.openExternal(params.linkURL).catch(() => {}) },
+        { label: 'Copy link', click: () => clipboard.writeText(params.linkURL) }
+      );
+    }
+    if (params.mediaType === 'image' && params.srcURL) {
+      if (template.length) template.push({ type: 'separator' });
+      template.push({ label: 'Copy image', click: () => win.webContents.copyImageAt(params.x, params.y) });
+    }
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: win });
+  });
+}
+
+function createWindow({ hidden = false } = {}) {
   const saved = loadWindowState();
   const win = new BrowserWindow({
     width: saved.width || 1280,
@@ -76,6 +152,25 @@ function createWindow() {
   mainWindow = win;
   if (saved.maximized) win.maximize();
   trackWindowState(win);
+  attachContextMenu(win);
+
+  // Closing the window keeps BlitzMall running in the system tray (unless
+  // turned off in Settings), so new-order and stock alerts keep arriving.
+  win.on('close', (event) => {
+    if (isQuitting || !tray || !loadPrefs().closeToTray) return;
+    event.preventDefault();
+    win.hide();
+    // A downloaded update applies now, quietly, while nobody is looking.
+    if (updateDownloaded) { installUpdateNow({ hidden: true }); return; }
+    if (!trayHintShown) {
+      trayHintShown = true;
+      showNativeToast('BlitzMall is still running', 'Alerts keep coming in. Right-click the tray icon and choose Quit to close it completely.', { silent: true });
+    }
+  });
+  win.on('focus', () => { try { win.flashFrame(false); } catch (e) {} });
+  // Windows logging off / shutting down: let the window close for real.
+  win.on('query-session-end', () => { isQuitting = true; });
+  win.on('session-end', () => { isQuitting = true; });
 
   // Links meant for the outside world (WhatsApp, maps, phone, GitHub
   // downloads) open in the user's real browser/app — never inside the shop window.
@@ -162,7 +257,7 @@ function createWindow() {
   });
 
   win.once('ready-to-show', () => {
-    win.show();
+    if (!hidden) win.show();
   });
 
   win.loadFile(indexHtmlPath).catch((err) => {
@@ -176,18 +271,12 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
-  });
+  app.on('second-instance', () => showMainWindow());
 }
 
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return; // a second copy — it is quitting
-  createWindow();
+  createWindow({ hidden: consumeHiddenRelaunch() });
 
   // Harden the auto-updater. Two gotchas fixed here:
   //  1) checkForUpdatesAndNotify() fails silently on network errors or GitHub
@@ -253,7 +342,13 @@ app.whenReady().then(() => {
     if (p && (p.percent % 25 < 2)) console.log('[updater] Download progress:', Math.round(p.percent) + '%');
   });
   autoUpdater.on('update-downloaded', (info) => {
+    updateDownloaded = true;
     broadcastUpdaterStatus({ status: 'downloaded', newVersion: info && info.version });
+    // Window tucked away in the tray? Nobody is mid-sale — apply it right now.
+    if (tray && mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      setTimeout(() => installUpdateNow({ hidden: true }), 5000);
+      return;
+    }
     // Non-intrusive toast: the update applies on quit regardless (see
     // autoInstallOnAppQuit above), so no modal blocks the user's work.
     try {
@@ -362,25 +457,68 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('app:setOpenAtLogin', async (_evt, on) => {
     try { app.setLoginItemSettings({ openAtLogin: !!on }); } catch (e) { /* unsupported platform */ }
+    refreshTrayMenu();
     try { return !!app.getLoginItemSettings().openAtLogin; } catch (e) { return false; }
   });
+  ipcMain.handle('app:getCloseToTray', async () => !!loadPrefs().closeToTray);
+  ipcMain.handle('app:setCloseToTray', async (_evt, on) => {
+    const prefs = savePrefs({ closeToTray: !!on });
+    refreshTrayMenu();
+    return !!prefs.closeToTray;
+  });
 
-  ipcMain.handle('updater:install', async () => {
+  // ===== System tray =====
+  const isOpenAtLogin = () => { try { return !!app.getLoginItemSettings().openAtLogin; } catch (e) { return false; } };
+  function refreshTrayMenu() {
+    if (!tray) return;
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Open BlitzMall', click: showMainWindow },
+      { label: 'Check for updates', click: () => { showMainWindow(); autoUpdater.checkForUpdates().catch(() => {}); } },
+      { type: 'separator' },
+      { label: 'Keep running when closed', type: 'checkbox', checked: !!loadPrefs().closeToTray,
+        click: (item) => { savePrefs({ closeToTray: item.checked }); } },
+      { label: 'Open when Windows starts', type: 'checkbox', checked: isOpenAtLogin(),
+        click: (item) => { try { app.setLoginItemSettings({ openAtLogin: item.checked }); } catch (e) {} } },
+      { type: 'separator' },
+      { label: 'Quit BlitzMall', click: () => { isQuitting = true; app.quit(); } }
+    ]));
+  }
+  try {
+    tray = new Tray(iconPath);
+    tray.setToolTip('BlitzMall HQ');
+    tray.on('click', showMainWindow);
+    tray.on('double-click', showMainWindow);
+    refreshTrayMenu();
+  } catch (e) {
+    tray = null; // no tray on this desktop — closing the window simply quits
+    console.error('[tray] unavailable:', e && e.message);
+  }
+
+  installUpdateNow = ({ hidden = false } = {}) => {
     try {
-      logUpdater('applying update: quitAndInstall(silent, relaunch)');
+      logUpdater(`applying update: quitAndInstall(silent, relaunch)${hidden ? ' — relaunching to tray' : ''}`);
+      if (hidden) { try { fs.writeFileSync(hiddenRelaunchFlag(), '1'); } catch (e) {} }
+      isQuitting = true;
       autoUpdater.quitAndInstall(true, true);
+      return true;
     } catch (e) {
+      isQuitting = false;
+      if (hidden) consumeHiddenRelaunch();
       console.error('[updater] quitAndInstall failed:', e && e.message);
       logUpdater('quitAndInstall failed: ' + (e && e.message));
-      return { ok: false };
+      return false;
     }
-    return { ok: true };
-  });
+  };
+  ipcMain.handle('updater:install', async () => ({ ok: installUpdateNow() }));
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+// Real quits (tray → Quit, Windows shutdown, the updater) must not be turned
+// into "hide to tray" by the window's close handler.
+app.on('before-quit', () => { isQuitting = true; });
 
 // ===== Native notification bridge =====
 // Electron cannot do web push (no PushManager API), so the desktop app polls a
@@ -391,14 +529,20 @@ const NOTIF_FEED_URL = 'https://blitzmall-backend.onrender.com/api/notifications
 let notifSince = null; // null => prime the cursor on the first poll (no backlog toasts)
 const shownNotifIds = new Set(); // in-session dedup so a failed cursor save can't re-toast
 
-const showNativeToast = (title, body) => {
+function showNativeToast(title, body, { silent = false } = {}) {
   try {
     const { Notification } = require('electron');
     if (Notification.isSupported()) {
-      new Notification({ title: String(title || 'BlitzMall'), body: String(body || ''), silent: false }).show();
+      const n = new Notification({ title: String(title || 'BlitzMall'), body: String(body || ''), silent, icon: iconPath });
+      n.on('click', showMainWindow); // clicking a toast opens the app
+      n.show();
+    }
+    // Blink the taskbar button so an alert is not missed behind other windows.
+    if (!silent && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isFocused()) {
+      mainWindow.flashFrame(true);
     }
   } catch (e) { console.error('[notif] toast failed:', e && e.message); }
-};
+}
 
 const pollNotifications = async () => {
   try {

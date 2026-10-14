@@ -8,6 +8,10 @@ const { searchImagesLimiter } = require('../lib/limiters');
 const { scheduleAlertSweep, sendPushToAll } = require('../lib/notifications');
 const { applyPricingRules } = require('../lib/pricing');
 
+// Shoppers never see cost prices or internal alert markers.
+const PRIVATE_FIELDS = ['buyingPrice', 'cost', 'alertedOutAt', 'alertedLowAt', 'alertedExpiryAt', 'alertedExpiredAt', 'supplierId', 'taxCategory'];
+const publicProduct = (p) => { const out = { ...p }; for (const k of PRIVATE_FIELDS) delete out[k]; return out; };
+
 module.exports = function register(app) {
   // ===== CUSTOMER =====
   app.get('/api/products', async (req, res) => {
@@ -16,7 +20,7 @@ module.exports = function register(app) {
       let priced = productCache.get(cacheKey);
       if (!priced) {
         const list = await col.products.find().toArray();
-        priced = await applyPricingRules(list);
+        priced = (await applyPricingRules(list)).map(publicProduct);
         productCache.set(cacheKey, priced);
       }
       // 4K image upgrade happens PER REQUEST (after cache) so phone customers
