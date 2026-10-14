@@ -36,10 +36,12 @@ services:
         sync: false
       - key: AT_SENDER_ID
         sync: false
-      # TEMPORARY: shows the sign-in code on screen when an SMS fails. Anyone can
-      # then sign in to any account — set to "false" as soon as SMS delivers.
+      # Shows the sign-in code ON SCREEN when an SMS fails = anyone can sign into
+      # any account, so it is OFF. Sign-in now requires a real delivered SMS.
+      # EMERGENCY ONLY: if SMS delivery breaks and customers are locked out, set
+      # this to "true" in the Render dashboard for an instant (no-code) toggle.
       - key: OTP_SCREEN_FALLBACK
-        value: "true"
+        value: "false"
       # Random string; append ?secret=<same value> to CALLBACK_URL
       - key: MPESA_CALLBACK_SECRET
         sync: false
