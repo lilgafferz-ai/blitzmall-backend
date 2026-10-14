@@ -43,6 +43,11 @@ services:
       # Random string; append ?secret=<same value> to CALLBACK_URL
       - key: MPESA_CALLBACK_SECRET
         sync: false
+      # KRA eTIMS VSCU/OSCU endpoint + key (only after KRA onboarding; empty = invoices queue)
+      - key: ETIMS_VSCU_URL
+        sync: false
+      - key: ETIMS_VSCU_KEY
+        sync: false
       # Firebase service-account JSON (raw or base64) for real device push
       - key: FCM_SERVICE_ACCOUNT_JSON
         sync: false

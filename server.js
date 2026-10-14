@@ -29,6 +29,8 @@ const { cancelOrderAndRestore, placeOrder, provisionalDeliveryFee } = require('.
 const { applyPricingRules } = require('./lib/pricing');
 const { orderProfit } = require('./lib/reports');
 const { otpScreenFallback, otpStore } = require('./lib/sms');
+const { dailyReportTick } = require('./lib/dailyReport');
+const { submitPendingInvoices } = require('./lib/etims');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -110,6 +112,11 @@ function startServer() {
     // first pass a minute after boot so existing problem items alert promptly.
     setTimeout(() => scheduleAlertSweep(), 60 * 1000);
     setInterval(scheduleAlertSweep, ALERT_SWEEP_MS);
+
+    // Nightly closing report to the owner (at the time set in HQ → Records),
+    // and the eTIMS retry queue (only does anything once ETIMS_VSCU_URL is set).
+    setInterval(dailyReportTick, 60 * 1000);
+    setInterval(() => submitPendingInvoices().catch(() => {}), 5 * 60 * 1000);
   });
 }
 
@@ -133,6 +140,10 @@ require('./routes/mpesa')(app);
 require('./routes/ai')(app);
 require('./routes/system')(app);
 require('./routes/notifications')(app);
+require('./routes/delivery')(app);
+require('./routes/inventoryOps')(app);
+require('./routes/taxReports')(app);
+require('./routes/productReviews')(app);
 
 // Serve React frontend for any non-API route (React Router support)
 app.get('/*path', (req, res, next) => {

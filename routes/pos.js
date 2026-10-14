@@ -7,6 +7,7 @@ const { earnPoints, reversePoints } = require('../lib/loyalty');
 const { scheduleAlertSweep } = require('../lib/notifications');
 const { cleanPosItems, saleTotals } = require('../lib/orders');
 const { liveSales } = require('../lib/reports');
+const { invoiceSale, creditNoteFor } = require('../lib/etims');
 const { cleanPhone } = require('../lib/util');
 
 module.exports = function register(app) {
@@ -29,6 +30,7 @@ module.exports = function register(app) {
         createdAt: new Date(),
       };
       const result = await col.sales.insertOne(sale);
+      invoiceSale({ ...sale, _id: result.insertedId });
       for (const it of items) if (it.productId) await col.products.updateOne({ _id: new ObjectId(it.productId) }, { $inc: { stock: -Math.abs(it.qty) } });
       productCache.del('all_products');
       scheduleAlertSweep(); // stock just changed — check for out-of-stock / low / expiry alerts
@@ -50,6 +52,7 @@ module.exports = function register(app) {
       // Voiding a sale reverses any loyalty points it earned (anti-abuse).
       if (sale.customerPhone && sale.total) reversePoints(sale.customerPhone, sale.total);
       await col.sales.deleteOne({ _id: new ObjectId(req.params.saleId) });
+      creditNoteFor('sale', sale._id);
       res.json({ success: true });
     } catch (e) { console.error('Failed to void sale:', e); res.status(500).json({ error: 'Failed to void sale' }); }
   });

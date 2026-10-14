@@ -497,3 +497,47 @@ input, textarea, select {
   .blitz-admin-header .blitz-admin-exit { display: none; }
   .blitz-admin-header .blitz-admin-bell { width: 38px; height: 38px; font-size: 1.05rem; }
 }
+/* ===== AdminExtras: deliveries, suppliers, stock-take, tax, reports ===== */
+.ax-section{background:var(--card,#16161b);border:1px solid var(--line,#2a2a33);border-radius:14px;padding:14px;margin:14px 0;display:flex;flex-direction:column;gap:10px;}
+.ax-section h3{margin:0;font-size:1rem;}
+.ax-card{background:var(--bg-2,#101014);border:1px solid var(--line,#2a2a33);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:6px;margin-bottom:8px;}
+.ax-card.on_the_way{border-color:#ff9f0a;}
+.ax-row{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;}
+.ax-row label{display:flex;flex-direction:column;gap:4px;font-size:.78rem;min-width:140px;flex:1;}
+.ax-row input,.ax-row select,.ax-slotrow input,.ax-deal input,.ax-assign select,.ax-inline input,.ax-section input[type=month],.ax-section input[type=date]{background:var(--bg-2,#101014);color:var(--text,#f4f4f6);border:1px solid var(--line,#2a2a33);border-radius:8px;padding:8px;font-family:inherit;}
+.ax-fields{display:flex;flex-direction:column;gap:10px;border:1px dashed var(--line,#2a2a33);border-radius:12px;padding:10px;}
+.ax-deals{display:flex;flex-direction:column;gap:6px;}
+.ax-deal{display:flex;gap:6px;align-items:center;}
+.ax-deal input{width:90px;}
+.ax-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+.ax-badge{font-size:.7rem;text-transform:uppercase;padding:2px 8px;border-radius:20px;background:#2a2a33;}
+.ax-badge.on_the_way,.ax-badge.sent{background:rgba(255,159,10,.2);color:#ff9f0a;}
+.ax-badge.received,.ax-badge.delivered{background:rgba(48,209,88,.2);color:#30d158;}
+.ax-badge.cancelled{background:rgba(255,69,58,.2);color:#ff453a;}
+.ax-slot,.ax-pay{font-size:.82rem;}
+.ax-assign{display:flex;gap:8px;align-items:center;font-size:.8rem;flex-wrap:wrap;}
+.ax-gps{background:rgba(48,209,88,.12);border:1px solid rgba(48,209,88,.4);border-radius:10px;padding:8px 12px;font-size:.82rem;display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.ax-green{background:#30d158 !important;color:#000 !important;}
+.ax-greentext{color:#30d158;}
+.ax-red{color:#ff453a;}
+.ax-check{display:flex;gap:8px;align-items:center;font-size:.85rem;}
+.ax-slotrow{display:grid;grid-template-columns:2fr 1fr 1fr 70px auto;gap:6px;align-items:center;}
+.ax-inline{font-size:.8rem;display:flex;gap:6px;align-items:center;}
+.ax-inline input{width:60px;}
+.ax-pick{display:flex;justify-content:space-between;width:100%;background:var(--bg-2,#101014);border:1px solid var(--line,#2a2a33);color:var(--text,#f4f4f6);border-radius:8px;padding:10px;margin-top:4px;cursor:pointer;text-align:left;}
+.ax-counts{display:flex;flex-direction:column;gap:6px;font-size:.85rem;max-height:320px;overflow:auto;}
+.ax-hist{font-size:.78rem;padding:6px 0;border-bottom:1px solid var(--line,#2a2a33);gap:8px;flex-wrap:wrap;}
+.ax-note{font-size:.8rem;padding:8px 10px;border-radius:8px;background:rgba(255,159,10,.1);color:#ffb340;}
+.ax-note.ok{background:rgba(48,209,88,.1);color:#30d158;}
+.ax-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;}
+.ax-kpis div{background:var(--bg-2,#101014);border-radius:10px;padding:10px;display:flex;flex-direction:column;}
+.ax-kpis small{color:var(--muted,#8a8a96);font-size:.7rem;}
+.ax-kpis span{color:var(--muted,#8a8a96);font-size:.72rem;}
+.ax-report{white-space:pre-wrap;font-size:.78rem;background:var(--bg-2,#101014);padding:10px;border-radius:8px;margin:0;}
+.ax-result{border-color:#30d158;}
+.ax-hidden{opacity:.5;}
+.ax-orderinfo{display:flex;gap:12px;font-size:.78rem;color:#ffb340;margin-top:4px;}
+.pos-deal{color:#30d158;font-size:.75rem;}
+.pos-qty-input{width:64px;text-align:center;background:transparent;color:inherit;border:1px solid var(--line,#2a2a33);border-radius:6px;padding:4px;}
+.ax-slotrow input{min-width:0;width:100%;box-sizing:border-box;}
+@media (max-width:600px){.ax-slotrow{grid-template-columns:1fr 1fr;}.ax-slotrow input:first-child{grid-column:1/-1;}}

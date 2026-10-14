@@ -1,10 +1,9 @@
 // M-Pesa STK push, Safaricom callbacks and payment status.
-const crypto = require('crypto');
 const { ObjectId } = require('mongodb');
-const { CUSTOMER_AUTH_ERROR, authenticate, customerFromRequest, staffFromRequest } = require('../lib/auth');
+const { CUSTOMER_AUTH_ERROR, authenticate, authenticateCustomer, customerFromRequest, staffFromRequest } = require('../lib/auth');
 const { col } = require('../lib/db');
 const { mpesaPushLimiter, mpesaStatusLimiter } = require('../lib/limiters');
-const { MPESA_BASE, MPESA_PASSKEY, MPESA_SHORTCODE, applyMpesaResult, finalizePosSale, formatPhone, getMpesaCallbackUrl, getMpesaToken, mpesaCredentialsReady, mpesaMock, mpesaTimestamp, safaricomRequest, verifyMpesaRequest, verifySoon } = require('../lib/mpesa');
+const { finalizePosSale, requestStkPush, verifyMpesaRequest, verifySoon } = require('../lib/mpesa');
 const { notifyPaymentConfirmed } = require('../lib/notifications');
 const { cleanPosItems, saleTotals } = require('../lib/orders');
 const { cleanPhone, safeEqual } = require('../lib/util');
@@ -59,69 +58,36 @@ module.exports = function register(app) {
 
       const payPhone = phone || (order && order.customerId) || customerPhone;
       if (!payPhone) return res.status(400).json({ success: false, error: 'Phone required' });
-      const formattedPhone = formatPhone(payPhone);
-      if (!/^254(7|1)\d{8}$/.test(formattedPhone)) {
-        return res.status(400).json({ success: false, error: `Invalid M-Pesa phone number: ${formattedPhone}` });
-      }
-      const numericAmount = Math.ceil(amount);
-      if (!Number.isFinite(numericAmount) || numericAmount < 1) {
-        return res.status(400).json({ success: false, error: `Invalid M-Pesa amount: ${amount}` });
-      }
-      const baseDoc = {
-        phone: formattedPhone, amount: numericAmount, orderId: orderId ? String(orderId) : null,
-        saleDraft: cleanDraft, saleCreated: false, status: 'pending', createdAt: new Date(),
+      const result = await requestStkPush({
+        phone: payPhone, amount, orderId: orderId ? String(orderId) : null, saleDraft: cleanDraft,
+        purpose: cleanDraft ? 'till' : 'order',
         requestedBy: staff ? `staff:${staff.username}` : `customer:${customerPhone}`
-      };
-
-      if (mpesaMock()) {
-        const mockCheckoutId = 'MOCK-' + crypto.randomBytes(5).toString('hex').toUpperCase();
-        await col.db.collection('mpesa_requests').insertOne({ ...baseDoc, checkoutRequestId: mockCheckoutId, merchantRequestId: 'MOCK-REQ-' + crypto.randomBytes(5).toString('hex').toUpperCase(), mock: true });
-        // Simulated confirmation after 3 seconds (development only — warned at boot).
-        setTimeout(() => {
-          applyMpesaResult(mockCheckoutId, { status: 'confirmed', resultCode: 0, resultDesc: 'The service request is processed successfully.' })
-            .catch(e => console.error('Error in mock M-Pesa confirmation:', e));
-        }, 3000);
-        return res.json({ success: true, checkoutRequestId: mockCheckoutId, amount: numericAmount, message: 'M-Pesa simulation initiated! Confirming in 3 seconds...' });
-      }
-
-      if (!mpesaCredentialsReady()) {
-        return res.status(400).json({ success: false, error: 'M-Pesa API credentials are not configured.' });
-      }
-      const callbackUrl = getMpesaCallbackUrl();
-      if (process.env.NODE_ENV === 'production' && (!callbackUrl.startsWith('https://') || callbackUrl.includes('localhost') || callbackUrl.includes('127.0.0.1'))) {
-        return res.status(400).json({ success: false, error: `Invalid production M-Pesa callback URL: ${callbackUrl}` });
-      }
-      let token;
-      try {
-        token = await getMpesaToken();
-      } catch (err) {
-        console.error('M-Pesa authentication failed:', err.message);
-        return res.status(500).json({ success: false, error: 'M-Pesa authentication failed: ' + err.message });
-      }
-      try {
-        const timestamp = mpesaTimestamp();
-        const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
-        const body = {
-          BusinessShortCode: MPESA_SHORTCODE, Password: password, Timestamp: timestamp,
-          TransactionType: 'CustomerPayBillOnline', Amount: numericAmount,
-          PartyA: formattedPhone, PartyB: MPESA_SHORTCODE, PhoneNumber: formattedPhone,
-          CallBackURL: callbackUrl, AccountReference: 'BlitzMall', TransactionDesc: 'Payment for goods',
-        };
-        const mpesaData = await safaricomRequest(`${MPESA_BASE}/mpesa/stkpush/v1/processrequest`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (mpesaData.ResponseCode === '0') {
-          await col.db.collection('mpesa_requests').insertOne({ ...baseDoc, checkoutRequestId: mpesaData.CheckoutRequestID, merchantRequestId: mpesaData.MerchantRequestID });
-          return res.json({ success: true, checkoutRequestId: mpesaData.CheckoutRequestID, amount: numericAmount, message: 'M-Pesa prompt sent! Ask customer to enter PIN.' });
-        }
-        return res.status(400).json({ success: false, error: mpesaData.errorMessage || mpesaData.ResultDesc || 'M-Pesa request rejected by Safaricom.' });
-      } catch (err) {
-        console.error('M-Pesa STK Push request failed:', err.message);
-        return res.status(500).json({ success: false, error: 'M-Pesa STK Push request failed: ' + err.message });
-      }
+      }, { reference: cleanDraft ? 'BlitzPOS' : 'BlitzMall' });
+      if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
+      return res.json({ success: true, checkoutRequestId: result.checkoutRequestId, amount: result.amount, message: result.message });
     } catch (err) { console.error('STK Push error:', err); res.status(500).json({ error: 'Failed to initiate M-Pesa payment', details: err.message }); }
+  });
+
+  // Wallet top-up: load cash into the BlitzMall wallet by M-Pesa. The amount
+  // is credited only after Safaricom confirms (see applyMpesaResult). The app
+  // polls /api/mpesa/status/:checkoutRequestId like any other payment.
+  const TOPUP_MIN = 10, TOPUP_MAX = 20000;
+  app.post('/api/wallet/topup', mpesaPushLimiter, authenticateCustomer, async (req, res) => {
+    const amount = Math.round(parseFloat(req.body && req.body.amount));
+    if (!(amount >= TOPUP_MIN && amount <= TOPUP_MAX)) {
+      return res.status(400).json({ success: false, error: `Top up between KES ${TOPUP_MIN} and KES ${TOPUP_MAX.toLocaleString('en-KE')}` });
+    }
+    try {
+      const phone = req.customerPhone;
+      const recent = await col.db.collection('mpesa_requests').findOne({ purpose: 'wallet_topup', walletPhone: phone, status: 'pending', createdAt: { $gte: new Date(Date.now() - 2 * 60 * 1000) } });
+      if (recent) return res.status(400).json({ success: false, error: 'A top-up request is already waiting on your phone. Enter your PIN or wait a moment.' });
+      const result = await requestStkPush({
+        phone: cleanPhone(req.body.phone) || phone, amount, orderId: null, saleDraft: null,
+        purpose: 'wallet_topup', walletPhone: phone, requestedBy: `customer:${phone}`
+      }, { reference: 'BlitzWallet' });
+      if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
+      res.json({ success: true, checkoutRequestId: result.checkoutRequestId, amount: result.amount, message: result.message });
+    } catch (e) { console.error('Wallet top-up failed:', e); res.status(500).json({ success: false, error: 'Could not start the top-up' }); }
   });
 
   // Safaricom's callback is treated as a NUDGE, never as proof: anyone on the
