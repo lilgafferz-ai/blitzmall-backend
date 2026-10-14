@@ -168,7 +168,7 @@ export function SettingsScreen({ ctx }) {
     perfMode, setPerfMode, defaultArea, setDefaultArea,
     pendingOfflineOrders, syncOfflineOrders, clearCachedData,
     update, bundleVersion, isNativeApp, isDesktopApp,
-    shopInfo, signOut, signOutEverywhere, exitApp
+    shopInfo, signOut, signOutEverywhere, exitApp, appLock
   } = ctx;
   const [confirm, setConfirm] = useState(null); // 'signout' | 'everywhere' | 'clear' | 'exit'
   const phoneDigits = (shopInfo?.phone || '').replace(/[^0-9]/g, '');
@@ -185,6 +185,13 @@ export function SettingsScreen({ ctx }) {
           <SettingsRow icon="👤" tone="orange" label="Edit profile" sub="Name and photo" onClick={() => go('edit-profile')} />
           <SettingsRow icon="📱" label="Signed in as" value={customer?.customerId} />
         </SettingsGroup>
+
+        {appLock && (
+          <SettingsGroup title="Security" footer={appLock.hasFingerprint ? 'The app locks every time you leave it. Unlock with your fingerprint, or your PIN as a backup.' : 'The app locks with your PIN every time you leave it.'}>
+            <SettingsRow icon="🔒" tone="blue" label="App lock" value={appLock.hasFingerprint ? 'Fingerprint + PIN' : 'PIN'} />
+            <SettingsRow icon="🔢" label="Change PIN" onClick={appLock.changePin} />
+          </SettingsGroup>
+        )}
 
         <SettingsGroup title="Notifications" footer="Order updates, payment confirmations, prizes and new offers.">
           <SettingsRow icon="🔔" tone="gold" label="Push notifications" sub={notifEnabled ? 'On for this device' : 'Off'}
