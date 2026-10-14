@@ -8,6 +8,7 @@ const { LOYALTY_SETTINGS_DEFAULTS, WHEEL_SECTORS, getLoyaltySettings, promoDayKe
 const { sendPushToPhone } = require('../lib/notifications');
 const { couponDiscount, couponProblem } = require('../lib/orders');
 const { cleanPhone, samePhone } = require('../lib/util');
+const { recordWalletTx } = require('../lib/wallet');
 
 module.exports = function register(app) {
   app.get('/api/admin/loyalty', authenticate, async (req, res) => {
@@ -50,6 +51,7 @@ module.exports = function register(app) {
       const cashAmount = ptsToRedeem / 5; // 5 points = KES 1 (owner currency)
       const after = await spendPoints(phoneClean, ptsToRedeem, { walletBalance: cashAmount });
       if (!after) return res.status(400).json({ error: 'Insufficient loyalty points' });
+      await recordWalletTx({ phone: phoneClean, type: 'points_conversion', amount: cashAmount, balanceAfter: after.walletBalance, note: `${ptsToRedeem} points converted` });
 
       await col.redemptions.insertOne({
         customerId: phoneClean,

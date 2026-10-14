@@ -1,4 +1,7 @@
 {
-  "version": "0.1.50-11b095fdd0",
-  "fileName": "bundle-0.1.50-11b095fdd0.zip"
+  "version": "0.1.50-acc9bdd0e8",
+  "fileName": "bundle-0.1.50-acc9bdd0e8.zip",
+  "appVersion": "0.1.50",
+  "sha256": "a1e58f090d73c93a46f5a432daa5715bf60717b29b8140c941a46cfb21de62fe",
+  "signature": "zTpcOm+YgRIIInKAn4ByA56ssmG+KEmseqBk7GyN+MivS2IM3VtjPUPN5boPUofD81EIlubcjQXckDSCbhSe7g=="
 }

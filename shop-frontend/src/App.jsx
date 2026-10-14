@@ -1636,7 +1636,8 @@ function App() {
           return;
         }
         showToast('Downloading new update...');
-        const bundle = await CapacitorUpdater.download({ url: latest.url, version: latest.version });
+        const { downloadVerifiedBundle } = await import('./otaUpdate');
+        const bundle = await downloadVerifiedBundle(CapacitorUpdater, latest);
         await CapacitorUpdater.next({ id: bundle.id });
         showToast('⚡ Update applied! Reloading...');
         setTimeout(() => {
@@ -1651,7 +1652,8 @@ function App() {
       }
     } catch (e) {
       console.error(e);
-      showToast('Update check failed');
+      // A refused (unsigned / tampered / downgrade) bundle says why.
+      showToast(e && /refusing|signed|signature|verify/i.test(e.message || '') ? '🛡️ ' + e.message : 'Update check failed');
     } finally {
       setCheckingUpdate(false);
     }

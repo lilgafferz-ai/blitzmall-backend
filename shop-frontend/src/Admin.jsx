@@ -657,6 +657,12 @@ function Admin({ onExit }) {
 
   const authFetch = async (url, opts = {}) => {
     const res = await fetch(url, { ...opts, headers: authHeaders() });
+    // Sliding session: the server hands back a fresh 30-day token now and then.
+    const renewed = res.headers.get('X-Renewed-Token');
+    if (renewed) {
+      try { localStorage.setItem('bm_token', renewed); } catch (e) { /* storage blocked */ }
+      try { if (sessionStorage.getItem('bm_token')) sessionStorage.setItem('bm_token', renewed); } catch (e) { /* storage blocked */ }
+    }
     if (res.status === 401) {
       try {
         const d = await res.clone().json();
@@ -2186,7 +2192,7 @@ ${div}
         <div className="blitz-admin-body">
           <h2>⚙️ Settings</h2>
           <AdminSettings ctx={{
-            API_URL, user, authPost, logout, onExit,
+            API_URL, user, authGet, authPost, logout, onExit,
             branchName: user?.branchId ? (branches.find(b => b._id === user.branchId)?.name || '') : '',
             onTokenRefreshed: (t) => {
               try { localStorage.setItem('bm_token', t); sessionStorage.setItem('bm_token', t); } catch (e) {}

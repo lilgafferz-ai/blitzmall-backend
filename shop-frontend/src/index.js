@@ -5,6 +5,7 @@ import App from './App';
 import reportWebVitals from './reportWebVitals';
 import ErrorBoundary from './ErrorBoundary';
 import { CapacitorUpdater } from '@capgo/capacitor-updater';
+import { downloadVerifiedBundle } from './otaUpdate';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
@@ -20,8 +21,9 @@ CapacitorUpdater.notifyAppReady();
 const isNativeApp = typeof window !== 'undefined' && !!window.Capacitor?.isNativePlatform?.();
 
 // Self-hosted over-the-air updates (native app only): ask our own server for the
-// newest web bundle, download it in the background, and queue it to apply the
-// next time the app is reopened — instant updates with no Play Store release.
+// newest web bundle, check its signature (src/otaUpdate.js), download it in the
+// background, and queue it to apply the next time the app is reopened —
+// instant updates with no Play Store release.
 async function checkForBundleUpdate() {
   if (!isNativeApp) return;
   try {
@@ -34,7 +36,7 @@ async function checkForBundleUpdate() {
     if (!latest || !latest.version || !latest.url) return;
     const cur = await CapacitorUpdater.current();
     if (cur && cur.bundle && cur.bundle.version === latest.version) return; // up to date
-    const bundle = await CapacitorUpdater.download({ url: latest.url, version: latest.version });
+    const bundle = await downloadVerifiedBundle(CapacitorUpdater, latest);
     await CapacitorUpdater.next({ id: bundle.id }); // applies on next reopen, no interruption
     console.log('OTA update ready, applies on next launch:', latest.version);
   } catch (e) {
