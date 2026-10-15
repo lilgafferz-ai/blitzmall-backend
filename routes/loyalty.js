@@ -8,6 +8,7 @@ const { couponCheckLimiter, promosLimiter, walletLimiter } = require('../lib/lim
 const { LOYALTY_SETTINGS_DEFAULTS, WHEEL_SECTORS, getLoyaltySettings, incPoints, promoDayKey, runPromo, saveLoyaltySettings, spendPoints, tierFromPoints } = require('../lib/loyalty');
 const { sendPushToPhone } = require('../lib/notifications');
 const { couponDiscount, couponProblem } = require('../lib/orders');
+const { liveSales } = require('../lib/reports');
 const { cleanPhone, samePhone } = require('../lib/util');
 const { recordWalletTx } = require('../lib/wallet');
 
@@ -297,7 +298,7 @@ module.exports = function register(app) {
         col.sales.find({ createdAt: { $gte: since30 } }).toArray(),
         col.orders.find({ createdAt: { $gte: since30 } }).toArray()
       ]);
-      const salesRevenue30d = sales30.reduce((s, x) => s + (x.total || 0), 0) +
+      const salesRevenue30d = liveSales(sales30).reduce((s, x) => s + (x.total || 0), 0) +
         orders30.filter(o => o.status !== 'cancelled').reduce((s, o) => s + (o.totalPrice || 0), 0);
       res.json({
         memberCount: members.length,
