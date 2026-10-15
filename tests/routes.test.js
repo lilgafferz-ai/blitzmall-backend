@@ -53,6 +53,40 @@ describe('Old APK links', () => {
   });
 });
 
+describe('PC update feed', () => {
+  const RELEASES = 'https://github.com/yrngaffer/blitzmall-backend/releases/latest/download/';
+
+  it('redirects update files to the newest GitHub release asset', async () => {
+    for (const file of ['latest.yml', 'BlitzMall-Setup-0.1.53.exe', 'BlitzMall-Setup-0.1.53.exe.blockmap']) {
+      const r = await request(app).get(`/api/pc-update/${file}`);
+      expect(r.statusCode).toBe(302);
+      expect(r.headers.location).toBe(RELEASES + file);
+    }
+  });
+
+  it('follows PC_RELEASES_REPO and ignores a malformed value', async () => {
+    const prev = process.env.PC_RELEASES_REPO;
+    try {
+      process.env.PC_RELEASES_REPO = 'someone/new-repo';
+      let r = await request(app).get('/api/pc-update/latest.yml');
+      expect(r.headers.location).toBe('https://github.com/someone/new-repo/releases/latest/download/latest.yml');
+      process.env.PC_RELEASES_REPO = 'evil.com/x/y';
+      r = await request(app).get('/api/pc-update/latest.yml');
+      expect(r.headers.location).toBe(RELEASES + 'latest.yml');
+    } finally {
+      if (prev === undefined) delete process.env.PC_RELEASES_REPO;
+      else process.env.PC_RELEASES_REPO = prev;
+    }
+  });
+
+  it('refuses anything that is not an update file', async () => {
+    for (const file of ['index.html', 'secrets.json', 'latest.yml.exe.txt']) {
+      const r = await request(app).get(`/api/pc-update/${file}`);
+      expect(r.statusCode).toBe(404);
+    }
+  });
+});
+
 describe('Settings endpoints', () => {
   it('/api/shop-info returns the shop contact and coordinates', async () => {
     const r = await request(app).get('/api/shop-info');

@@ -4,7 +4,7 @@ Online shop + POS + admin dashboard for Blitz Mall (Matunda, Kakamega).
 
 - **Web app (customers + admin):** https://blitzmall-backend.onrender.com
 - **Backend API:** https://blitzmall-backend.onrender.com/api
-- **Source repo:** github.com/lilgafferz-ai/blitzmall-backend
+- **Source repo:** github.com/yrngaffer/blitzmall-backend
 
 ---
 
@@ -21,9 +21,9 @@ Online shop + POS + admin dashboard for Blitz Mall (Matunda, Kakamega).
 
 ## 🖥️ PC app (Blitz Mall HQ — shop admin)
 
-**Install (first time):** download `BlitzMall-Setup-*.exe` from https://github.com/lilgafferz-ai/blitzmall-backend/releases
+**Install (first time):** download `BlitzMall-Setup-*.exe` from https://github.com/yrngaffer/blitzmall-backend/releases
 
-**Update (no reinstall needed):** the desktop app checks GitHub releases on launch and every few minutes, downloads new versions silently and installs them on restart.
+**Update (no reinstall needed):** the desktop app checks for new releases on launch and every few minutes (via the server's `/api/pc-update`, which points at this repo's GitHub releases; set `PC_RELEASES_REPO` on Render if the repo ever moves), downloads new versions silently and installs them on restart.
 
 ---
 
