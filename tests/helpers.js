@@ -12,19 +12,23 @@ async function getOwnerToken(request, app) {
   return r.body && r.body.token;
 }
 
-// Customer sessions: sign in exactly like the app does (request a code, then
-// verify it). No SMS gateway exists in tests, so the server's on-screen
-// fallback hands the code back as devOtp. Tokens are cached per phone because
-// a second code for the same number inside 30s is refused (resend cooldown).
+// Customer sessions: sign in exactly like the app does now — phone + PIN. On a
+// fresh number we enroll (set a PIN + recovery question); if the number was
+// already enrolled in an earlier run we fall back to logging in with the same
+// test PIN. Tokens are cached per phone so repeated sign-ins are cheap.
+const TEST_PIN = '1234';
 const customerTokens = new Map();
 async function customerToken(request, app, phone, name = 'Test Shopper', extra = {}) {
   if (customerTokens.has(phone)) return customerTokens.get(phone);
-  const r = await request(app).post('/api/auth').send({ name, phone });
-  if (!r.body || !r.body.devOtp) throw new Error('No devOtp for ' + phone + ': ' + JSON.stringify(r.body));
-  const v = await request(app).post('/api/auth/verify-otp').send({ phone, otp: r.body.devOtp, name, ...extra });
-  if (!v.body || !v.body.token) throw new Error('Sign-in failed for ' + phone + ': ' + JSON.stringify(v.body));
-  customerTokens.set(phone, v.body.token);
-  return v.body.token;
+  let r = await request(app).post('/api/auth/enroll').send({
+    phone, name, pin: TEST_PIN, securityQuestion: 'Test question?', securityAnswer: 'test', ...extra
+  });
+  if (!(r.body && r.body.token)) {
+    r = await request(app).post('/api/auth/login').send({ phone, pin: TEST_PIN });
+  }
+  if (!r.body || !r.body.token) throw new Error('Sign-in failed for ' + phone + ': ' + JSON.stringify(r.body));
+  customerTokens.set(phone, r.body.token);
+  return r.body.token;
 }
 
 const bearer = (token) => ({ Authorization: 'Bearer ' + token });

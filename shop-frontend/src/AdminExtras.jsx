@@ -554,3 +554,145 @@ export function ProductReviewsAdmin({ api, canModerate }) {
     </div>
   );
 }
+
+// ===== CUSTOMERS DASHBOARD (owner) =====
+// Every customer with their money, points and info so the owner can look someone
+// up, confirm it's them, and RESET a locked-out account's PIN (never see the PIN).
+export function CustomersTab({ api }) {
+  const [rows, setRows] = useState([]);
+  const [q, setQ] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);   // selected phone
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  const load = useCallback(async (query = '') => {
+    setLoading(true);
+    try {
+      const d = await json(await api.authGet(api.API_URL + '/admin/customers' + (query ? '?q=' + encodeURIComponent(query) : '')));
+      setRows(Array.isArray(d.customers) ? d.customers : []);
+    } catch (e) { setRows([]); }
+    setLoading(false);
+  }, [api]);
+
+  useEffect(() => { load(''); }, [load]);
+  // Debounced search as the owner types.
+  useEffect(() => {
+    const id = setTimeout(() => load(q.trim()), 300);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+
+  const openDetail = async (phone) => {
+    setSelected(phone); setDetail(null); setDetailLoading(true);
+    try { setDetail(await json(await api.authGet(api.API_URL + '/admin/customers/' + encodeURIComponent(phone)))); }
+    catch (e) { setDetail(null); }
+    setDetailLoading(false);
+  };
+
+  const resetPin = async (phone, name) => {
+    if (!window.confirm(`Reset the PIN for ${name || phone}?\n\nThis signs them out and lets them set a NEW PIN the next time they open the app. Their wallet money, points and orders are NOT affected.\n\nOnly do this after you've confirmed it's really them (ask their security question).`)) return;
+    const d = await json(await api.authPost(api.API_URL + '/admin/customers/' + encodeURIComponent(phone) + '/reset-pin', {}));
+    if (!d.success) { alert(d.error || 'Failed'); return; }
+    alert('✅ ' + (d.message || 'PIN reset.'));
+    openDetail(phone); load(q.trim());
+  };
+
+  const S = detail && detail.security ? detail.security : {};
+  return (
+    <div className="blitz-admin-body">
+      <div className="blitz-admin-row-between">
+        <h2>👥 Customers</h2>
+        <span className="blitz-admin-muted" style={{ fontSize: '.78rem' }}>Owner · {rows.length} shown</span>
+      </div>
+      <input
+        placeholder="🔍 Search name or phone…" value={q} onChange={e => setQ(e.target.value)}
+        style={{ width: '100%', maxWidth: 420, marginBottom: 12, padding: '10px 12px', borderRadius: 10, border: '1px solid var(--line)', background: 'var(--card)', color: 'var(--text)' }}
+      />
+
+      {loading ? <p className="blitz-admin-muted">Loading…</p> : rows.length === 0 ? <p className="blitz-admin-empty">No customers found.</p> : (
+        <div className="blitz-admin-list">
+          {rows.map(c => (
+            <div key={c.phone} className="exp-row" style={{ cursor: 'pointer' }} onClick={() => openDetail(c.phone)}>
+              <div>
+                <b>{c.name || '(no name)'}</b>
+                {c.locked && <span className="ax-badge cancelled" style={{ marginLeft: 6 }}>locked</span>}
+                {!c.hasPin && <span className="blitz-admin-muted" style={{ marginLeft: 6 }}>no PIN</span>}
+                <div className="blitz-admin-muted">{c.phone} · {c.tier} · {c.orderCount} orders</div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div><b>{money(c.walletBalance)}</b></div>
+                <div className="blitz-admin-muted">{c.points} pts</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <div className="ax-section" style={{ marginTop: 16 }}>
+          <div className="blitz-admin-row-between">
+            <h3>Customer details</h3>
+            <button className="pos-void" onClick={() => { setSelected(null); setDetail(null); }}>close</button>
+          </div>
+          {detailLoading ? <p className="blitz-admin-muted">Loading…</p> : !detail || detail.error ? <p className="blitz-admin-empty">Could not load this customer.</p> : (
+            <div className="ax-card">
+              <div className="blitz-admin-row-between"><b style={{ fontSize: '1.05rem' }}>{detail.name || '(no name)'}</b><span>{detail.phone}</span></div>
+              <div className="blitz-admin-muted">Member since {when(detail.createdAt) || '—'} · last seen {when(detail.lastLoginAt) || '—'}</div>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, margin: '12px 0' }}>
+                <div><span className="blitz-admin-muted">Wallet</span><br /><b>{money(detail.walletBalance)}</b></div>
+                <div><span className="blitz-admin-muted">Points</span><br /><b>{detail.points}</b> <span className="blitz-admin-muted">({detail.tier})</span></div>
+                <div><span className="blitz-admin-muted">Orders</span><br /><b>{detail.orderCount}</b></div>
+                <div><span className="blitz-admin-muted">Spent</span><br /><b>{money(detail.totalSpent)}</b></div>
+                {detail.outstandingDebt > 0 && <div><span className="blitz-admin-muted">Owes</span><br /><b style={{ color: '#ff5a5f' }}>{money(detail.outstandingDebt)}</b></div>}
+              </div>
+              {detail.lastAddress && (detail.lastAddress.location || detail.lastAddress.area) && (
+                <div className="blitz-admin-muted">📍 {detail.lastAddress.location} {detail.lastAddress.area}</div>
+              )}
+              {detail.referralCode && <div className="blitz-admin-muted">Referral code {detail.referralCode} · referred {detail.referralCount}</div>}
+
+              <div className="ax-section">
+                <h4>🔐 Account & recovery</h4>
+                <div className="blitz-admin-muted">
+                  PIN: {S.hasPin ? '✅ set' : '❌ not set'}{S.locked ? ' · 🔒 LOCKED' : ''}{S.failedPinAttempts ? ` · ${S.failedPinAttempts} failed tries` : ''}
+                </div>
+                <div className="blitz-admin-muted">Security question: {S.securityQuestion || '—'}</div>
+                <div className="ax-actions">
+                  <button className="blitz-admin-btn small" onClick={() => resetPin(detail.phone, detail.name)}>Reset PIN (recover account)</button>
+                </div>
+                <p className="blitz-admin-muted" style={{ fontSize: '.72rem' }}>Resets the PIN only — you never see it. Confirm it's really them first (ask their security question). Money, points and orders stay safe.</p>
+              </div>
+
+              <div className="ax-section">
+                <h4>🤖 AI chats ({detail.aiChats ? detail.aiChats.length : 0})</h4>
+                {!detail.aiChats || detail.aiChats.length === 0 ? <p className="blitz-admin-muted">No AI conversations yet.</p> : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 320, overflowY: 'auto' }}>
+                    {detail.aiChats.map((m, i) => (
+                      <div key={i} style={{ borderLeft: '2px solid var(--line)', paddingLeft: 10 }}>
+                        <div>🧑 {m.message}</div>
+                        <div className="blitz-admin-muted">🤖 {m.response}</div>
+                        <div className="blitz-admin-muted" style={{ fontSize: '.65rem' }}>{when(m.createdAt)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {detail.walletLedger && detail.walletLedger.length > 0 && (
+                <div className="ax-section">
+                  <h4>💰 Wallet history</h4>
+                  {detail.walletLedger.slice(0, 12).map((w, i) => (
+                    <div key={i} className="blitz-admin-muted" style={{ fontSize: '.8rem' }}>
+                      {when(w.createdAt)} · {w.type} · <b style={{ color: (w.amount || 0) >= 0 ? '#30d158' : '#ff5a5f' }}>{(w.amount || 0) >= 0 ? '+' : ''}{money(w.amount)}</b> → {money(w.balanceAfter)}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -33,6 +33,12 @@ module.exports = function register(app) {
       } else if (intent.orderResult) {
         action = { type: 'order_placed', orderId: intent.orderResult.orderId, total: intent.orderResult.total };
       }
+      // Log the conversation turn for a signed-in customer so the owner can read
+      // it in Admin → Customers (fire-and-forget: never block or fail the reply).
+      if (customerId && col.ai_chats) {
+        col.ai_chats.insertOne({ phone: customerId, message: text, response: String(response || '').slice(0, 4000), createdAt: new Date() })
+          .catch(e => console.error('ai_chats log failed:', e.message));
+      }
       res.json({ response, action });
     } catch (err) {
       console.error('AI chat error:', err);

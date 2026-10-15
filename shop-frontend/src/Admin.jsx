@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './Admin.css';
-import { ProductSellingFields, DeliveriesTab, SuppliersTab, StockTakeTab, TaxTab, DailyReportCard, ProductReviewsAdmin } from './AdminExtras';
+import { ProductSellingFields, DeliveriesTab, SuppliersTab, StockTakeTab, TaxTab, DailyReportCard, ProductReviewsAdmin, CustomersTab } from './AdminExtras';
 import { lineTotalFor, dealSavingsFor, qtyStepOf, snapQty, formatQty, isLoose } from './pricing';
 import AdminSettings from './screens/AdminSettings';
 import { cacheProducts, getCachedProducts, queueSale, syncQueuedSales, getPendingCount, onOnline, onOffline } from './offline';
@@ -2114,6 +2114,7 @@ const loadStockTransfers = async () => {
     { id: 'credit', label: '🧍 Credit' },
     { id: 'reviews', label: '⭐ Reviews' },
     { id: 'banners', label: '🚀 Banners' },
+    { id: 'customers', label: '👥 Customers' },
     { id: 'loyalty', label: '🎁 Loyalty' },
     { id: 'staff', label: '👷 Staff' },
     { id: 'branches', label: '🏪 Branches' },
@@ -2130,7 +2131,7 @@ const loadStockTransfers = async () => {
     sales: 'Sell', orders: 'Sell', deliveries: 'Sell',
     inventory: 'Store', banners: 'Store', suppliers: 'Store', stocktake: 'Store',
     records: 'Money', expenses: 'Money', credit: 'Money', tax: 'Money',
-    loyalty: 'Customers', reviews: 'Customers', notify: 'Customers',
+    customers: 'Customers', loyalty: 'Customers', reviews: 'Customers', notify: 'Customers',
     staff: 'Team', branches: 'Team', wipe: 'Team',
     settings: 'App'
   };
@@ -3523,6 +3524,7 @@ ${div}
         </div>
       )}
 
+      {safeTab === "customers" && user?.role === 'owner' && <CustomersTab api={extrasApi} />}
       {safeTab === "deliveries" && <DeliveriesTab api={extrasApi} user={user} />}
       {safeTab === "suppliers" && <SuppliersTab api={extrasApi} onStockChanged={loadProducts} />}
       {safeTab === "stocktake" && <StockTakeTab api={extrasApi} products={products} onApplied={loadProducts} />}

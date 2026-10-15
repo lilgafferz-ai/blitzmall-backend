@@ -12,7 +12,7 @@ import { Capacitor } from '@capacitor/core';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import LockScreen from './LockScreen';
-import { isLockEnabled, onAppBackground, biometricCapability, hasPin } from './appLock';
+import { isLockEnabled, onAppBackground, biometricCapability, hasPin, setPin, setLockConfig } from './appLock';
 const Admin = React.lazy(() => import('./Admin'));
 
 const getDefaultApiUrl = () => {
@@ -33,6 +33,16 @@ const FAVORITES_KEY = 'blitz_favorites';
 const RECENT_KEY = 'blitz_recently_viewed';
 const LOW_STOCK_BADGE = 5; // "Only N left" shows at or below this
 const SHOP_COORDS = { lat: 0.8273, lng: 35.1207 }; // Blitz Mall, Matunda
+// Account-recovery questions a shopper picks from at sign-up. Fixed list so the
+// recovery screen can show back the exact question they chose.
+const SECURITY_QUESTIONS = [
+  "What is your mother's maiden name?",
+  'What was the name of your first school?',
+  'What is your favourite food?',
+  'What town were you born in?',
+  "What is your pet's name?",
+  'What is your nickname?'
+];
 
 // Customer session: the server only trusts the signed token it issued after a
 // verified SMS code — never a phone number in the request. Every call to our
@@ -512,7 +522,7 @@ function App() {
     const c = readStoredCustomer();
     if (c && !c.token) {
       try { localStorage.removeItem(CUSTOMER_KEY); } catch {}
-      return 'For your security, confirm your number with a one-time code to sign back in. Your points, wallet and orders are all still there.';
+      return 'For your security, sign back in with your PIN. Your points, wallet and orders are all still there.';
     }
     return '';
   });
@@ -535,18 +545,20 @@ function App() {
   const [referralCode, setReferralCode] = useState('');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
-  // Phone-verified sign-in: every new device confirms the number with a
-  // 6-digit code before the server issues a session (new AND returning numbers).
-  const [otpPending, setOtpPending] = useState(null); // { phone, name, referralCode } awaiting the code
-  const [otpInput, setOtpInput] = useState('');
-  const [otpError, setOtpError] = useState('');
-  // The code the SERVER echoes back only when it could not deliver the SMS
-  // (no gateway configured, or the network rejected the message). It is shown
-  // in a persistent panel so a customer whose text never arrives can still
-  // finish signing in.
-  const [otpDevCode, setOtpDevCode] = useState('');
-  const [otpResendIn, setOtpResendIn] = useState(0);
-  const [otpVerifying, setOtpVerifying] = useState(false);
+  // Phone + PIN sign-in (M-Pesa style). `authStep` drives the login screen:
+  //  phone  → enter the number, we ask the server if it already has a PIN
+  //  login  → existing account: enter your PIN
+  //  enroll → new (or PIN-less) account: name + create a PIN + recovery question
+  //  reset  → forgot PIN: answer the recovery question + set a new PIN
+  const [authStep, setAuthStep] = useState('phone');
+  const [authPin, setAuthPin] = useState('');
+  const [authPin2, setAuthPin2] = useState('');     // confirm PIN on enroll / reset
+  const [securityQuestion, setSecurityQuestion] = useState('');
+  const [securityAnswer, setSecurityAnswer] = useState('');
+  const [recoverQuestion, setRecoverQuestion] = useState(''); // question fetched for the reset step
+  const [knownName, setKnownName] = useState('');   // name returned by /check, for a friendly greeting
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   const [activeCategory, setActiveCategory] = useState('All');
   const [activeProduct, setActiveProduct] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -829,14 +841,6 @@ function App() {
     setScreen('home');
   };
   const saveProfile = (p) => { setProfile(p); try { localStorage.setItem('blitz_profile', JSON.stringify(p)); } catch {} };
-
-  // OTP resend countdown — one tick per second while waiting to resend.
-  useEffect(() => {
-    if (otpResendIn <= 0) return;
-    const id = setInterval(() => setOtpResendIn(s => (s > 0 ? s - 1 : 0)), 1000);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [otpResendIn > 0]);
 
   // App lock — probe whether this device has a fingerprint sensor (native APK
   // with the biometric plugin) once a customer is signed in. Face-only / no
@@ -1502,7 +1506,7 @@ function App() {
   // before the admin early-return so the hook order never changes.
   useEffect(() => {
     const onExpired = () => {
-      setSessionNotice('Your session ended — confirm your number with a one-time code to continue.');
+      setSessionNotice('Your session ended — sign in with your PIN to continue.');
       setCustomer(null);
       setCart([]);
       setMyOrders([]);
@@ -1522,6 +1526,9 @@ function App() {
     // Enabled-but-no-PIN (tampering / partial state) → setup, never an
     // impossible-to-clear unlock screen.
     const inSetup = forceLockSetup || !lockConfigured || !hasPin();
+    // Changing an existing PIN (Settings → Change PIN) verifies the current one
+    // first; a first-time setup (no local PIN yet) does not.
+    const changing = forceLockSetup && hasPin();
     // Wait for the capability probe on an unlock screen so we don't flash the
     // PIN pad and then jump to the fingerprint prompt.
     if (!inSetup && !lockCapReady) {
@@ -1537,11 +1544,29 @@ function App() {
     }
     return (
       <LockScreen
-        mode={inSetup ? 'setup' : 'unlock'}
+        mode={inSetup ? (changing ? 'change' : 'setup') : 'unlock'}
         hasBiometric={!inSetup && lockCap.usable && lockCap.isFingerprint}
         allowCancel={forceLockSetup && lockConfigured}
         logo={<BlitzLogo size={64} />}
-        onDone={() => { setLockConfigured(true); setForceLockSetup(false); setAppLocked(false); }}
+        onDone={async (newPin, currentPin) => {
+          setLockConfigured(true); setForceLockSetup(false); setAppLocked(false);
+          // Keep the server account-PIN in sync with the on-device PIN just set,
+          // and refresh this device's token (the server bumps tokenVersion).
+          if (!newPin || !customer?.customerId) return;
+          try {
+            const r = await custFetch(`${API_URL}/auth/change-pin`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ currentPin, newPin }) });
+            const d = await r.json().catch(() => ({}));
+            if (d.success && d.token) {
+              const cust = { ...customer, token: d.token };
+              setCustomer(cust);
+              try { localStorage.setItem(CUSTOMER_KEY, JSON.stringify(cust)); } catch {}
+            } else {
+              showToast(d.error ? `PIN not updated online: ${d.error}` : 'PIN changed on this device but not synced — it may differ on another device.');
+            }
+          } catch (e) {
+            showToast('PIN changed on this device but could not sync online.');
+          }
+        }}
         onUnlock={() => setAppLocked(false)}
         onCancel={() => setForceLockSetup(false)}
       />
@@ -1600,14 +1625,9 @@ function App() {
     return m ? `0${m[1]} ${m[2]} ${m[3]}` : String(p || '');
   };
 
-  // The server's resend window (30s) drives the countdown; clamp defensively so
-  // a bad value can never lock the button forever.
-  const resendSeconds = (v) => Math.max(0, Math.min(120, Math.floor(v || 30)));
-
-  // Completes a successful sign-in — used by the direct (returning customer)
-  // path AND the OTP-verified (first-time) path. The server decides returning.
+  // Completes a successful sign-in (enroll / login / reset all funnel here).
   const finishSignIn = (d, nameUsed) => {
-    if (!d.token) { setOtpError('Sign-in failed — please request a new code.'); return; }
+    if (!d.token) { setAuthError('Sign-in failed — please try again.'); return; }
     const cust = { customerId: d.customerId, name: nameUsed || d.name || '', phone: d.customerId, token: d.token };
     setSessionNotice('');
     setCustomer(cust);
@@ -1615,113 +1635,110 @@ function App() {
     try { localStorage.setItem(CUSTOMER_KEY, JSON.stringify(cust)); } catch {}
     if (!profile) saveProfile({ name: nameUsed, phone: d.customerId, avatarId: 'cat', photo: null });
     setName(''); setPhone(''); setReferralCode('');
-    setOtpPending(null); setOtpInput(''); setOtpError(''); setOtpDevCode('');
+    setAuthStep('phone'); setAuthPin(''); setAuthPin2(''); setSecurityQuestion(''); setSecurityAnswer('');
+    setRecoverQuestion(''); setKnownName(''); setAuthError('');
     setWelcomeMsg({ name: nameUsed, returning: !!d.returning });
     setScreen('welcome');
   };
 
-  const startOtpStep = (d, nameUsed, { alreadySent = false } = {}) => {
-    setOtpPending({ phone: d.phone || phone, name: nameUsed, referralCode });
-    setOtpInput(''); setOtpError('');
-    setOtpResendIn(resendSeconds(d.resendAfter));
-    // Only present when the SMS could not be delivered — show it on screen
-    // (a 5-second toast is impossible to catch and strands the customer).
-    setOtpDevCode(d.devOtp || '');
-    if (alreadySent) {
-      // The server refused a second send (30s cooldown) — stay on the code step
-      // so a code the customer already has can still be entered.
-      setOtpError(d.error || 'A code was already sent — enter it below, or resend when the timer ends.');
-    } else if (d.smsDelivered === false) {
-      showToast('📲 SMS could not be delivered — use the code shown on screen');
-    } else {
-      showToast('📲 We sent a 6-digit code to your phone');
-    }
+  // One PIN, not two: the account PIN the customer just used also becomes the
+  // on-device app-lock PIN, so reopening the app unlocks with the same PIN (or a
+  // fingerprint). Keeps the M-Pesa-style lock working without a second PIN.
+  const completeSignIn = async (d, nameUsed, pin) => {
+    try {
+      if (pin) {
+        await setPin(pin);
+        const cap = await biometricCapability().catch(() => ({ usable: false, isFingerprint: false }));
+        setLockConfig({ enabled: true, biometric: !!(cap.usable && cap.isFingerprint) });
+        setLockConfigured(true);
+        setAppLocked(false);
+      }
+    } catch (e) { /* the lock is a convenience; never block sign-in on it */ }
+    finishSignIn(d, nameUsed);
   };
 
-  const handleLogin = async (e) => {
+  // Step 1: has this number got an account / a PIN yet? Routes to login vs enroll.
+  const handleAuthPhone = async (e) => {
     e.preventDefault();
-    if (!validatePhone(phone)) { alert('Please enter a valid phone number (at least 10 digits, e.g. 0712345678)'); return; }
+    setAuthError('');
+    if (!validatePhone(phone)) { setAuthError('Enter a valid phone number (e.g. 0712345678)'); return; }
+    setAuthBusy(true);
     try {
-      const r = await custFetch(`${API_URL}/auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone, referralCode }) });
+      const r = await custFetch(`${API_URL}/auth/check`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }) });
       const d = await r.json().catch(() => ({}));
-      // A rate-limit 429 (from the global/auth limiters) has a plain-text body
-      // that can't be parsed as JSON — handle it before touching d.otpRequired.
-      if (r.status === 429 && !d.otpRequired) {
-        alert(d.error || 'Too many attempts. Please try again later.');
-        return;
-      }
-      if (d.success) {
-        finishSignIn(d, name);
-      } else if (d.otpRequired) {
-        // First-time number: the server sent an OTP — swap to the code step.
-        // A 429 here means a code is ALREADY pending (resend cooldown): go to
-        // the code step anyway so the code they received can still be entered,
-        // instead of leaving them on the login form for 30s with no way in.
-        if (r.status === 429 && d.resendAfter) {
-          startOtpStep(d, name, { alreadySent: true });
-          return;
-        }
-        startOtpStep(d, name);
-      } else {
-        alert(d.error || 'Login failed.');
-      }
-    } catch (e) { 
-      console.error(e);
-      alert('Network error. Please check your connection and try again.');
-    }
+      if (r.status === 429) { setAuthError(d.error || 'Too many attempts. Please wait a moment.'); return; }
+      setKnownName(d.name || '');
+      setAuthPin(''); setAuthPin2('');
+      if (d.hasPin) { if (d.name && !name) setName(d.name); setAuthStep('login'); }
+      else { setAuthStep('enroll'); }
+    } catch (err) { console.error(err); setAuthError('Network error. Please check your connection.'); }
+    finally { setAuthBusy(false); }
   };
 
-  const handleVerifyOtp = async (e) => {
+  // Step 2a: existing account — sign in with the PIN.
+  const handleAuthLogin = async (e) => {
     e.preventDefault();
-    if (!otpPending) return;
-    const code = otpInput.trim();
-    if (!/^\d{6}$/.test(code)) { setOtpError('Enter the 6-digit code'); return; }
-    setOtpVerifying(true);
-    setOtpError('');
+    setAuthError('');
+    if (!/^\d{4,6}$/.test(authPin)) { setAuthError('Enter your 4–6 digit PIN'); return; }
+    setAuthBusy(true);
     try {
-      const r = await custFetch(`${API_URL}/auth/verify-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: otpPending.phone, otp: code, name: otpPending.name, referralCode: otpPending.referralCode })
-      });
+      const r = await custFetch(`${API_URL}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, pin: authPin }) });
       const d = await r.json().catch(() => ({}));
-      if (d.success) {
-        finishSignIn(d, otpPending.name);
-      } else {
-        setOtpError(d.error || 'Verification failed. Please try again.');
-        if (/expired|too many wrong/i.test(d.error || '')) { setOtpPending(null); setOtpDevCode(''); }
-      }
-    } catch (err) {
-      console.error(err);
-      setOtpError('Network error. Please check your connection and try again.');
-    } finally {
-      setOtpVerifying(false);
-    }
+      if (d.success && d.token) { await completeSignIn(d, d.name || knownName || name, authPin); }
+      else if (d.needsEnroll) { setAuthStep('enroll'); setAuthPin(''); setAuthError(''); }
+      else { setAuthError(d.error || 'Wrong PIN.'); setAuthPin(''); }
+    } catch (err) { console.error(err); setAuthError('Network error. Please try again.'); }
+    finally { setAuthBusy(false); }
   };
 
-  const handleResendOtp = async () => {
-    if (!otpPending || otpResendIn > 0) return;
+  // Step 2b: new (or PIN-less) account — set a name, PIN and recovery question.
+  const handleAuthEnroll = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    if (!name.trim()) { setAuthError('Please enter your name'); return; }
+    if (!/^\d{4,6}$/.test(authPin)) { setAuthError('PIN must be 4–6 digits'); return; }
+    if (authPin !== authPin2) { setAuthError('The two PINs do not match'); return; }
+    if (!securityQuestion) { setAuthError('Choose a security question'); return; }
+    if (!securityAnswer.trim()) { setAuthError('Answer your security question'); return; }
+    setAuthBusy(true);
     try {
-      const r = await custFetch(`${API_URL}/auth`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: otpPending.name, phone: otpPending.phone, referralCode: otpPending.referralCode })
-      });
+      const r = await custFetch(`${API_URL}/auth/enroll`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, name, pin: authPin, securityQuestion, securityAnswer, referralCode }) });
       const d = await r.json().catch(() => ({}));
-      if (d.otpRequired) {
-        setOtpResendIn(resendSeconds(d.resendAfter));
-        setOtpDevCode(d.devOtp || '');
-        if (d.devOtp) showToast('📲 SMS still could not be delivered — a new code is shown on screen');
-        else showToast('📲 A new code was sent to your phone');
-      } else if (d.success) {
-        finishSignIn(d, otpPending.name);
-      } else {
-        setOtpError(d.error || 'Could not resend the code.');
-      }
-    } catch (err) {
-      console.error(err);
-      setOtpError('Network error — could not resend the code.');
-    }
+      if (d.success && d.token) { await completeSignIn(d, d.name || name, authPin); }
+      else if (d.hasPin) { setAuthStep('login'); setAuthPin(''); setAuthError('This number already has a PIN — enter it to sign in.'); }
+      else { setAuthError(d.error || 'Could not create your PIN.'); }
+    } catch (err) { console.error(err); setAuthError('Network error. Please try again.'); }
+    finally { setAuthBusy(false); }
+  };
+
+  // Forgot PIN — fetch the recovery question, then move to the reset step.
+  const handleForgotStart = async () => {
+    setAuthError('');
+    setAuthBusy(true);
+    try {
+      const r = await custFetch(`${API_URL}/auth/recover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }) });
+      const d = await r.json().catch(() => ({}));
+      if (d.success && d.securityQuestion) { setRecoverQuestion(d.securityQuestion); setSecurityAnswer(''); setAuthPin(''); setAuthPin2(''); setAuthStep('reset'); }
+      else { setAuthError(d.error || 'No recovery is set for this number. Please contact the shop.'); }
+    } catch (err) { console.error(err); setAuthError('Network error. Please try again.'); }
+    finally { setAuthBusy(false); }
+  };
+
+  // Forgot PIN — answer the question and set a new PIN.
+  const handleAuthReset = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    if (!securityAnswer.trim()) { setAuthError('Answer your security question'); return; }
+    if (!/^\d{4,6}$/.test(authPin)) { setAuthError('New PIN must be 4–6 digits'); return; }
+    if (authPin !== authPin2) { setAuthError('The two PINs do not match'); return; }
+    setAuthBusy(true);
+    try {
+      const r = await custFetch(`${API_URL}/auth/reset`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, securityAnswer, newPin: authPin }) });
+      const d = await r.json().catch(() => ({}));
+      if (d.success && d.token) { await completeSignIn(d, d.name || knownName || name, authPin); }
+      else { setAuthError(d.error || 'Reset failed. Please try again.'); }
+    } catch (err) { console.error(err); setAuthError('Network error. Please try again.'); }
+    finally { setAuthBusy(false); }
   };
 
   const handleLogout = () => {
@@ -1730,6 +1747,7 @@ function App() {
     setMyOrders([]);
     setCustAccount(null);
     setAppLocked(false); setForceLockSetup(false); // the lock PIN itself stays set on the device
+    setAuthStep('phone'); setAuthPin(''); setAuthPin2(''); setSecurityAnswer(''); setSecurityQuestion(''); setAuthError(''); setKnownName('');
     try { localStorage.removeItem(CUSTOMER_KEY); } catch {}
     setScreen('login');
   };
@@ -2349,45 +2367,77 @@ function App() {
     </div>
   );
 
-  // LOGIN — every sign-in on a new device confirms the number with a 6-digit
-  // code; only then does the server issue this device's session.
+  // LOGIN — phone + PIN (M-Pesa style). No SMS codes: a shopper signs in with a
+  // private PIN, and recovers a forgotten PIN with their security question.
   if (screen === 'login') return (
     <div className="screen center-screen">
       <div className="ambient ambient-a" /><div className="ambient ambient-b" />
       <div className="login-card"><BlitzLogo size={70} />
         <h1 className="brand">BLITZ<span>MALL</span></h1>
-        {otpPending ? (
-          <>
-            <p className="muted">{t('Enter the 6-digit code sent to')}</p>
-            <p className="otp-phone">{formatPhoneDisplay(otpPending.phone)}</p>
-            {otpDevCode && (
-              <div className="otp-devcode">
-                <span className="otp-devcode-warn">⚠️ The SMS could not be delivered — use this code</span>
-                <button type="button" className="otp-devcode-value" onClick={() => { try { navigator.clipboard && navigator.clipboard.writeText(otpDevCode); } catch (e) {} showToast('Code copied'); }}>{otpDevCode}</button>
-                <small className="otp-devcode-hint">tap to copy · enter it below to finish signing in</small>
-              </div>
-            )}
-            <form onSubmit={handleVerifyOtp}>
-              <input className="field otp-input" type="tel" inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder={t('6-digit code')} value={otpInput} onChange={e => setOtpInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} autoFocus />
-              {otpError && <p className="form-error">{otpError}</p>}
-              <button className="btn-neon login-cta" type="submit" disabled={otpVerifying}>{otpVerifying ? 'Verifying…' : 'Verify & Sign In'}</button>
-            </form>
-            <button className="owner-link" type="button" disabled={otpResendIn > 0} onClick={handleResendOtp}>
-              {otpResendIn > 0 ? `Resend code in ${otpResendIn}s` : 'Resend code'}
-            </button>
-            <button className="owner-link" type="button" onClick={() => { setOtpPending(null); setOtpInput(''); setOtpError(''); setOtpDevCode(''); }}>{t('← Change phone number')}</button>
-          </>
-        ) : (
+
+        {authStep === 'phone' && (
           <>
             <p className="muted">{t('Sign in to start shopping')}</p>
             {sessionNotice && <p className="form-error session-notice">{sessionNotice}</p>}
-            <form onSubmit={handleLogin}>
-              <input className="field" placeholder={t('Your name')} value={name} onChange={e => setName(e.target.value)} required />
-              <input className="field" type="tel" placeholder="Phone (07xx xxx xxx)" value={phone} onChange={e => setPhone(e.target.value)} required />
-              <input className="field" placeholder="Referral code (optional) — got invited? 🎁" value={referralCode} onChange={e => setReferralCode(e.target.value)} />
-              <button className="btn-neon login-cta" type="submit">{t('Enter Blitz Mall')}</button>
+            <form onSubmit={handleAuthPhone}>
+              <input className="field" type="tel" inputMode="numeric" placeholder="Phone (07xx xxx xxx)" value={phone} onChange={e => setPhone(e.target.value)} required autoFocus />
+              {authError && <p className="form-error">{authError}</p>}
+              <button className="btn-neon login-cta" type="submit" disabled={authBusy}>{authBusy ? 'Please wait…' : t('Continue')}</button>
             </form>
             <button className="owner-link" onClick={() => setIsAdmin(true)}>{t('Owner login')}</button>
+          </>
+        )}
+
+        {authStep === 'login' && (
+          <>
+            <p className="muted">{knownName ? `Welcome back, ${knownName}!` : 'Enter your PIN'}</p>
+            <p className="otp-phone">{formatPhoneDisplay(phone)}</p>
+            <form onSubmit={handleAuthLogin}>
+              <input className="field otp-input" type="password" inputMode="numeric" autoComplete="off" maxLength={6} placeholder="Your PIN" value={authPin} onChange={e => setAuthPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} autoFocus />
+              {authError && <p className="form-error">{authError}</p>}
+              <button className="btn-neon login-cta" type="submit" disabled={authBusy}>{authBusy ? 'Signing in…' : 'Sign In'}</button>
+            </form>
+            <button className="owner-link" type="button" onClick={handleForgotStart} disabled={authBusy}>Forgot PIN?</button>
+            <button className="owner-link" type="button" onClick={() => { setAuthStep('phone'); setAuthPin(''); setAuthError(''); }}>{t('← Change phone number')}</button>
+          </>
+        )}
+
+        {authStep === 'enroll' && (
+          <>
+            <p className="muted">Create your account</p>
+            <p className="otp-phone">{formatPhoneDisplay(phone)}</p>
+            <form onSubmit={handleAuthEnroll}>
+              <input className="field" placeholder={t('Your name')} value={name} onChange={e => setName(e.target.value)} required />
+              <input className="field otp-input" type="password" inputMode="numeric" maxLength={6} placeholder="Create a PIN (4–6 digits)" value={authPin} onChange={e => setAuthPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} />
+              <input className="field otp-input" type="password" inputMode="numeric" maxLength={6} placeholder="Confirm PIN" value={authPin2} onChange={e => setAuthPin2(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} />
+              <select className="field" value={securityQuestion} onChange={e => setSecurityQuestion(e.target.value)}>
+                <option value="">Choose a security question…</option>
+                {SECURITY_QUESTIONS.map(q => <option key={q} value={q}>{q}</option>)}
+              </select>
+              <input className="field" placeholder="Your answer (to recover your account)" value={securityAnswer} onChange={e => setSecurityAnswer(e.target.value)} />
+              <input className="field" placeholder="Referral code (optional) — got invited? 🎁" value={referralCode} onChange={e => setReferralCode(e.target.value)} />
+              {authError && <p className="form-error">{authError}</p>}
+              <button className="btn-neon login-cta" type="submit" disabled={authBusy}>{authBusy ? 'Creating…' : 'Create account'}</button>
+            </form>
+            <p className="muted consent-note">By continuing, you agree BlitzMall stores your details and chats to run your account.</p>
+            <button className="owner-link" type="button" onClick={() => { setAuthStep('phone'); setAuthPin(''); setAuthPin2(''); setAuthError(''); }}>{t('← Change phone number')}</button>
+          </>
+        )}
+
+        {authStep === 'reset' && (
+          <>
+            <p className="muted">Reset your PIN</p>
+            <p className="otp-phone">{formatPhoneDisplay(phone)}</p>
+            <form onSubmit={handleAuthReset}>
+              <p className="muted" style={{ marginBottom: 6 }}>{recoverQuestion}</p>
+              <input className="field" placeholder="Your answer" value={securityAnswer} onChange={e => setSecurityAnswer(e.target.value)} autoFocus />
+              <input className="field otp-input" type="password" inputMode="numeric" maxLength={6} placeholder="New PIN (4–6 digits)" value={authPin} onChange={e => setAuthPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} />
+              <input className="field otp-input" type="password" inputMode="numeric" maxLength={6} placeholder="Confirm new PIN" value={authPin2} onChange={e => setAuthPin2(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} />
+              {authError && <p className="form-error">{authError}</p>}
+              <button className="btn-neon login-cta" type="submit" disabled={authBusy}>{authBusy ? 'Resetting…' : 'Reset PIN & Sign In'}</button>
+            </form>
+            <button className="owner-link" type="button" onClick={() => { setAuthStep('login'); setAuthError(''); setAuthPin(''); setAuthPin2(''); }}>← Back</button>
+            <p className="muted consent-note">Can't remember your answer? Contact the shop to recover your account.</p>
           </>
         )}
       </div>

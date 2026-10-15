@@ -1,20 +1,26 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { setPin, verifyPin, setLockConfig, getLockConfig, biometricVerify } from './appLock';
 
-const PIN_LEN = 4;
+const PIN_MIN = 4;
+const PIN_MAX = 6; // M-Pesa-style PIN is 4–6 digits (matches the account PIN)
 
-// Full-screen app lock. Two modes:
-//   'setup'  — create / change the 4-digit PIN (enables the lock)
+// Full-screen app lock. Modes:
+//   'setup'  — create the first PIN (enables the lock)
+//   'change' — change an existing PIN: verify the CURRENT PIN, then set a new one
 //   'unlock' — fingerprint (auto, when available) + PIN entry to clear the lock
+// onDone(newPin, currentPin) fires after setup/change (currentPin only for change);
+// onUnlock() after a successful unlock. The caller uses the PINs to keep the
+// server account-PIN in sync.
 export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock, onCancel, allowCancel }) {
   const [entry, setEntry] = useState('');
   const [firstPin, setFirstPin] = useState('');
-  const [stage, setStage] = useState(mode === 'setup' ? 'create' : 'enter'); // create | confirm | enter
+  const [curPin, setCurPin] = useState('');
+  const initialStage = mode === 'change' ? 'current' : (mode === 'setup' ? 'create' : 'enter');
+  const [stage, setStage] = useState(initialStage); // current | create | confirm | enter
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  // In unlock mode we try the fingerprint first; show the PIN pad only if there
-  // is no fingerprint or the user falls back to it.
-  const [showPin, setShowPin] = useState(mode === 'setup' || !hasBiometric);
+  // Fingerprint is only offered on the unlock screen; setup/change always use the pad.
+  const [showPin, setShowPin] = useState(mode !== 'unlock' || !hasBiometric);
   const triedBio = useRef(false);
 
   const runBiometric = useCallback(async () => {
@@ -32,12 +38,19 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
   }, [mode, hasBiometric, runBiometric]);
 
   const submit = useCallback(async (pin) => {
+    if (pin.length < PIN_MIN) { setError(`Enter at least ${PIN_MIN} digits`); return; }
     setBusy(true); setError('');
     try {
-      if (mode === 'setup') {
+      if (mode === 'change' && stage === 'current') {
+        const ok = await verifyPin(pin);
+        if (!ok) { setError('Wrong current PIN'); setEntry(''); setBusy(false); return; }
+        setCurPin(pin); setEntry(''); setStage('create'); setBusy(false); return;
+      }
+      if (mode === 'setup' || mode === 'change') {
         if (stage === 'create') {
           setFirstPin(pin); setEntry(''); setStage('confirm'); setBusy(false); return;
         }
+        // confirm
         if (pin !== firstPin) {
           setError('PINs did not match — start again'); setEntry(''); setFirstPin(''); setStage('create'); setBusy(false); return;
         }
@@ -45,7 +58,7 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
         const cfg = getLockConfig() || {};
         setLockConfig({ ...cfg, enabled: true, biometric: !!hasBiometric });
         setBusy(false);
-        onDone && onDone();
+        onDone && onDone(pin, mode === 'change' ? curPin : undefined);
         return;
       }
       // unlock
@@ -56,26 +69,31 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
     } catch (e) {
       setBusy(false); setError('Something went wrong — try again'); setEntry('');
     }
-  }, [mode, stage, firstPin, hasBiometric, onDone, onUnlock]);
+  }, [mode, stage, firstPin, curPin, hasBiometric, onDone, onUnlock]);
 
   const press = (digit) => {
     if (busy) return;
     setError('');
     setEntry(prev => {
-      if (prev.length >= PIN_LEN) return prev;
+      if (prev.length >= PIN_MAX) return prev;
       const next = prev + digit;
-      if (next.length === PIN_LEN) setTimeout(() => submit(next), 90);
+      // Auto-submit only at the max length; shorter PINs are confirmed with ✓.
+      if (next.length === PIN_MAX) setTimeout(() => submit(next), 90);
       return next;
     });
   };
   const backspace = () => { if (!busy) setEntry(prev => prev.slice(0, -1)); };
 
-  const title = mode === 'setup'
-    ? (stage === 'create' ? 'Create your app PIN' : 'Confirm your PIN')
-    : 'Enter your PIN';
-  const subtitle = mode === 'setup'
-    ? (stage === 'create' ? 'Set a 4-digit PIN to lock the app' : 'Type it again to confirm')
-    : 'Locks every time you leave the app';
+  const title = mode === 'unlock'
+    ? 'Enter your PIN'
+    : stage === 'current' ? 'Enter your current PIN'
+      : stage === 'create' ? 'Create your new PIN'
+        : 'Confirm your PIN';
+  const subtitle = mode === 'unlock'
+    ? 'Locks every time you leave the app'
+    : stage === 'current' ? 'Confirm it’s you before changing your PIN'
+      : stage === 'create' ? 'Set a 4–6 digit PIN — you’ll use it to sign in and unlock the app'
+        : 'Type it again to confirm';
 
   const showFingerprintView = mode === 'unlock' && hasBiometric && !showPin;
 
@@ -100,7 +118,7 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
             <h2 className="applock-title">{title}</h2>
             <p className="applock-sub">{subtitle}</p>
             <div className="applock-dots">
-              {Array.from({ length: PIN_LEN }).map((_, i) => (
+              {Array.from({ length: PIN_MAX }).map((_, i) => (
                 <span key={i} className={`applock-dot ${i < entry.length ? 'filled' : ''}`} />
               ))}
             </div>
@@ -109,7 +127,7 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
               {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => (
                 <button key={n} type="button" className="applock-key" disabled={busy} onClick={() => press(String(n))}>{n}</button>
               ))}
-              <span className="applock-key-blank" />
+              <button type="button" className="applock-key applock-key-ok" disabled={busy || entry.length < PIN_MIN} onClick={() => submit(entry)}>✓</button>
               <button type="button" className="applock-key" disabled={busy} onClick={() => press('0')}>0</button>
               <button type="button" className="applock-key applock-key-back" disabled={busy || !entry} onClick={backspace}>⌫</button>
             </div>
