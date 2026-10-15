@@ -21,11 +21,17 @@ module.exports = function register(app) {
     try {
       const phone = cleanPhone(req.body.phone);
       if (!isValidPhone(phone)) return res.status(400).json({ error: 'Valid phone number required' });
-      const cust = await col.customers.findOne({ phone });
-      // Only what the sign-in UI needs — never the name (unauthenticated PII leak
-      // + an oracle for targeting money-holding accounts without a PIN). The name
-      // is greeted after a successful login (GET /api/auth/me) instead.
-      res.json({ exists: !!cust, hasPin: !!(cust && cust.pinHash) });
+      // Only what the sign-in UI needs to pick a screen — never the name (an
+      // unauthenticated PII leak + an oracle for targeting money-holding accounts).
+      // hasRecovery routes a PIN-less-but-existing account (e.g. after an owner
+      // reset) to "Forgot PIN" instead of letting anyone re-enroll and claim it.
+      // Queries are by field existence so a duplicate customer doc can't hide a PIN.
+      const [exists, pinDoc, recDoc] = await Promise.all([
+        col.customers.findOne({ phone }),
+        col.customers.findOne({ phone, pinHash: { $exists: true } }),
+        col.customers.findOne({ phone, securityAnswerHash: { $exists: true } })
+      ]);
+      res.json({ exists: !!exists, hasPin: !!pinDoc, hasRecovery: !!recDoc });
     } catch (e) { console.error('auth/check error:', e); res.status(500).json({ error: 'Failed' }); }
   });
 
@@ -43,18 +49,40 @@ module.exports = function register(app) {
       if (!String(securityQuestion || '').trim() || !normalizeAnswer(securityAnswer)) {
         return res.status(400).json({ error: 'A security question and answer are required' });
       }
-      const existing = await col.customers.findOne({ phone: phoneClean });
-      if (existing && existing.pinHash) {
+      // Refuse to re-claim an account that is already protected OR recoverable.
+      // (Guards query by field existence so a duplicate customer doc for the same
+      // phone — the index is non-unique — cannot be used to slip a fresh PIN past.)
+      const existingPin = await col.customers.findOne({ phone: phoneClean, pinHash: { $exists: true } });
+      if (existingPin) {
         return res.status(409).json({ error: 'This number already has a PIN. Sign in, or use "Forgot PIN".', hasPin: true });
       }
-      // Creates the account (new) or refreshes it (legacy OTP account), and runs
-      // referral bonuses exactly once for a genuinely new account.
-      const { referralBonus } = await createCustomerAccount(name, phoneClean, referralCode);
+      const existingRecovery = await col.customers.findOne({ phone: phoneClean, securityAnswerHash: { $exists: true } });
+      if (existingRecovery) {
+        // PIN-less but previously enrolled (e.g. after an owner reset): the only way
+        // back is answering the security question — never a fresh enroll, which would
+        // let a stranger claim the account and overwrite its recovery answer.
+        return res.status(409).json({ error: 'This account already exists — use "Forgot PIN" to set a new PIN with your security question.', needsRecovery: true });
+      }
+      // A funded/active legacy account (OTP era, no PIN and no recovery set) can't be
+      // proven over the phone now that SMS is gone, so only the shop owner may
+      // restore it — don't let a stranger claim its wallet/points.
+      const existing = await col.customers.findOne({ phone: phoneClean });
+      if (existing) {
+        const loyalty = await col.loyalty.findOne({ phone: phoneClean });
+        const hasValue = (existing.orderCount || 0) > 0 || (loyalty && ((loyalty.walletBalance || 0) > 0 || (loyalty.points || 0) > 0));
+        if (hasValue) {
+          return res.status(409).json({ error: 'This number already has an account with activity — please contact the shop to restore access.', needsOwner: true });
+        }
+      }
+      // Creates the account (new) or refreshes a brand-new/empty one. Referral
+      // bonuses are credited later, on the referred account's first delivered order.
+      await createCustomerAccount(name, phoneClean, referralCode);
       const [pinHash, securityAnswerHash] = await Promise.all([
         hashSecret(pin),
         hashSecret(normalizeAnswer(securityAnswer))
       ]);
-      await col.customers.updateOne(
+      // updateMany so any duplicate docs for this phone share the one credential.
+      await col.customers.updateMany(
         { phone: phoneClean },
         {
           $set: {
@@ -68,10 +96,7 @@ module.exports = function register(app) {
       const cust = await col.customers.findOne({ phone: phoneClean });
       const referralCodeOut = await ensureReferralCode(cust);
       const token = signCustomerToken(phoneClean, cust ? cust.tokenVersion : 0);
-      res.json({
-        success: true, token, customerId: phoneClean,
-        name: (cust && cust.name) || name, referralCode: referralCodeOut, referralBonus
-      });
+      res.json({ success: true, token, customerId: phoneClean, name: (cust && cust.name) || name, referralCode: referralCodeOut });
     } catch (e) { console.error('auth/enroll error:', e); res.status(500).json({ error: 'Could not create your PIN. Please try again.' }); }
   });
 
@@ -137,7 +162,7 @@ module.exports = function register(app) {
         return res.status(401).json({ error: `Wrong answer. ${r.attemptsLeft} ${r.attemptsLeft === 1 ? 'try' : 'tries'} left.`, attemptsLeft: r.attemptsLeft });
       }
       const pinHash = await hashSecret(newPin);
-      await col.customers.updateOne(
+      await col.customers.updateMany(
         { phone: phoneClean },
         { $set: { pinHash, pinSetAt: new Date(), failedPinAttempts: 0, lastLoginAt: new Date() }, $unset: { lockedUntil: '' }, $inc: { tokenVersion: 1 } }
       );
@@ -157,7 +182,7 @@ module.exports = function register(app) {
   // "Sign out of all devices" — every existing customer token stops working.
   app.post('/api/auth/logout-all', authenticateCustomer, async (req, res) => {
     try {
-      await col.customers.updateOne({ phone: req.customerPhone }, { $inc: { tokenVersion: 1 } });
+      await col.customers.updateMany({ phone: req.customerPhone }, { $inc: { tokenVersion: 1 } });
       res.json({ success: true });
     } catch (e) { console.error('logout-all failed:', e); res.status(500).json({ error: 'Failed' }); }
   });
@@ -180,7 +205,7 @@ module.exports = function register(app) {
         }
       }
       const pinHash = await hashSecret(newPin);
-      await col.customers.updateOne(
+      await col.customers.updateMany(
         { phone: req.customerPhone },
         { $set: { pinHash, pinSetAt: new Date(), failedPinAttempts: 0 }, $unset: { lockedUntil: '' }, $inc: { tokenVersion: 1 } }
       );

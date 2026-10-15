@@ -179,6 +179,8 @@ describe('session controls', () => {
     const after = await request(app).post('/api/auth/check').send({ phone });
     expect(after.body.exists).toBe(true);
     expect(after.body.hasPin).toBe(true);
+    expect(after.body.hasRecovery).toBe(true);
+    expect(after.body.name).toBeUndefined(); // never leak the name unauthenticated
   });
 });
 
@@ -211,19 +213,23 @@ describe('admin Customers dashboard (owner-only)', () => {
     expect(Array.isArray(res.body.aiChats)).toBe(true);
   });
 
-  it('resets a customer PIN: clears it, logs them out, forces a fresh enroll', async () => {
+  it('resets a customer PIN: clears it, logs them out; recovery is via the security question, NOT a re-enroll a stranger could race', async () => {
     const phone = newPhone();
     const { body } = await enroll(phone);
     const token = await getOwnerToken(request, app);
     const reset = await request(app).post('/api/admin/customers/' + phone + '/reset-pin').set(bearer(token));
     expect(reset.statusCode).toBe(200);
     expect(reset.body.success).toBe(true);
-    // Old session is dead and the old PIN no longer logs in — the account now needs a new PIN.
+    // Old session is dead and the old PIN no longer logs in.
     expect((await request(app).get('/api/auth/me').set(bearer(body.token))).statusCode).toBe(401);
-    const afterLogin = await login(phone, '1234');
-    expect(afterLogin.statusCode).toBe(404);
-    expect(afterLogin.body.needsEnroll).toBe(true);
-    // They can enroll again (wallet/points untouched) and the account is back.
-    expect((await enroll(phone, { pin: '4321' })).statusCode).toBe(200);
+    expect((await login(phone, '1234')).body.needsEnroll).toBe(true);
+    // The account still has recovery set, so a stranger CANNOT re-enroll to claim it.
+    const claim = await enroll(phone, { pin: '4321', securityAnswer: 'red' });
+    expect(claim.statusCode).toBe(409);
+    expect(claim.body.needsRecovery).toBe(true);
+    // The real owner answers their security question and sets a new PIN (money/points untouched).
+    const recovered = await request(app).post('/api/auth/reset').send({ phone, securityAnswer: 'blue', newPin: '4321' });
+    expect(recovered.statusCode).toBe(200);
+    expect((await login(phone, '4321')).statusCode).toBe(200);
   });
 });

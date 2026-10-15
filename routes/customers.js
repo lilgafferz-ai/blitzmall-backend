@@ -217,12 +217,16 @@ module.exports = function register(app) {
       const phone = cleanPhone(req.params.phone);
       const cust = await col.customers.findOne({ phone });
       if (!cust) return res.status(404).json({ error: 'Customer not found' });
-      await col.customers.updateOne(
+      // Clear the PIN + any lock and rotate tokenVersion (signs out old/stolen
+      // sessions). The security question is kept, so the customer sets a new PIN
+      // via "Forgot PIN" — not a fresh enroll a stranger could race. updateMany
+      // covers any duplicate customer docs for the same phone.
+      await col.customers.updateMany(
         { phone },
         { $unset: { pinHash: '', lockedUntil: '' }, $set: { failedPinAttempts: 0 }, $inc: { tokenVersion: 1 } }
       );
       auditLog(req, 'customer_pin_reset', `Reset PIN for ${phone} (${cust.name || 'no name'})`);
-      res.json({ success: true, message: 'PIN cleared. The customer can set a new PIN on their next sign-in.' });
+      res.json({ success: true, message: 'PIN cleared. The customer sets a new PIN with "Forgot PIN" + their security question.' });
     } catch (e) { console.error('admin reset-pin error:', e); res.status(500).json({ error: 'Failed' }); }
   });
 

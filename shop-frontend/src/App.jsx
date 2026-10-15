@@ -1667,9 +1667,9 @@ function App() {
       const r = await custFetch(`${API_URL}/auth/check`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }) });
       const d = await r.json().catch(() => ({}));
       if (r.status === 429) { setAuthError(d.error || 'Too many attempts. Please wait a moment.'); return; }
-      setKnownName(d.name || '');
       setAuthPin(''); setAuthPin2('');
-      if (d.hasPin) { if (d.name && !name) setName(d.name); setAuthStep('login'); }
+      if (d.hasPin) { setAuthStep('login'); }
+      else if (d.hasRecovery) { await startRecovery(); } // existing account with no PIN (e.g. after a reset) → recover with the security question
       else { setAuthStep('enroll'); }
     } catch (err) { console.error(err); setAuthError('Network error. Please check your connection.'); }
     finally { setAuthBusy(false); }
@@ -1706,21 +1706,32 @@ function App() {
       const d = await r.json().catch(() => ({}));
       if (d.success && d.token) { await completeSignIn(d, d.name || name, authPin); }
       else if (d.hasPin) { setAuthStep('login'); setAuthPin(''); setAuthError('This number already has a PIN — enter it to sign in.'); }
+      else if (d.needsRecovery) { await startRecovery(); }
+      else if (d.needsOwner) { setAuthError(d.error || 'This number already has an account — please contact the shop to restore access.'); }
       else { setAuthError(d.error || 'Could not create your PIN.'); }
     } catch (err) { console.error(err); setAuthError('Network error. Please try again.'); }
     finally { setAuthBusy(false); }
   };
 
-  // Forgot PIN — fetch the recovery question, then move to the reset step.
+  // Forgot PIN — fetch the recovery question for `phone` and move to the reset
+  // step. Returns true on success. Shared by the "Forgot PIN?" button AND the
+  // phone step (which routes a PIN-less-but-enrolled account straight here, so a
+  // stranger can't re-enroll and claim it).
+  const startRecovery = async () => {
+    const r = await custFetch(`${API_URL}/auth/recover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }) });
+    const d = await r.json().catch(() => ({}));
+    if (d.success && d.securityQuestion) {
+      setRecoverQuestion(d.securityQuestion); setSecurityAnswer(''); setAuthPin(''); setAuthPin2(''); setAuthStep('reset');
+      return true;
+    }
+    setAuthError(d.error || 'No recovery is set for this number. Please contact the shop.');
+    return false;
+  };
   const handleForgotStart = async () => {
     setAuthError('');
     setAuthBusy(true);
-    try {
-      const r = await custFetch(`${API_URL}/auth/recover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }) });
-      const d = await r.json().catch(() => ({}));
-      if (d.success && d.securityQuestion) { setRecoverQuestion(d.securityQuestion); setSecurityAnswer(''); setAuthPin(''); setAuthPin2(''); setAuthStep('reset'); }
-      else { setAuthError(d.error || 'No recovery is set for this number. Please contact the shop.'); }
-    } catch (err) { console.error(err); setAuthError('Network error. Please try again.'); }
+    try { await startRecovery(); }
+    catch (err) { console.error(err); setAuthError('Network error. Please try again.'); }
     finally { setAuthBusy(false); }
   };
 
