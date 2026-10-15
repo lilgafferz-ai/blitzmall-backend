@@ -7,7 +7,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client } = require('../server');
-const { getOwnerToken, bearer } = require('./helpers');
+const { getOwnerToken, bearer, REAUTH } = require('./helpers');
 
 beforeAll(async () => { await connectDb(); });
 afterAll(async () => { if (client) await client.close(); });
@@ -217,7 +217,7 @@ describe('admin Customers dashboard (owner-only)', () => {
     const phone = newPhone();
     const { body } = await enroll(phone);
     const token = await getOwnerToken(request, app);
-    const reset = await request(app).post('/api/admin/customers/' + phone + '/reset-pin').set(bearer(token));
+    const reset = await request(app).post('/api/admin/customers/' + phone + '/reset-pin').set(bearer(token)).send(REAUTH);
     expect(reset.statusCode).toBe(200);
     expect(reset.body.success).toBe(true);
     // Old session is dead and the old PIN no longer logs in.

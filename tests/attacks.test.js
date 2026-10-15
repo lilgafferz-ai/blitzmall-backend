@@ -6,7 +6,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
-const { getOwnerToken, customerToken, bearer } = require('./helpers');
+const { getOwnerToken, customerToken, bearer, REAUTH } = require('./helpers');
 
 let seq = 0;
 const freshPhone = () => '07' + String(Date.now() + (seq += 53) * 7919 + Math.floor(Math.random() * 1e8)).slice(-8);
@@ -95,7 +95,7 @@ describe('Staff sessions can be revoked', () => {
   const makeCashier = async () => {
     const username = 'atk_cashier_' + Date.now() + '_' + (seq += 1);
     const created = await request(app).post('/api/admin/users').set(owner())
-      .send({ username, password: 'cashpass123', name: 'Cashier', role: 'cashier', permissions: ['sales'] });
+      .send({ username, password: 'cashpass123', name: 'Cashier', role: 'cashier', permissions: ['sales'], ...REAUTH });
     const login = await request(app).post('/api/admin/login').send({ username, password: 'cashpass123' });
     return { id: created.body.userId, token: login.body.token };
   };
@@ -114,7 +114,7 @@ describe('Staff sessions can be revoked', () => {
     // A cashier (sales only) can't edit orders…
     expect((await request(app).put('/api/admin/orders/000000000000000000000000').set(bearer(c.token)).send({ status: 'packed' })).statusCode).toBe(403);
     // …and when the owner grants 'orders', the old token is revoked.
-    await request(app).put('/api/admin/users/' + c.id).set(owner()).send({ permissions: ['sales', 'orders'] });
+    await request(app).put('/api/admin/users/' + c.id).set(owner()).send({ permissions: ['sales', 'orders'], ...REAUTH });
     expect((await request(app).get('/api/admin/me').set(bearer(c.token))).statusCode).toBe(401);
   });
 
@@ -212,10 +212,14 @@ describe('Checkout charges what the shop shows', () => {
   it('stores the cost price on each line so online-order profit is real', async () => {
     const phone = freshPhone();
     const pid = await createProduct({ name: 'ATK-Flour', price: 300, buyingPrice: 220 });
-    await placeOrder(phone, [{ _id: pid, quantity: 1 }]);
-    const order = (await myOrders(phone))[0];
+    const placed = await placeOrder(phone, [{ _id: pid, quantity: 1 }]);
+    // The shop's own view carries the cost price…
+    const order = (await request(app).get('/api/admin/orders').set(owner())).body.find(o => String(o._id) === String(placed.body.orderId));
     expect(order.items[0].buyingPrice).toBe(220);
     expect(_test.orderProfit(order, new Map())).toBe(80);
+    // …but the customer never sees what the shop paid for the goods.
+    expect(placed.body.items[0].buyingPrice).toBeUndefined();
+    expect((await myOrders(phone))[0].items[0].buyingPrice).toBeUndefined();
   });
 
   it('refuses to sell more than is in stock and leaves stock untouched', async () => {

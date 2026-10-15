@@ -1,10 +1,11 @@
 // Customer profile, saved baskets and reviews.
 const { ObjectId } = require('mongodb');
-const { auditLog, authenticate, authenticateCustomer, authorize, optionalCustomer } = require('../lib/auth');
+const { auditLog, authenticate, authenticateCustomer, authorize, optionalCustomer, requirePermission } = require('../lib/auth');
+const { requireReauth } = require('../lib/mfa');
 const { ensureReferralCode } = require('../lib/customers');
 const { col } = require('../lib/db');
 const { reviewLimiter } = require('../lib/limiters');
-const { getLoyaltySettings, tierFromPoints } = require('../lib/loyalty');
+const { getLoyaltySettings, incPoints, tierFromPoints } = require('../lib/loyalty');
 const { cleanPhone, samePhone } = require('../lib/util');
 
 // Escape a user-typed search string so it is matched literally (never as a regex).
@@ -57,7 +58,7 @@ module.exports = function register(app) {
     try { const all = await col.reviews.find().toArray(); const count = all.length; const avg = count ? all.reduce((s, r) => s + (r.rating || 0), 0) / count : 0; res.json({ count, average: Math.round(avg * 10) / 10 }); }
     catch { res.status(500).json({ error: 'Failed' }); }
   });
-  app.get('/api/admin/reviews', authenticate, async (req, res) => { try { res.json(await col.reviews.find().sort({ createdAt: -1 }).toArray()); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
+  app.get('/api/admin/reviews', authenticate, requirePermission('reviews'), async (req, res) => { try { res.json(await col.reviews.find().sort({ createdAt: -1 }).toArray()); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
   app.delete('/api/admin/reviews/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await col.reviews.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Not found' }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
 
   app.get('/api/customers/:phone', authenticateCustomer, async (req, res) => {
@@ -250,7 +251,7 @@ module.exports = function register(app) {
   // Reset a customer's PIN (account recovery). Clears the PIN + any lock and bumps
   // tokenVersion so old/stolen sessions are signed out; the customer sets a fresh
   // PIN on their next sign-in. Wallet money, points and orders are untouched.
-  app.post('/api/admin/customers/:phone/reset-pin', authenticate, authorize('owner'), async (req, res) => {
+  app.post('/api/admin/customers/:phone/reset-pin', authenticate, authorize('owner'), requireReauth, async (req, res) => {
     try {
       const phone = cleanPhone(req.params.phone);
       const cust = await col.customers.findOne({ phone });
@@ -280,15 +281,18 @@ module.exports = function register(app) {
       await col.customers.updateMany({ phone }, { $set: { isOwner: true } });
       const existing = await col.loyalty.findOne({ phone });
       let points = existing ? existing.points || 0 : 0;
-      const boosted = !cust.ownerBoostGiven;
+      // Claim the one-time boost atomically BEFORE paying it, so two quick
+      // clicks can never pay it twice.
+      const claim = await col.customers.updateOne({ phone, ownerBoostGiven: { $ne: true } }, { $set: { ownerBoostGiven: true } });
+      const boosted = claim.matchedCount > 0;
       if (boosted) {
-        points += OWNER_BOOST_POINTS;
+        await col.customers.updateMany({ phone }, { $set: { ownerBoostGiven: true } });
         if (existing) {
-          await col.loyalty.updateOne({ phone }, { $set: { points, tier: tierFromPoints(points), updatedAt: new Date() } });
+          points = await incPoints(phone, OWNER_BOOST_POINTS);
         } else {
+          points = OWNER_BOOST_POINTS;
           await col.loyalty.insertOne({ phone, customerName: cust.name || '', totalSpent: 0, points, tier: tierFromPoints(points), createdAt: new Date(), updatedAt: new Date() });
         }
-        await col.customers.updateMany({ phone }, { $set: { ownerBoostGiven: true } });
         await col.redemptions.insertOne({ customerId: phone, rewardName: 'Manual bonus — owner starter boost', pointsSpent: 0, rewardValue: 0, manualPoints: OWNER_BOOST_POINTS, reason: 'owner starter boost', redeemedAt: new Date() });
       }
       auditLog(req, 'customer_make_owner', `Marked ${phone} (${cust.name || 'no name'}) as the owner's account${boosted ? ` + ${OWNER_BOOST_POINTS} pts` : ''}`);
@@ -301,8 +305,10 @@ module.exports = function register(app) {
   // (isOwner) is kept. Orders, sales, tax invoices and credit debts are NOT touched
   // (they're the shop's books). Every removed document is copied to
   // customer_wipe_archive first, so a wipe can be restored. { dryRun: true }
-  // returns the counts only; the real wipe needs confirm === WIPE_CONFIRM.
-  app.post('/api/admin/customers/wipe', authenticate, authorize('owner'), async (req, res) => {
+  // returns the counts only; the real wipe needs confirm === WIPE_CONFIRM plus
+  // the owner's password (and authenticator code) — see requireReauth.
+  const reauthUnlessDryRun = (req, res, next) => (req.body && req.body.dryRun ? next() : requireReauth(req, res, next));
+  app.post('/api/admin/customers/wipe', authenticate, authorize('owner'), reauthUnlessDryRun, async (req, res) => {
     try {
       const keep = (await col.customers.find({ isOwner: true }).toArray()).map(c => c.phone);
       const targets = customerDataTargets(
@@ -327,7 +333,7 @@ module.exports = function register(app) {
   // Delete ONE customer account (owner's own included) with the same data and the
   // same archive as "Delete all customers". Orders and the shop's books stay. The
   // number can then sign up fresh.
-  app.post('/api/admin/customers/:phone/delete', authenticate, authorize('owner'), async (req, res) => {
+  app.post('/api/admin/customers/:phone/delete', authenticate, authorize('owner'), requireReauth, async (req, res) => {
     try {
       const phone = cleanPhone(req.params.phone);
       const cust = await col.customers.findOne({ phone });

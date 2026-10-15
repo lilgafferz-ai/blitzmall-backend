@@ -1,6 +1,6 @@
 // M-Pesa STK push, Safaricom callbacks and payment status.
 const { ObjectId } = require('mongodb');
-const { CUSTOMER_AUTH_ERROR, authenticate, authenticateCustomer, customerFromRequest, staffFromRequest } = require('../lib/auth');
+const { CUSTOMER_AUTH_ERROR, auditLog, authenticate, authenticateCustomer, customerFromRequest, staffFromRequest } = require('../lib/auth');
 const { col } = require('../lib/db');
 const { mpesaPushLimiter, mpesaStatusLimiter } = require('../lib/limiters');
 const { finalizePosSale, requestStkPush, verifyMpesaRequest, verifySoon } = require('../lib/mpesa');
@@ -18,7 +18,9 @@ module.exports = function register(app) {
   app.post('/api/mpesa/stk-push', mpesaPushLimiter, async (req, res) => {
     const { phone, orderId, saleDraft } = req.body;
     try {
-      const staff = await staffFromRequest(req);
+      let staff = await staffFromRequest(req);
+      // Riders only collect on orders assigned to them (and never ring up till sales).
+      if (staff && staff.role === 'rider' && (saleDraft || !orderId)) return res.status(403).json({ success: false, error: 'Riders can only request payment for their deliveries' });
       const customerPhone = staff ? null : await customerFromRequest(req);
       if (!staff && !customerPhone) return res.status(401).json({ success: false, ...CUSTOMER_AUTH_ERROR });
 
@@ -29,6 +31,7 @@ module.exports = function register(app) {
         if (!ObjectId.isValid(orderId)) return res.status(400).json({ success: false, error: 'Invalid order' });
         order = await col.orders.findOne({ _id: new ObjectId(orderId) });
         if (!order || (!staff && order.customerId !== customerPhone)) return res.status(404).json({ success: false, error: 'Order not found' });
+        if (staff && staff.role === 'rider' && !(order.rider && order.rider.userId === staff.userId)) return res.status(403).json({ success: false, error: 'This delivery is assigned to another rider' });
         if (order.status === 'cancelled') return res.status(400).json({ success: false, error: 'This order was cancelled.' });
         amount = Math.round(((order.totalPrice || 0) - (order.amountPaid || 0)) * 100) / 100;
         if (order.paymentStatus === 'paid' || amount <= 0) {
@@ -50,8 +53,13 @@ module.exports = function register(app) {
           staff: String(saleDraft.staff || staff.name || 'Owner').slice(0, 60),
           cashierUserId: staff.userId,
           customerPhone: cleanPhone(saleDraft.customerPhone),
-          branchId: saleDraft.branchId || staff.branchId || null
+          // Only the owner may book a till sale to another branch.
+          branchId: staff.role === 'owner' ? (saleDraft.branchId || null) : (staff.branchId || saleDraft.branchId || null)
         };
+        const overrides = items.filter(i => i.priceOverride);
+        if (overrides.length) {
+          auditLog({ ...req, user: staff }, 'sale_price_override', `M-Pesa till sale: ${overrides.map(i => `${i.name} at KES ${i.price} (shelf ${i.priceOverride.catalogPrice})`).join('; ').slice(0, 300)}`);
+        }
       } else {
         return res.status(400).json({ success: false, error: 'Nothing to pay for — an order or a till sale is required.' });
       }
@@ -65,7 +73,7 @@ module.exports = function register(app) {
       }, { reference: cleanDraft ? 'BlitzPOS' : 'BlitzMall' });
       if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
       return res.json({ success: true, checkoutRequestId: result.checkoutRequestId, amount: result.amount, message: result.message });
-    } catch (err) { console.error('STK Push error:', err); res.status(500).json({ error: 'Failed to initiate M-Pesa payment', details: err.message }); }
+    } catch (err) { console.error('STK Push error:', err); res.status(500).json({ success: false, error: 'Failed to initiate M-Pesa payment' }); }
   });
 
   // Wallet top-up: load cash into the BlitzMall wallet by M-Pesa. The amount
@@ -108,7 +116,19 @@ module.exports = function register(app) {
       console.log('📱 M-Pesa callback (unverified):', checkoutRequestId, callback.ResultCode, callback.ResultDesc);
       const reqDoc = col.db ? await col.db.collection('mpesa_requests').findOne({ checkoutRequestId }) : null;
       if (reqDoc && reqDoc.status === 'pending' && !reqDoc.mock) {
-        await col.db.collection('mpesa_requests').updateOne({ checkoutRequestId }, { $set: { callbackAt: new Date(), callbackResultCode: callback.ResultCode } });
+        // Keep Safaricom's receipt details for reconciliation against the M-Pesa
+        // statement. They're unverified hints (the STK query below decides the
+        // result), but an amount that doesn't match what we asked for is flagged.
+        const meta = {};
+        for (const it of ((callback.CallbackMetadata && callback.CallbackMetadata.Item) || [])) {
+          if (it && ['Amount', 'MpesaReceiptNumber', 'TransactionDate', 'PhoneNumber'].includes(it.Name)) meta[it.Name] = String(it.Value).slice(0, 40);
+        }
+        const set = { callbackAt: new Date(), callbackResultCode: callback.ResultCode, callbackMeta: meta };
+        if (meta.Amount !== undefined && Math.abs(parseFloat(meta.Amount) - (reqDoc.amount || 0)) >= 1) {
+          set.amountMismatch = true;
+          console.warn('⚠️ M-Pesa callback amount differs from the request:', checkoutRequestId, meta.Amount, 'vs', reqDoc.amount);
+        }
+        await col.db.collection('mpesa_requests').updateOne({ checkoutRequestId }, { $set: set });
         verifySoon(checkoutRequestId, [0, 5000, 15000, 45000, 120000]);
       }
       ack();

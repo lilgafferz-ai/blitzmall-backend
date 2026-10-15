@@ -1,7 +1,7 @@
 // Native-style building blocks shared by the customer app and Blitz Mall HQ:
 // grouped settings lists, rows, switches, segmented controls and a sub-screen
 // header. Purely presentational — every screen passes its own state in.
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import './SettingsKit.css';
 
 export function ScreenHeader({ title, onBack, right, subtitle }) {
@@ -110,4 +110,82 @@ export function ConfirmSheet({ open, title, message, confirmLabel = 'Confirm', d
       </div>
     </div>
   );
+}
+
+// "Confirm it's you" sheet for destructive owner actions (step-up re-auth).
+// The server wants the account password, plus an authenticator/recovery code
+// when two-step sign-in is on. `run(creds)` makes the real request; while the
+// server answers "reauthRequired" (wrong password, code needed, locked) the
+// sheet stays open with the error, otherwise it closes and resolves
+// { res, data }. Cancel resolves null. A real modal — the Electron app has no
+// window.prompt. `typeToConfirm` also asks for an exact phrase (sent as creds.typed).
+export function ReauthSheet({ title, message, confirmLabel = 'Confirm', needCode: needCodeInitially, typeToConfirm, run, onDone }) {
+  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
+  const [typed, setTyped] = useState('');
+  const [needCode, setNeedCode] = useState(!!needCodeInitially);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const ready = password && (!needCode || code.trim()) && (!typeToConfirm || typed.trim() === typeToConfirm);
+  const submit = async (e) => {
+    if (e) e.preventDefault();
+    if (!ready || busy) return;
+    setBusy(true); setError('');
+    try {
+      const res = await run({ currentPassword: password, ...(needCode ? { mfaCode: code.trim() } : {}), ...(typeToConfirm ? { typed: typed.trim() } : {}) });
+      const data = await res.json().catch(() => ({}));
+      if (data && data.reauthRequired) {
+        if (data.mfaRequired) setNeedCode(true);
+        setCode('');
+        setError(data.error || 'Could not confirm it is you.');
+        setBusy(false);
+        return;
+      }
+      onDone({ res, data });
+    } catch (err) {
+      setError('Network error — try again.');
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="ui-sheet-backdrop" onClick={() => !busy && onDone(null)}>
+      <form className="ui-sheet" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()} onSubmit={submit}>
+        <h3>{title}</h3>
+        <p>{message ? message + ' ' : ''}Enter your password{needCode ? ' and the code from your authenticator app (or a recovery code)' : ''} to confirm.</p>
+        {typeToConfirm && (
+          <div className="ui-field" style={{ padding: '0 0 12px', border: 'none' }}>
+            <label>Type {typeToConfirm}</label>
+            <input type="text" autoComplete="off" autoFocus value={typed} onChange={e => setTyped(e.target.value)} />
+          </div>
+        )}
+        <div className="ui-field" style={{ padding: '0 0 12px', border: 'none' }}>
+          <label>Your password</label>
+          <input type="password" autoComplete="current-password" autoFocus={!typeToConfirm} value={password} onChange={e => setPassword(e.target.value)} />
+        </div>
+        {needCode && (
+          <div className="ui-field" style={{ padding: '0 0 12px', border: 'none' }}>
+            <label>Authenticator code</label>
+            <input type="text" inputMode="numeric" autoComplete="one-time-code" placeholder="123456" value={code} onChange={e => setCode(e.target.value)} />
+          </div>
+        )}
+        {error && <p style={{ color: 'var(--red, #ff4d4f)', margin: '0 0 12px' }}>{error}</p>}
+        <div className="ui-sheet-actions">
+          <button type="button" className="ui-pill ghost" disabled={busy} onClick={() => onDone(null)}>Cancel</button>
+          <button type="submit" className="ui-pill danger" disabled={!ready || busy}>{busy ? 'Checking…' : confirmLabel}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// const [askReauth, reauthSheet] = useReauth(); render {reauthSheet}, then
+// const out = await askReauth({ title, needCode, run: (creds) => fetch… });
+// if (!out) return; // cancelled — otherwise out.res / out.data
+export function useReauth() {
+  const [request, setRequest] = useState(null);
+  const ask = useCallback((opts) => new Promise(resolve => setRequest({ ...opts, resolve })), []);
+  const sheet = request ? (
+    <ReauthSheet {...request} onDone={(out) => { request.resolve(out); setRequest(null); }} />
+  ) : null;
+  return [ask, sheet];
 }

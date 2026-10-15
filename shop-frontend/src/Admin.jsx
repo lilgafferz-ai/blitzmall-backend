@@ -3,6 +3,7 @@ import './Admin.css';
 import { ProductSellingFields, DeliveriesTab, SuppliersTab, StockTakeTab, TaxTab, DailyReportCard, ProductReviewsAdmin, CustomersTab } from './AdminExtras';
 import { lineTotalFor, dealSavingsFor, qtyStepOf, snapQty, formatQty, isLoose } from './pricing';
 import AdminSettings from './screens/AdminSettings';
+import { useReauth } from './components/SettingsKit';
 import { getPushToken, onPushTap, pushPlatform } from './push';
 import LockScreen from './LockScreen';
 import { isLockEnabled, onAppBackground, biometricCapability, hasPin, disableLock } from './appLock';
@@ -42,7 +43,6 @@ const RECORD_OPTIONS = [
   { key: 'saved_baskets', label: 'Saved Baskets', icon: '🧺', desc: 'Customers\' saved basket templates' },
   { key: 'stock_transfers', label: 'Stock Transfers', icon: '🔄', desc: 'Inter-branch transfer history' },
   { key: 'shifts', label: 'Shifts', icon: '⏰', desc: 'Cashier shift records' },
-  { key: 'audit_logs', label: 'Audit Logs', icon: '📋', desc: 'Admin action history' },
 ];
 
 // JWT auth helper — adds Bearer token to every admin fetch. The token lives in
@@ -395,6 +395,10 @@ function Admin({ onExit }) {
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+  // Two-step sign-in: after a correct password the server sends a 5-minute
+  // token and wants the authenticator (or recovery) code.
+  const [mfaPending, setMfaPending] = useState(null);
+  const [mfaCode, setMfaCode] = useState('');
   const [needsSetup, setNeedsSetup] = useState(false);
   const [setupUsername, setSetupUsername] = useState('');
   const [setupPassword, setSetupPassword] = useState('');
@@ -711,8 +715,16 @@ function Admin({ onExit }) {
   const authGet = (url) => authFetch(url);
   const authPost = (url, body) => authFetch(url, { method: 'POST', body: JSON.stringify(body) });
   const authPut = (url, body) => authFetch(url, { method: 'PUT', body: JSON.stringify(body) });
-  const authDelete = (url) => authFetch(url, { method: 'DELETE' });
-  const extrasApi = React.useMemo(() => ({ API_URL, authGet, authPost, authPut, authDelete }), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const authDelete = (url, body) => authFetch(url, body === undefined ? { method: 'DELETE' } : { method: 'DELETE', body: JSON.stringify(body) });
+  // Destructive owner actions re-confirm the password (+ authenticator code
+  // when two-step sign-in is on) in a modal — see ReauthSheet.
+  const [askReauth, reauthSheet] = useReauth();
+  const mfaOnRef = useRef(false);
+  mfaOnRef.current = !!user?.mfaEnabled;
+  const extrasApi = React.useMemo(() => ({
+    API_URL, authGet, authPost, authPut, authDelete,
+    askReauth: (opts) => askReauth({ needCode: mfaOnRef.current, ...opts })
+  }), []); // eslint-disable-line react-hooks/exhaustive-deps
   const [supplierList, setSupplierList] = useState([]);
   const loadSupplierList = async () => { try { const r = await authGet(API_URL + '/admin/suppliers'); const d = await r.json(); setSupplierList(Array.isArray(d) ? d : []); } catch (e) { setSupplierList([]); } };
 
@@ -768,6 +780,8 @@ function Admin({ onExit }) {
   };
   const loadOrders = async () => {
     if (user?.role === 'rider') return; // riders only get their run sheet (the server 403s the rest)
+    // The order list needs Orders/Deliveries access (the server 403s everyone else).
+    if (user && user.role !== 'owner' && !(user.permissions || []).some(p => p === 'orders' || p === 'deliveries')) return;
     try {
       const r = await authGet(withBranch(API_URL + '/admin/orders'));
       const list = asArray(await r.json());
@@ -1027,15 +1041,20 @@ const loadStockTransfers = async () => {
     e.preventDefault();
     if (!newUsername || !newPassword) { alert('Username and password required'); return; }
     try {
-      const r = await authPost(API_URL + '/admin/users', { 
-        username: newUsername, 
-        password: newPassword, 
-        name: newUserName || newUsername, 
-        role: newUserRole, 
-        branchId: newUserBranch || null,
-        permissions: newUserPermissions 
+      const out = await askReauth({
+        title: `Create login for @${newUsername}?`, confirmLabel: 'Create login', needCode: !!user?.mfaEnabled,
+        run: (creds) => authPost(API_URL + '/admin/users', {
+          username: newUsername,
+          password: newPassword,
+          name: newUserName || newUsername,
+          role: newUserRole,
+          branchId: newUserBranch || null,
+          permissions: newUserPermissions,
+          ...creds
+        })
       });
-      const d = await r.json();
+      if (!out) return;
+      const d = out.data;
       if (d.success) { 
         setNewUsername(''); setNewPassword(''); setNewUserName(''); setNewUserRole('cashier'); setNewUserBranch(''); setNewUserPermissions(['sales']); loadUsers(); alert(d.message); 
       }
@@ -1043,6 +1062,19 @@ const loadStockTransfers = async () => {
     } catch (e) { console.error(e); alert('Network error'); }
   };
   const delUser = async (id) => { if (!window.confirm('Delete this user? They are signed out of every device immediately.')) return; try { const r = await authDelete(API_URL + '/admin/users/' + id); const d = await r.json(); if (!d.success) alert(d.error || 'Failed to delete user'); loadUsers(); } catch (e) { console.error(e); } };
+  // Lost phone: turn off a manager's two-step sign-in so they can set it up again.
+  const resetUserMfa = async (u) => {
+    try {
+      const out = await askReauth({
+        title: `Turn off two-step sign-in for @${u.username}?`, message: 'They sign in with just their password until they set it up again, and are signed out everywhere now.',
+        confirmLabel: 'Turn off', needCode: !!user?.mfaEnabled,
+        run: (creds) => authPut(API_URL + '/admin/users/' + u._id, { resetMfa: true, ...creds })
+      });
+      if (!out) return;
+      alert(out.data.success ? 'Two-step sign-in turned off.' : (out.data.error || 'Failed'));
+      loadUsers();
+    } catch (e) { console.error(e); }
+  };
   const revokeUserSessions = async (id) => { if (!window.confirm('Sign this user out of every phone and PC now?')) return; try { const r = await authPost(API_URL + '/admin/users/' + id + '/revoke-sessions', {}); const d = await r.json(); alert(d.success ? 'Signed out everywhere.' : (d.error || 'Failed')); } catch (e) { console.error(e); } };
   const loadBranches = async () => { try { const r = await authGet(API_URL + '/admin/branches'); setBranches(asArray(await r.json())); } catch (e) { console.error(e); } };
   const loadPredictions = async () => {
@@ -1056,16 +1088,22 @@ const loadStockTransfers = async () => {
   const saveLoyaltySettings = async () => {
     if (!loyaltySettings) return;
     try {
-      const r = await authPut(API_URL + '/admin/loyalty/settings', {
-        earnRate: parseFloat(loyaltySettings.earnRate) || 200,
-        jackpotEnabled: !!loyaltySettings.jackpotEnabled,
-        spinCooldownHours: parseFloat(loyaltySettings.spinCooldownHours) || 24,
-        scratchCooldownHours: parseFloat(loyaltySettings.scratchCooldownHours) || 48,
-        minOrdersForPromo: parseInt(loyaltySettings.minOrdersForPromo, 10) || 2,
-        tierThresholds: loyaltySettings.tierThresholds || { silver: 200, gold: 600, platinum: 1500 },
-        seasonalEvents: Array.isArray(loyaltySettings.seasonalEvents) ? loyaltySettings.seasonalEvents : []
+      const out = await askReauth({
+        title: 'Save loyalty settings?', message: 'These decide how much customers earn and what the shop owes them.',
+        confirmLabel: 'Save', needCode: !!user?.mfaEnabled,
+        run: (creds) => authPut(API_URL + '/admin/loyalty/settings', {
+          earnRate: parseFloat(loyaltySettings.earnRate) || 200,
+          jackpotEnabled: !!loyaltySettings.jackpotEnabled,
+          spinCooldownHours: parseFloat(loyaltySettings.spinCooldownHours) || 24,
+          scratchCooldownHours: parseFloat(loyaltySettings.scratchCooldownHours) || 48,
+          minOrdersForPromo: parseInt(loyaltySettings.minOrdersForPromo, 10) || 2,
+          tierThresholds: loyaltySettings.tierThresholds || { silver: 200, gold: 600, platinum: 1500 },
+          seasonalEvents: Array.isArray(loyaltySettings.seasonalEvents) ? loyaltySettings.seasonalEvents : [],
+          ...creds
+        })
       });
-      const d = await r.json();
+      if (!out) return;
+      const d = out.data;
       if (d.success) { alert('✅ Loyalty settings saved'); loadLoyaltySettings(); } else alert(d.error || 'Save failed');
     } catch (e) { console.error(e); alert('Failed to save settings'); }
   };
@@ -1433,9 +1471,18 @@ const loadStockTransfers = async () => {
     e.preventDefault();
     setLoginError('');
     try {
-      const r = await fetch(API_URL + '/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: loginUsername, password: loginPassword }) });
+      const r = mfaPending
+        ? await fetch(API_URL + '/admin/login/mfa', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mfaToken: mfaPending, code: mfaCode }) })
+        : await fetch(API_URL + '/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: loginUsername, password: loginPassword }) });
       const d = await r.json();
+      if (d.mfaRequired && d.mfaToken) {
+        setMfaPending(d.mfaToken); setMfaCode(''); setLoginPassword('');
+        return;
+      }
+      if (d.restart) { setMfaPending(null); setMfaCode(''); }
       if (d.success) {
+        setMfaPending(null); setMfaCode('');
+        if (typeof d.recoveryCodesLeft === 'number') alert(`You used a recovery code — ${d.recoveryCodesLeft} left. Make new ones in Settings → Security if you're running low.`);
         // Persist across restarts (localStorage) + keep sessionStorage in sync.
         localStorage.setItem('bm_token', d.token);
         localStorage.setItem('bm_user', JSON.stringify(d.user));
@@ -1892,11 +1939,15 @@ const loadStockTransfers = async () => {
 
   const deleteSelectedRecords = async () => {
     if (!selectedTypes.length) { alert('Select at least one record type first.'); return; }
-    if (!window.confirm(`Delete ALL ${selectedTypes.length} selected record type(s)? This CANNOT be undone.`)) return;
     setWipeBusy(true);
     try {
-      const r = await fetch(API_URL + '/admin/records', { method: 'DELETE', headers: authHeaders(), body: JSON.stringify({ types: selectedTypes }) });
-      const d = await r.json().catch(() => ({}));
+      const out = await askReauth({
+        title: `Delete ALL ${selectedTypes.length} selected record type(s)?`, message: 'This CANNOT be undone.',
+        confirmLabel: 'Delete', needCode: !!user?.mfaEnabled,
+        run: (creds) => authDelete(API_URL + '/admin/records', { types: selectedTypes, ...creds })
+      });
+      if (!out) return;
+      const { res: r, data: d } = out;
       if (d && d.success) {
         alert(`🗑️ Deleted ${d.deleted} record(s).`);
         if (selectedTypes.includes('products')) loadProducts();
@@ -1923,11 +1974,15 @@ const loadStockTransfers = async () => {
       alert('Type DELETE in the box to confirm wiping everything.');
       return;
     }
-    if (!window.confirm('⚠️ FINAL WARNING: this permanently deletes ALL records (sales, orders, expenses, products, customers…). User accounts & branches are kept. This CANNOT be undone. Continue?')) return;
     setWipeBusy(true);
     try {
-      const r = await fetch(API_URL + '/admin/records', { method: 'DELETE', headers: authHeaders(), body: JSON.stringify({ types: RECORD_OPTIONS.map(o => o.key) }) });
-      const d = await r.json().catch(() => ({}));
+      const out = await askReauth({
+        title: '⚠️ Delete ALL records?', message: 'This permanently deletes sales, orders, expenses, products, customers… User accounts & branches are kept. This CANNOT be undone.',
+        confirmLabel: 'Delete everything', needCode: !!user?.mfaEnabled,
+        run: (creds) => authDelete(API_URL + '/admin/records', { types: RECORD_OPTIONS.map(o => o.key), ...creds })
+      });
+      if (!out) return;
+      const { res: r, data: d } = out;
       if (d && d.success) {
         alert(`🗑️ Deleted ${d.deleted} records across all types.`);
         loadProducts(); loadOrders(); loadSales(); loadExpenses(); loadCredit(); loadReviews();
@@ -2028,7 +2083,7 @@ const loadStockTransfers = async () => {
           <form onSubmit={handleSetup}>
             <input className="owner-field" type="text" placeholder="Your name" value={setupName} onChange={e => setSetupName(e.target.value)} required />
             <input className="owner-field" type="text" placeholder="Username" value={setupUsername} onChange={e => setSetupUsername(e.target.value)} required />
-            <input className="owner-field" type="password" placeholder="Password (min 6 chars)" value={setupPassword} onChange={e => setSetupPassword(e.target.value)} minLength={6} required />
+            <input className="owner-field" type="password" placeholder="Password (min 8 chars)" value={setupPassword} onChange={e => setSetupPassword(e.target.value)} minLength={6} required />
             <button className="blitz-admin-btn glow-pulse" type="submit">Create Owner Account</button>
             {onExit && <button type="button" className="hq-login-back" onClick={onExit}>← Back to the shop</button>}
           </form>
@@ -2037,7 +2092,16 @@ const loadStockTransfers = async () => {
     }
     return (
       <div className="blitz-admin-login"><div className="blitz-admin-login-card"><div className="blitz-admin-logo">⚡</div>
-        <h1>Blitz Mall <span>HQ</span></h1><p className="blitz-admin-muted">Sign in to manage your store</p>
+        <h1>Blitz Mall <span>HQ</span></h1><p className="blitz-admin-muted">{mfaPending ? 'Two-step sign-in' : 'Sign in to manage your store'}</p>
+        {mfaPending ? (
+          <form onSubmit={login}>
+            <p className="blitz-admin-muted" style={{ fontSize: '.85rem' }}>Open your authenticator app and enter the 6-digit code for BlitzMall ({loginUsername}). Lost your phone? Enter one of your recovery codes instead.</p>
+            <input className="owner-field" type="text" inputMode="numeric" autoComplete="one-time-code" autoFocus placeholder="123456" value={mfaCode} onChange={e => setMfaCode(e.target.value)} required />
+            {loginError && <p style={{color:'var(--red)',fontSize:'.85rem'}}>{loginError}</p>}
+            <button className="blitz-admin-btn glow-pulse" type="submit">Verify</button>
+            <button type="button" className="hq-login-back" onClick={() => { setMfaPending(null); setMfaCode(''); setLoginError(''); }}>← Use a different account</button>
+          </form>
+        ) : (
         <form onSubmit={login}>
           <input className="owner-field" type="text" placeholder="Username" value={loginUsername} onChange={e => setLoginUsername(e.target.value)} required />
           <input className="owner-field" type="password" placeholder="Password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required />
@@ -2072,6 +2136,7 @@ const loadStockTransfers = async () => {
           </div>
           <button className="blitz-admin-btn glow-pulse" type="submit">Sign In</button>
         </form>
+        )}
         {onExit && <button type="button" className="hq-login-back" onClick={onExit}>← Back to the shop</button>}
       </div></div>
     );
@@ -2264,15 +2329,22 @@ ${div}
         </div>
       </nav>
 
+      {reauthSheet}
+
       {safeTab === "settings" && (
         <div className="blitz-admin-body">
           <h2>⚙️ Settings</h2>
           <AdminSettings ctx={{
-            API_URL, user, authGet, authPost, logout, onExit,
+            API_URL, user, authGet, authPost, logout, onExit, askReauth,
             branchName: user?.branchId ? (branches.find(b => b._id === user.branchId)?.name || '') : '',
             onTokenRefreshed: (t) => {
               try { localStorage.setItem('bm_token', t); sessionStorage.setItem('bm_token', t); } catch (e) {}
             },
+            onUserChanged: (patch) => setUser(u => {
+              const next = { ...u, ...patch };
+              try { localStorage.setItem('bm_user', JSON.stringify(next)); sessionStorage.setItem('bm_user', JSON.stringify(next)); } catch (e) {}
+              return next;
+            }),
             muted, setMuted, showBanner, setShowBanner,
             perfMode: adminPerfMode,
             setPerfMode: (v) => { setAdminPerfMode(v); try { localStorage.setItem('blitz_perf_mode', String(v)); } catch (e) {} },
@@ -3672,7 +3744,7 @@ ${div}
               <form onSubmit={createUser} style={{display:'flex',flexDirection:'column',gap:8,marginBottom:16}}>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
                   <input value={newUsername} onChange={e => setNewUsername(e.target.value)} placeholder="Username" required />
-                  <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Password (min 6 chars)" minLength={6} required />
+                  <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Password (min 8 chars)" minLength={8} required />
                 </div>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
                   <input value={newUserName} onChange={e => setNewUserName(e.target.value)} placeholder="Full name (optional)" />
@@ -3739,6 +3811,8 @@ ${div}
                             🔑 Allowed Tabs: {u.permissions && u.permissions.length ? u.permissions.map(p => allTabs.find(t => t.id === p)?.label || p).join(', ') : 'None'}
                           </div>
                         </div>
+                        {u.mfaEnabled && <span className="blitz-admin-muted" title="Two-step sign-in is on" style={{ fontSize: '.72rem' }}>🔐 2-step</span>}
+                        {u.mfaEnabled && u.role !== 'owner' && <button className="pos-void" onClick={() => resetUserMfa(u)} title="Lost phone: turn off two-step sign-in">reset 2-step</button>}
                         {u.role !== 'owner' && <button className="pos-void" onClick={() => revokeUserSessions(u._id)} title="Sign out of all devices">sign out</button>}
                         {u.role !== 'owner' && <button className="pos-void" onClick={() => delUser(u._id)}>delete</button>}
                       </div>

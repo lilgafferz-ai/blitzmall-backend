@@ -1,5 +1,6 @@
 // Dashboard summary, predictions, export, audit log and record cleanup.
-const { auditLog, authenticate, authorize, branchFilter } = require('../lib/auth');
+const { auditLog, authenticate, authorize, branchFilter, hasPermission, requirePermission } = require('../lib/auth');
+const { requireReauth } = require('../lib/mfa');
 const { productCache } = require('../lib/cache');
 const { col } = require('../lib/db');
 const { costMap, generatePredictions, liveSales, orderProfit } = require('../lib/reports');
@@ -52,12 +53,15 @@ module.exports = function register(app) {
       const expired = products.filter(p => p.expiryDate && new Date(p.expiryDate) < now).map(p => ({ name: p.name, expiryDate: p.expiryDate }));
       // Predictions: AI-powered insights
       const predictions = generatePredictions(sales, orders.filter(o => o.status !== 'cancelled'), products, tally);
+      // Every signed-in staff member gets the stock alerts (the till's out-of-stock
+      // alarm polls this); revenue, profit and predictions need Records access.
+      if (!hasPermission(req.user, 'records', 'expenses')) return res.json({ low, out, expiringSoon, expired });
       res.json({ summary, best, low, out, expiringSoon, expired, predictions });
     } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to build summary' }); }
   });
 
   // Standalone predictions endpoint
-  app.get('/api/admin/predictions', authenticate, async (req, res) => {
+  app.get('/api/admin/predictions', authenticate, requirePermission('records'), async (req, res) => {
     try {
       const filter = branchFilter(req);
       const [allSales, orders, products] = await Promise.all([
@@ -83,10 +87,10 @@ module.exports = function register(app) {
   });
 
   // Audit Logs fetch
-  app.get('/api/admin/audit-logs', authenticate, async (req, res) => {
+  app.get('/api/admin/audit-logs', authenticate, authorize('owner'), async (req, res) => {
     try {
-      const filter = branchFilter(req);
-      const logs = await col.audit_logs.find(filter).sort({ timestamp: -1 }).limit(100).toArray();
+      const limit = Math.max(1, Math.min(500, parseInt(req.query.limit, 10) || 100));
+      const logs = await col.audit_logs.find({}).sort({ timestamp: -1 }).limit(limit).toArray();
       res.json(logs);
     } catch (e) {
       console.error('Failed to fetch audit logs:', e);
@@ -120,7 +124,8 @@ module.exports = function register(app) {
     saved_baskets: col.saved_baskets,
     stock_transfers: col.stock_transfers,
     shifts: col.shifts,
-    audit_logs: col.audit_logs,
+    // audit_logs are deliberately NOT wipeable: an audit trail the account it
+    // records can erase proves nothing (a stolen owner session could cover its tracks).
   });
 
   app.get('/api/admin/records/counts', authenticate, authorize('owner'), async (req, res) => {
@@ -136,10 +141,21 @@ module.exports = function register(app) {
     }
   });
 
-  app.delete('/api/admin/records', authenticate, authorize('owner'), async (req, res) => {
+  app.delete('/api/admin/records', authenticate, authorize('owner'), requireReauth, async (req, res) => {
     const types = Array.isArray(req.body && req.body.types) ? req.body.types : [];
     if (!types.length) return res.status(400).json({ error: 'Select at least one record type to delete' });
     try {
+      // Loyalty cards hold customers' wallet cash (some of it paid in by
+      // M-Pesa). Bulk-wiping it would erase money the shop owes, with its
+      // ledger — use Customers → Delete (archived, per account) instead.
+      if (types.includes('loyalty')) {
+        const held = (await col.loyalty.find({ walletBalance: { $gt: 0 } }).toArray())
+          .reduce((s, l) => s + (l.walletBalance || 0), 0);
+        if (held > 0) {
+          auditLog(req, 'records_delete_refused', `Refused to wipe loyalty cards holding KES ${Math.round(held * 100) / 100} of customer wallet cash`);
+          return res.status(409).json({ error: `Customers still hold KES ${Math.round(held * 100) / 100} of wallet cash on their loyalty cards. That money is owed to them — remove accounts one by one from Customers (archived) instead.` });
+        }
+      }
       let deleted = 0;
       const done = [];
       for (const t of types) {

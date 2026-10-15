@@ -590,9 +590,17 @@ export function CustomersTab({ api }) {
     setDetailLoading(false);
   };
 
+  // Reset PIN / delete / wipe re-confirm the owner's password (and
+  // authenticator code) in a modal before the server will act.
   const resetPin = async (phone, name) => {
-    if (!window.confirm(`Reset the PIN for ${name || phone}?\n\nThis signs them out and lets them set a NEW PIN the next time they open the app. Their wallet money, points and orders are NOT affected.\n\nOnly do this after you've confirmed it's really them (ask their security question).`)) return;
-    const d = await json(await api.authPost(api.API_URL + '/admin/customers/' + encodeURIComponent(phone) + '/reset-pin', {}));
+    const out = await api.askReauth({
+      title: `Reset the PIN for ${name || phone}?`,
+      message: "This signs them out and lets them set a NEW PIN the next time they open the app. Their wallet money, points and orders are NOT affected. Only do this after you've confirmed it's really them (ask their security question).",
+      confirmLabel: 'Reset PIN',
+      run: (creds) => api.authPost(api.API_URL + '/admin/customers/' + encodeURIComponent(phone) + '/reset-pin', creds)
+    });
+    if (!out) return;
+    const d = out.data;
     if (!d.success) { alert(d.error || 'Failed'); return; }
     alert('✅ ' + (d.message || 'PIN reset.'));
     openDetail(phone); load(q.trim());
@@ -607,8 +615,14 @@ export function CustomersTab({ api }) {
   };
 
   const deleteOne = async (phone, name) => {
-    if (!window.confirm(`Delete ${name || phone}'s account?\n\nTheir points, wallet, AI chats, baskets and vouchers are removed (a backup copy is kept). Orders stay. The number can then sign up fresh.`)) return;
-    const d = await json(await api.authPost(api.API_URL + '/admin/customers/' + encodeURIComponent(phone) + '/delete', {}));
+    const out = await api.askReauth({
+      title: `Delete ${name || phone}'s account?`,
+      message: 'Their points, wallet, AI chats, baskets and vouchers are removed (a backup copy is kept). Orders stay. The number can then sign up fresh.',
+      confirmLabel: 'Delete account',
+      run: (creds) => api.authPost(api.API_URL + '/admin/customers/' + encodeURIComponent(phone) + '/delete', creds)
+    });
+    if (!out) return;
+    const d = out.data;
     if (!d.success) { alert(d.error || 'Failed'); return; }
     alert('✅ Account deleted. The number can now sign up again.');
     setSelected(null); setDetail(null); load(q.trim());
@@ -619,13 +633,18 @@ export function CustomersTab({ api }) {
     const p = await json(await api.authPost(api.API_URL + '/admin/customers/wipe', { dryRun: true }));
     if (!p.success) { alert(p.error || 'Failed'); return; }
     const c = p.counts || {};
-    const typed = window.prompt(
-      `DELETE ALL CUSTOMERS?\n\n${c.customers || 0} accounts, their points, wallets (KES ${Number(p.walletMoney || 0).toLocaleString('en-KE')} total), AI chats, baskets and personal vouchers will be removed.\n` +
-      (p.keptOwnerAccounts ? 'Your 👑 Owner account is kept.\n' : '') +
-      'Orders, sales, tax invoices and credit debts are kept. A backup copy is saved so this can be undone.\n\nType DELETE ALL CUSTOMERS to confirm:'
-    );
-    if (typed == null) return;
-    const d = await json(await api.authPost(api.API_URL + '/admin/customers/wipe', { confirm: typed.trim() }));
+    // A real modal, not window.prompt (the Electron PC app has no prompt()).
+    const out = await api.askReauth({
+      title: 'DELETE ALL CUSTOMERS?',
+      message: `${c.customers || 0} accounts, their points, wallets (KES ${Number(p.walletMoney || 0).toLocaleString('en-KE')} total), AI chats, baskets and personal vouchers will be removed. ` +
+        (p.keptOwnerAccounts ? 'Your 👑 Owner account is kept. ' : '') +
+        'Orders, sales, tax invoices and credit debts are kept. A backup copy is saved so this can be undone.',
+      typeToConfirm: 'DELETE ALL CUSTOMERS',
+      confirmLabel: 'Delete all customers',
+      run: ({ typed, ...creds }) => api.authPost(api.API_URL + '/admin/customers/wipe', { confirm: typed, ...creds })
+    });
+    if (!out) return;
+    const d = out.data;
     if (!d.success) { alert(d.error || 'Failed'); return; }
     alert(`✅ Deleted ${(d.deleted && d.deleted.customers) || 0} customer accounts. Backup: ${d.wipeId}`);
     setSelected(null); setDetail(null); load(q.trim());

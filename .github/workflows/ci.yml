@@ -18,6 +18,10 @@ jobs:
         node-version: 20
         cache: 'npm'
     - run: npm ci
+    # Fail on known high/critical vulnerabilities in what the server actually
+    # ships (dev-only tooling like Jest is excluded). Fix with `npm audit fix`
+    # using npm 10 so the lockfile stays compatible with this runner.
+    - run: npm audit --omit=dev --audit-level=high
     # Backend tests run against the offline mock DB (MOCK_DB=1). CI runners
     # have no MongoDB, so without this every test file stalls ~5s+ on a
     # connection-refused before falling back to the same mock — slow and

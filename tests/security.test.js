@@ -6,7 +6,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
-const { getOwnerToken, customerToken, bearer } = require('./helpers');
+const { getOwnerToken, customerToken, bearer, REAUTH } = require('./helpers');
 const { parseServiceAccount } = _test || {};
 
 // Unique 10-digit phone per call so a prior test run's data can never
@@ -130,7 +130,7 @@ describe('Loyalty endpoint security', () => {
     const created = await request(app)
       .post('/api/admin/users')
       .set(auth())
-      .send({ username, password: 'cashpass123', name: 'Cashier', role: 'cashier', permissions: ['sales'] });
+      .send({ username, password: 'cashpass123', name: 'Cashier', role: 'cashier', permissions: ['sales'], ...REAUTH });
     if (created.body && created.body.success) {
       const cashierLogin = await request(app)
         .post('/api/admin/login')
@@ -257,7 +257,7 @@ describe('Notification token registration (staff push)', () => {
     const created = await request(app)
       .post('/api/admin/users')
       .set(auth())
-      .send({ username: uname, password: 'pass12345', name: 'Notif Staff', role: 'cashier', permissions: ['sales'] });
+      .send({ username: uname, password: 'pass12345', name: 'Notif Staff', role: 'cashier', permissions: ['sales'], ...REAUTH });
     expect(created.body.success).toBe(true);
 
     const login = await request(app).post('/api/admin/login').send({ username: uname, password: 'pass12345' });
@@ -293,9 +293,10 @@ describe('Promo atomicity', () => {
   it('two simultaneous spins never both win — at most one is granted', async () => {
     const phone = freshPhone();
     for (let i = 0; i < 2; i++) {
-      await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
+      const o = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
         customerId: phone, customerName: 'Racer', items: [{ _id: i === 0 ? P.item0 : P.item1, quantity: 1 }]
       });
+      await request(app).put('/api/admin/orders/' + o.body.orderId).set(auth()).send({ status: 'delivered' }); // promos need delivered orders
     }
     const [a, b] = await Promise.all([
       request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'Racer' }),
