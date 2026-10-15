@@ -70,7 +70,7 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
     } catch (e) {
       setBusy(false); setError('Something went wrong — try again'); setEntry('');
     }
-  }, [mode, stage, firstPin, curPin, hasBiometric, onDone, onUnlock]);
+  }, [mode, stage, firstPin, curPin, hasBiometric, onDone, onUnlock, PIN_MIN, scope]);
 
   const press = (digit) => {
     if (busy) return;
