@@ -174,16 +174,22 @@ function ScratchCard({ revealed, result, claiming, signedIn, onComplete, onNeedL
   const lastCheckRef = useRef(0);
   const stageRef = useRef(null);
 
-  // Prevent the page from scrolling while the user's finger is on the scratch
-  // card. CSS `touch-action: none` is unreliable on some mobile browsers, so we
-  // attach a non-passive touchmove listener that calls preventDefault().
+  // Keep the screen perfectly still while a finger is on the foil. CSS
+  // `touch-action: none` alone is unreliable on some Android WebViews, and
+  // blocking only touchmove lets the page start scrolling on the first touch,
+  // so every touch that starts on the card is cancelled from touchstart on.
+  // The pointer events that do the scratching still fire.
   useEffect(() => {
     const el = stageRef.current;
-    if (!el) return;
-    const prevent = (e) => { if (pressedRef.current) e.preventDefault(); };
+    if (!el || revealed || !signedIn) return;
+    const prevent = (e) => { if (e.cancelable) e.preventDefault(); };
+    el.addEventListener('touchstart', prevent, { passive: false });
     el.addEventListener('touchmove', prevent, { passive: false });
-    return () => el.removeEventListener('touchmove', prevent);
-  });
+    return () => {
+      el.removeEventListener('touchstart', prevent);
+      el.removeEventListener('touchmove', prevent);
+    };
+  }, [revealed, signedIn]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -276,7 +282,13 @@ function ScratchCard({ revealed, result, claiming, signedIn, onComplete, onNeedL
   }
 
   return (
-    <div ref={stageRef} className="scratch-stage" onPointerDown={e => { pressedRef.current = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {} scratchAt(e.clientX, e.clientY); }} onPointerMove={e => { if (pressedRef.current) scratchAt(e.clientX, e.clientY); }} onPointerUp={() => { pressedRef.current = false; }} onPointerLeave={() => { pressedRef.current = false; }}>
+    <div ref={stageRef} className="scratch-stage"
+      onPointerDown={e => { pressedRef.current = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {} scratchAt(e.clientX, e.clientY); }}
+      onPointerMove={e => { if (pressedRef.current) scratchAt(e.clientX, e.clientY); }}
+      onPointerUp={() => { pressedRef.current = false; }}
+      onPointerCancel={() => { pressedRef.current = false; }}
+      onPointerLeave={() => { pressedRef.current = false; }}
+      onContextMenu={e => e.preventDefault()}>
       <div className="scratch-under">
         <div className="scratch-emoji">🎁</div>
         <h4>Scratch & Win Daily!</h4>

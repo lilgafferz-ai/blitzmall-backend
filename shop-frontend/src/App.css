@@ -1075,8 +1075,10 @@ input, textarea {
   position: relative;
   height: 200px;
   touch-action: none;
+  overscroll-behavior: contain;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none; /* no long-press menu/magnifier mid-scratch */
   overflow: hidden;
 }
 .scratch-under {
@@ -1123,6 +1125,7 @@ input, textarea {
   width: 100%;
   height: 100%;
   z-index: 2;
+  touch-action: none;
 }
 .scratch-hint {
   position: absolute;
@@ -1137,6 +1140,14 @@ input, textarea {
   pointer-events: none;
 }
 .scratch-result {
+  /* Same height as the foil (.scratch-stage) so revealing the prize doesn't
+     make everything below the card jump. */
+  min-height: 200px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   padding: 18px 16px;
   text-align: center;
   animation: fadeIn 0.4s ease;

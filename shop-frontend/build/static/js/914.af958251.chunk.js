@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkshop_frontend=self.webpackChunkshop_frontend||[]).push([[914],{914(s,n,o){o.d(n,{PushNotifications:()=>t});const t=(0,o(9344).F3)("PushNotifications",{})}}]);
