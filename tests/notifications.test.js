@@ -131,3 +131,33 @@ describe('Staff stock / expiry alert engine', () => {
     expect(hit).toBeTruthy();
   });
 });
+
+describe('Device token hygiene', () => {
+  const { sendToTokens } = require('../lib/notifications');
+  const { col } = require('../lib/db');
+
+  it('does not store placeholder MOCK_ tokens from old app builds', async () => {
+    const phone = freshPhone();
+    const tok = bearer(await customerToken(request, app, phone, 'Mock Token'));
+    const mock = 'MOCK_NATIVE_TOKEN_' + phone + '_' + Date.now();
+    const r = await request(app).post('/api/notifications/register').set(tok).send({ token: mock, platform: 'android' });
+    expect(r.statusCode).toBe(200);
+    expect(r.body.stored).toBe(false);
+    expect(await col.notification_tokens.findOne({ token: mock })).toBeNull();
+  });
+
+  it('stores a real-looking token and purges placeholder tokens at send time', async () => {
+    const phone = freshPhone();
+    const tok = bearer(await customerToken(request, app, phone, 'Real Token'));
+    const real = 'fcm-real-token-' + Date.now() + '-abcdefghijklmnop';
+    const r = await request(app).post('/api/notifications/register').set(tok).send({ token: real, platform: 'android' });
+    expect(r.body.success).toBe(true);
+    expect(await col.notification_tokens.findOne({ token: real })).toBeTruthy();
+
+    const junk = 'MOCK_WEB_TOKEN_' + phone + '_' + Date.now();
+    await col.notification_tokens.insertOne({ phone, token: junk, platform: 'web', updatedAt: new Date() });
+    await sendToTokens([junk], 'Hi', 'There');
+    expect(await col.notification_tokens.findOne({ token: junk })).toBeNull();
+    await col.notification_tokens.deleteMany({ token: real });
+  });
+});

@@ -17,6 +17,12 @@ const config: CapacitorConfig = {
       autoUpdate: false,
       resetWhenUpdate: true
     },
+    // Show pushes as a real system banner (with sound) even while the app is
+    // open, like other apps — without this, Android hands foreground pushes
+    // to the page silently and nothing appears in the notification shade.
+    PushNotifications: {
+      presentationOptions: ['badge', 'sound', 'alert']
+    },
     SplashScreen: {
       launchShowDuration: 0,
       launchAutoHide: true,

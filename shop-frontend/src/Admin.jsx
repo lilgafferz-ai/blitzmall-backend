@@ -3,6 +3,7 @@ import './Admin.css';
 import { ProductSellingFields, DeliveriesTab, SuppliersTab, StockTakeTab, TaxTab, DailyReportCard, ProductReviewsAdmin, CustomersTab } from './AdminExtras';
 import { lineTotalFor, dealSavingsFor, qtyStepOf, snapQty, formatQty, isLoose } from './pricing';
 import AdminSettings from './screens/AdminSettings';
+import { getPushToken, onPushTap, pushPlatform } from './push';
 import { cacheProducts, getCachedProducts, queueSale, syncQueuedSales, getPendingCount, onOnline, onOffline } from './offline';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import jsPDF from 'jspdf';
@@ -1368,91 +1369,31 @@ const loadStockTransfers = async () => {
 
   // ===== STAFF PUSH — real OS pop-ups on the phone =====
   // A staff device (owner/cashier/manager) registers as a 'staff' push token on
-  // login so the server can ping it with NEW-ORDER notifications (orders only).
-  // Native apps only — the PC app alerts via its order-polling toasts. The
-  // alert body is deliberately PII-free ("New order received — KES X"), so even
-  // a guessed staff username binding only ever yields order-count pings.
+  // login so the server can ping it with real OS notifications — new orders,
+  // payments and stock alerts — even when the app is closed. Re-registered on
+  // every launch because FCM tokens change after reinstalls/updates. The alert
+  // bodies are deliberately PII-free ("New order received — KES X").
   const staffPushRegisteredRef = useRef(false);
-  // Reused web FCM app instance for staff push (browser/PC-web path below).
-  const fcmWebAppRef = useRef(null);
   useEffect(() => {
     if (!loggedIn || !user || !user.username) return;
     if (staffPushRegisteredRef.current) return;
-    const native = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
     let cancelled = false;
     (async () => {
-      try {
-        if (!native) {
-          // Web/PC browser: register a real FCM web token via the service
-          // worker so staff in a browser get true OS-level pushes too. The
-          // desktop app additionally toasts natively through its feed poller.
-          if (!('Notification' in window) || Notification.permission === 'denied') return;
-          if (Notification.permission === 'default') {
-            const p = await Notification.requestPermission();
-            if (p !== 'granted') return;
-          }
-          const cfg = window.BLITZ_FIREBASE_CONFIG;
-          if (!cfg || !cfg.apiKey || !cfg.vapidKey) return;
-          try {
-            const { initializeApp, getApps } = await import('firebase/app');
-            const { getMessaging, getToken, onMessage } = await import('firebase/messaging');
-            if (!fcmWebAppRef.current) {
-              fcmWebAppRef.current = getApps().length ? getApps()[0] : initializeApp({ apiKey: cfg.apiKey, authDomain: cfg.authDomain, projectId: cfg.projectId, messagingSenderId: cfg.messagingSenderId, appId: cfg.appId }, 'blitzmallWeb');
-            }
-            const messaging = getMessaging(fcmWebAppRef.current);
-            const reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
-            const token = await getToken(messaging, { vapidKey: cfg.vapidKey, serviceWorkerRegistration: reg });
-            if (cancelled || !token) return;
-            staffPushRegisteredRef.current = true;
-            try {
-              onMessage(messaging, (payload) => {
-                if (payload && payload.notification) {
-                  try { new Notification(payload.notification.title || 'BlitzMall', { body: payload.notification.body || '' }); } catch (e) {}
-                }
-              });
-            } catch (e) {}
-            await fetch(API_URL + '/notifications/register', {
-              method: 'POST', headers: authHeaders(),
-              body: JSON.stringify({ role: 'staff', token, platform: 'web' })
-            }).catch(() => {});
-          } catch (e) { console.error('Staff web push registration failed:', e); }
-          return;
-        }
-        const { PushNotifications } = await import('@capacitor/push-notifications');
-        let perm = await PushNotifications.checkPermissions();
-        if (perm.receive === 'prompt') perm = await PushNotifications.requestPermissions();
-        if (perm.receive !== 'granted') return;
-        await PushNotifications.register();
-        // Branded Android channel (matches the manifest's
-        // default_notification_channel_id) so background pushes land in a
-        // "BlitzMall Alerts" channel instead of the system default.
-        try { await PushNotifications.createChannel({ id: 'blitzmall_alerts', name: 'BlitzMall Alerts', description: 'Orders, payments and offers', importance: 4 }); } catch (e) {}
-        const token = await new Promise(resolve => {
-          const unsubs = [];
-          const finish = (t) => { try { unsubs.forEach(u => u.remove()); } catch (e) {} resolve(t); };
-          unsubs.push(PushNotifications.addListener('registration', (r) => finish(r && r.value)));
-          unsubs.push(PushNotifications.addListener('registrationError', () => finish(null)));
-          setTimeout(() => finish(null), 15000);
-        });
-        if (cancelled || !token) return;
-        staffPushRegisteredRef.current = true;
-        // Foreground parity with the customer app: toast pushes received while
-        // the admin screen is open (background ones pop from the OS itself).
-        try {
-          PushNotifications.addListener('pushNotificationReceived', (n) => {
-            if (n && n.notification) {
-              try { new Notification(n.notification.title || 'BlitzMall', { body: n.notification.body || '' }); } catch (e) {}
-            }
-          });
-        } catch (e) {}
-        await fetch(API_URL + '/notifications/register', {
-          method: 'POST', headers: authHeaders(),
-          body: JSON.stringify({ role: 'staff', token, platform: 'android' })
-        }).catch(() => {});
-      } catch (e) { console.error('Staff push registration failed:', e); }
+      const { token } = await getPushToken({ prompt: true });
+      if (cancelled || !token) return;
+      staffPushRegisteredRef.current = true;
+      await fetch(API_URL + '/notifications/register', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ role: 'staff', token, platform: pushPlatform() })
+      }).catch(() => {});
     })();
     return () => { cancelled = true; };
   }, [loggedIn, user]);
+
+  // Tapping a staff push (new order, payment, stock alert) opens the matching tab.
+  useEffect(() => onPushTap((data) => {
+    if (data && data.tab) setTab(data.tab);
+  }), []);
 
   const login = async (e) => {
     e.preventDefault();

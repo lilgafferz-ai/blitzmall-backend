@@ -52,6 +52,9 @@ module.exports = function register(app) {
   app.post('/api/notifications/register', notifRegisterLimiter, async (req, res) => {
     const { token, platform } = req.body;
     if (!token) return res.status(400).json({ error: 'Token required' });
+    // Placeholder tokens from old app builds can never receive a push — accept
+    // the call (the in-app feed still works) but don't store them.
+    if (/^MOCK_/.test(String(token))) return res.json({ success: true, stored: false });
     try {
       const who = await pushIdentity(req);
       if (!who) return res.status(401).json(req.body.role === 'staff' ? { error: 'Staff sign-in required' } : CUSTOMER_AUTH_ERROR);

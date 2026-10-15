@@ -62,7 +62,7 @@ module.exports = function register(app) {
         rider = { userId: String(u._id), name: u.name, username: u.username, assignedAt: new Date() };
       }
       await col.orders.updateOne({ _id: order._id }, { $set: { rider } });
-      if (rider) sendPushToStaffUser(rider.username, '🛵 New delivery', `Order #${String(order._id).slice(-6)} — ${order.deliveryLocation || 'see the app'}`);
+      if (rider) sendPushToStaffUser(rider.username, '🛵 New delivery', `Order #${String(order._id).slice(-6)} — ${order.deliveryLocation || 'see the app'}`, { tab: 'deliveries' });
       auditLog(req, 'rider_assigned', `Order ${req.params.orderId} → ${rider ? rider.name : 'unassigned'}`);
       res.json({ success: true, rider });
     } catch (e) { sendErr(res, e, 'Failed to assign rider'); }
@@ -118,7 +118,7 @@ module.exports = function register(app) {
 
   // Rider couldn't reach the customer — tell them, keep the order open.
   app.post('/api/admin/rider/orders/:orderId/arrived', authenticate, requirePermission('deliveries', 'orders'), riderAction(async (req, res, order) => {
-    sendPushToPhone(order.customerId, '📍 Your rider is here', 'Your BlitzMall rider has arrived — please come out to collect your order.');
+    sendPushToPhone(order.customerId, '📍 Your rider is here', 'Your BlitzMall rider has arrived — please come out to collect your order.', { screen: 'orders' });
     res.json({ success: true });
   }));
 };

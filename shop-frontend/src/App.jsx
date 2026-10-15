@@ -13,6 +13,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import LockScreen from './LockScreen';
 import { isLockEnabled, onAppBackground, biometricCapability, hasPin, setPin, setLockConfig } from './appLock';
+import { getPushToken, onPushTap, isNativeApp, pushPlatform } from './push';
 const Admin = React.lazy(() => import('./Admin'));
 
 const getDefaultApiUrl = () => {
@@ -67,7 +68,6 @@ const custFetch = async (url, opts = {}) => {
   return res;
 };
 
-let fcmWebApp = null; // reuse the Firebase web app across toggle on/off cycles
 
 // Handle for the extracted customer components (CustomerExtras.jsx).
 const api = { API_URL, custFetch: (...a) => custFetch(...a) };
@@ -765,7 +765,6 @@ function App() {
   // root a single back just shows a hint — the app only exits on a deliberate
   // second back press, or via the explicit Exit App button in the profile.
   const navStackRef = useRef([]);
-  const pushListenerRef = useRef(null); // native push-received listener (registered once)
   const backHandlingRef = useRef(false);
   const lastBackPressRef = useRef(0);
 
@@ -1253,6 +1252,7 @@ function App() {
   }, [screen]);
 
   const lastPollTimeRef = useRef(new Date().toISOString());
+  const realPushRef = useRef(false); // true once THIS device has a real FCM token on the server
 
   useEffect(() => {
     if (!notifEnabled || !customer?.customerId) return;
@@ -1264,7 +1264,9 @@ function App() {
         const r = await custFetch(`${API_URL}/notifications/feed?phone=${customer.customerId}&since=${lastPollTimeRef.current}`);
         const data = await r.json();
         if (active && Array.isArray(data) && data.length > 0) {
-          data.forEach(item => {
+          // With real push on, each event already popped up as a system
+          // banner — only advance the cursor, don't toast it a second time.
+          if (!realPushRef.current) data.forEach(item => {
             showToast(`🔔 ${item.title} — ${item.body}`);
             if (!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) && 'Notification' in window && Notification.permission === 'granted') {
               try { new Notification(item.title, { body: item.body }); } catch (e) {}
@@ -1285,6 +1287,26 @@ function App() {
       clearInterval(pollInterval);
     };
   }, [notifEnabled, customer?.customerId]);
+
+  // Push: ask once after sign-in (Android app) and silently refresh the token
+  // on every launch after that, unless the shopper switched notifications off.
+  // Waits until the app lock is passed, and calls through a ref because
+  // registerPushToken is defined below the lock screen's early return.
+  const registerPushRef = useRef(null);
+  const pushGateOpen = !!customer?.customerId && !forceLockSetup && lockConfigured && !appLocked;
+  useEffect(() => {
+    if (!pushGateOpen) return;
+    let off = false;
+    try { off = localStorage.getItem('blitz_push_enabled') === 'false'; } catch (e) {}
+    if (off) return;
+    const timer = setTimeout(() => { if (registerPushRef.current) registerPushRef.current({ silent: true }); }, 1500);
+    return () => clearTimeout(timer);
+  }, [pushGateOpen, customer?.customerId]);
+
+  // Tapping a push opens the relevant screen (order updates → My orders).
+  useEffect(() => onPushTap((data) => {
+    if (data && data.screen === 'orders') setScreen('orders'); // the screen effect loads the orders
+  }), []);
 
   useEffect(() => {
     if (couponInput && !appliedCoupon && total > 0) {
@@ -2166,132 +2188,55 @@ function App() {
     rd.onloadend = () => saveProfile({ ...(profile || {}), photo: rd.result }); rd.readAsDataURL(f); };
 
   // ===== Push notifications =====
-  const isNativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
-
-  // Ask the OS/browser for permission, obtain the FCM token and register it with
-  // our server. Native (Android) uses the Capacitor push plugin; web/PC uses the
-  // Firebase JS SDK + service worker. Everything degrades gracefully when the
-  // Firebase config isn't set up yet.
-  const registerPushToken = async () => {
-    if (!customer?.customerId) { showToast('Sign in first to enable notifications'); return; }
-    const platform = isNativeApp ? 'android' : (/electron/i.test(navigator.userAgent || '') ? 'pc' : 'web');
-    let token = null;
-    let error = '';
-    try {
-      if (isNativeApp) {
-        try {
-          const { PushNotifications } = await import('@capacitor/push-notifications');
-          let perm = await PushNotifications.checkPermissions();
-          if (perm.receive === 'prompt') perm = await PushNotifications.requestPermissions();
-          if (perm.receive !== 'granted') error = 'denied';
-          else {
-            await PushNotifications.register();
-            // Branded Android channel (matches the manifest's
-            // default_notification_channel_id) so background pushes land in a
-            // "BlitzMall Alerts" channel instead of the system default.
-            try { await PushNotifications.createChannel({ id: 'blitzmall_alerts', name: 'BlitzMall Alerts', description: 'Orders, payments and offers', importance: 4 }); } catch (e) {}
-            token = await new Promise(resolve => {
-              const unsubs = [];
-              const finish = (t) => { try { unsubs.forEach(u => u.remove()); } catch (e) {} resolve(t); };
-              unsubs.push(PushNotifications.addListener('registration', (r) => finish(r && r.value)));
-              unsubs.push(PushNotifications.addListener('registrationError', () => finish(null)));
-              setTimeout(() => finish(null), 15000);
-            });
-            if (token && !pushListenerRef.current) {
-              pushListenerRef.current = await PushNotifications.addListener('pushNotificationReceived', (n) => {
-                if (n && n.notification) showToast(`${n.notification.title || 'BlitzMall'} — ${n.notification.body || ''}`);
-              });
-            }
-          }
-        } catch (nativeErr) {
-          console.warn('Native push plugin failed, using mock fallback:', nativeErr);
-          // Fallback: generate a mock token so the polling loop can take over
-          token = `MOCK_NATIVE_TOKEN_${customer.customerId}_${Date.now()}`;
-          error = 'mock_fallback';
-        }
-      } else {
-        // Request standard browser notifications permission
-        if ('Notification' in window && Notification.permission !== 'granted') {
-          const perm = await Notification.requestPermission();
-          if (perm !== 'granted') {
-            error = 'denied';
-          }
-        }
-        
-        if (error !== 'denied') {
-          const cfg = window.BLITZ_FIREBASE_CONFIG;
-          if (!cfg || !cfg.apiKey || !cfg.vapidKey) {
-            // Fallback mock token for web if Firebase is not configured
-            token = `MOCK_WEB_TOKEN_${customer.customerId}_${Date.now()}`;
-            error = 'mock_fallback';
-          } else {
-            try {
-              const { initializeApp, getApps } = await import('firebase/app');
-              const { getMessaging, getToken, onMessage } = await import('firebase/messaging');
-              if (!fcmWebApp) fcmWebApp = getApps().length ? getApps()[0] : initializeApp({ apiKey: cfg.apiKey, authDomain: cfg.authDomain, projectId: cfg.projectId, messagingSenderId: cfg.messagingSenderId, appId: cfg.appId }, 'blitzmallWeb');
-              const messaging = getMessaging(fcmWebApp);
-              const perm = await Notification.requestPermission();
-              if (perm !== 'granted') error = 'denied';
-              else {
-                const reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
-                token = await getToken(messaging, { vapidKey: cfg.vapidKey, serviceWorkerRegistration: reg });
-                onMessage(messaging, (payload) => {
-                  if (payload && payload.notification) showToast(`${payload.notification.title || 'BlitzMall'} — ${payload.notification.body || ''}`);
-                });
-              }
-            } catch (webFcmErr) {
-              console.warn('Web FCM failed, using mock fallback:', webFcmErr);
-              token = `MOCK_WEB_TOKEN_${customer.customerId}_${Date.now()}`;
-              error = 'mock_fallback';
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.error('Push enable error:', e);
-      // Last resort: still try a mock token so polling can work
-      token = `MOCK_FALLBACK_${customer.customerId}_${Date.now()}`;
-      error = 'mock_fallback';
-    }
-
+  // Real OS-level push, like other apps: the phone shows a banner in the
+  // notification shade whether BlitzMall is open, in the background or closed.
+  // The token is (re)registered automatically on every launch while signed in,
+  // because FCM tokens change after reinstalls/updates. When no real token is
+  // available (permission denied, unsupported browser) the in-app feed poller
+  // below still delivers updates as toasts.
+  const registerPushToken = async ({ silent = false } = {}) => {
+    if (!customer?.customerId) { if (!silent) showToast('Sign in first to enable notifications'); return; }
+    // The automatic (silent) run may show Android's permission prompt once,
+    // right after sign-in — never again if the shopper said no.
+    let askedBefore = false;
+    try { askedBefore = localStorage.getItem('blitz_push_asked') === '1'; } catch (e) {}
+    const prompt = !silent || (isNativeApp() && !askedBefore);
+    if (prompt) { try { localStorage.setItem('blitz_push_asked', '1'); } catch (e) {} }
+    const { token, reason } = await getPushToken({ prompt });
     if (token) {
       try {
         const r = await custFetch(`${API_URL}/notifications/register`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: customer.customerId, token, platform })
+          body: JSON.stringify({ phone: customer.customerId, token, platform: pushPlatform() })
         });
         const d = await r.json();
         if (d.success) {
+          realPushRef.current = true;
           setNotifEnabled(true);
           try { localStorage.setItem('blitz_push_enabled', 'true'); } catch (err) {}
-          // Honest status: the token is registered now and will work the moment
-          // the store's server push secret is configured, but until then the
-          // in-app feed (polled toasts) is what actually delivers updates.
-          let serverReady = true;
-          try {
-            const s = await (await custFetch(`${API_URL}/notifications/status`)).json();
-            serverReady = !!(s && s.serverFcmConfigured);
-          } catch (e) {}
-          if (error === 'mock_fallback') {
-            showToast('🔔 Notifications enabled — in-app updates active (simulated mode)');
-          } else if (serverReady) {
-            showToast('🔔 Notifications enabled!');
-          } else {
-            showToast('🔔 Notifications enabled — you get in-app updates now; real push turns on once the store finishes setup');
-          }
+          if (!silent) showToast('🔔 Notifications enabled!');
           return;
         }
       } catch (e) { console.error(e); }
-      error = 'error';
+      if (!silent) showToast('Could not enable notifications — try again');
+      return;
     }
-
-    if (error === 'denied') showToast('Notifications blocked — allow them in your phone/browser settings');
-    else if (error === 'not_configured') showToast('Push is almost ready — BlitzMall needs to finish setup');
-    else if (error && error !== 'mock_fallback') showToast('Could not enable notifications — try again');
+    realPushRef.current = false;
+    if (reason === 'denied') {
+      if (!silent) showToast('Notifications blocked — allow them for BlitzMall in your phone/browser settings');
+      return;
+    }
+    if (silent) return;
+    // No real push on this device/browser — fall back to in-app updates.
+    setNotifEnabled(true);
+    try { localStorage.setItem('blitz_push_enabled', 'true'); } catch (err) {}
+    showToast("🔔 Notifications on — this browser can't get phone-style pushes, so updates show while BlitzMall is open");
   };
+  registerPushRef.current = registerPushToken;
 
   const disablePush = async () => {
     setNotifEnabled(false);
+    realPushRef.current = false;
     try { localStorage.setItem('blitz_push_enabled', 'false'); } catch (e) {}
     // Tell the server to forget this phone's tokens so pushes actually stop.
     try {
@@ -2300,10 +2245,6 @@ function App() {
         body: JSON.stringify({ phone: customer?.customerId || '' })
       });
     } catch (e) {}
-    if (pushListenerRef.current) {
-      try { pushListenerRef.current.remove(); } catch (e) {}
-      pushListenerRef.current = null;
-    }
     showToast('🔕 Notifications turned off');
   };
 
