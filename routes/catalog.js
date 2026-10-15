@@ -7,6 +7,28 @@ const { autoFetchProductImage, isMobileUA, searchProductImages, upgradeImagesFor
 const { searchImagesLimiter } = require('../lib/limiters');
 const { scheduleAlertSweep, sendPushToAll } = require('../lib/notifications');
 const { applyPricingRules } = require('../lib/pricing');
+const { sanitizeUnitFields } = require('../lib/units');
+const { TAX_CATEGORIES } = require('../lib/etims');
+
+// Selling unit, multi-buy deals, supplier and tax category (Inventory form).
+const extraProductFields = (b = {}) => {
+  const out = sanitizeUnitFields(b);
+  if (b.supplierId !== undefined) out.supplierId = b.supplierId ? String(b.supplierId).slice(0, 24) : null;
+  if (b.taxCategory !== undefined) out.taxCategory = TAX_CATEGORIES[b.taxCategory] ? b.taxCategory : null;
+  return out;
+};
+// Shoppers never see cost prices or internal alert markers.
+const PRIVATE_FIELDS = ['buyingPrice', 'cost', 'alertedOutAt', 'alertedLowAt', 'alertedExpiryAt', 'alertedExpiredAt', 'supplierId', 'taxCategory'];
+const publicProduct = (p) => { const out = { ...p }; for (const k of PRIVATE_FIELDS) delete out[k]; return out; };
+// Star ratings from product reviews (hidden ones excluded).
+async function withRatings(list) {
+  try {
+    const reviews = col.product_reviews ? await col.product_reviews.find({ hidden: { $ne: true } }).toArray() : [];
+    const agg = {};
+    for (const r of reviews) { const a = agg[r.productId] || (agg[r.productId] = { sum: 0, n: 0 }); a.sum += r.rating; a.n++; }
+    return list.map(p => { const a = agg[String(p._id)]; return a ? { ...p, ratingAvg: Math.round((a.sum / a.n) * 10) / 10, ratingCount: a.n } : p; });
+  } catch (e) { return list; }
+}
 
 module.exports = function register(app) {
   // ===== CUSTOMER =====
@@ -16,7 +38,7 @@ module.exports = function register(app) {
       let priced = productCache.get(cacheKey);
       if (!priced) {
         const list = await col.products.find().toArray();
-        priced = await applyPricingRules(list);
+        priced = (await withRatings(await applyPricingRules(list))).map(publicProduct);
         productCache.set(cacheKey, priced);
       }
       // 4K image upgrade happens PER REQUEST (after cache) so phone customers
@@ -61,10 +83,11 @@ module.exports = function register(app) {
 
       const product = {
         name, category: (category || '').trim() || 'Other', barcode: (barcode || '').trim(),
-        buyingPrice: parseFloat(buyingPrice) || 0, price: parseFloat(price) || 0, stock: parseInt(stock, 10) || 0,
+        buyingPrice: parseFloat(buyingPrice) || 0, price: parseFloat(price) || 0, stock: Math.max(0, Math.round((parseFloat(stock) || 0) * 100) / 100),
         description: description || '', image: image || await autoFetchProductImage(name, barcode),
         expiryDate: expiryDate ? new Date(expiryDate) : null,
         branchId: branchId || req.user.branchId || null,
+        ...extraProductFields(req.body),
         createdAt: new Date(),
       };
       const result = await col.products.insertOne(product);
@@ -82,10 +105,11 @@ module.exports = function register(app) {
       if (barcode !== undefined) u.barcode = (barcode || '').trim();
       if (buyingPrice !== undefined) u.buyingPrice = parseFloat(buyingPrice) || 0;
       if (price !== undefined) u.price = parseFloat(price) || 0;
-      if (stock !== undefined) u.stock = parseInt(stock, 10) || 0;
+      if (stock !== undefined) u.stock = Math.max(0, Math.round((parseFloat(stock) || 0) * 100) / 100);
       if (description !== undefined) u.description = description;
       if (image !== undefined) u.image = image;
       if (expiryDate !== undefined) u.expiryDate = expiryDate ? new Date(expiryDate) : null;
+      Object.assign(u, extraProductFields(req.body));
       const r = await col.products.updateOne({ _id: new ObjectId(req.params.productId) }, { $set: u });
       if (!r.matchedCount) return res.status(404).json({ error: 'Product not found' });
       productCache.del('all_products');

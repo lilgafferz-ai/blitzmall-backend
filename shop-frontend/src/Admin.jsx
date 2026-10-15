@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './Admin.css';
+import { ProductSellingFields, DeliveriesTab, SuppliersTab, StockTakeTab, TaxTab, DailyReportCard, ProductReviewsAdmin } from './AdminExtras';
+import { lineTotalFor, dealSavingsFor, qtyStepOf, snapQty, formatQty, isLoose } from './pricing';
 import AdminSettings from './screens/AdminSettings';
 import { cacheProducts, getCachedProducts, queueSale, syncQueuedSales, getPendingCount, onOnline, onOffline } from './offline';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
@@ -17,7 +19,7 @@ const getDefaultApiUrl = () => {
 };
 
 const API_URL = getDefaultApiUrl();
-const BLANK = { name: '', category: '', barcode: '', buyingPrice: '', price: '', stock: '', description: '', image: null, expiryDate: '' };
+const BLANK = { name: '', category: '', barcode: '', buyingPrice: '', price: '', stock: '', description: '', image: null, expiryDate: '' , unit: 'pcs', soldLoose: false, qtyStep: '', bulkDeals: [], supplierId: '', taxCategory: '' };
 
 // Record types the owner can wipe from the 🗑️ Delete tab (users & branches are
 // intentionally not here — they're never bulk-deleted). Keys match the server's
@@ -66,7 +68,7 @@ const isPcApp = (() => {
   }
 })();
 
-const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCategoriesModal, onSubmit, onNext }) => {
+const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCategoriesModal, onSubmit, onNext, suppliers }) => {
   const [form, setForm] = React.useState(initialForm || BLANK);
   const [searching, setSearching] = React.useState(false);
   const [foundImages, setFoundImages] = React.useState([]);
@@ -212,6 +214,7 @@ const AddStockForm = React.memo(({ initialForm, editingId, categories, setShowCa
         <label htmlFor="add-stock-exp">Expiry date (if any)<input id="add-stock-exp" name="expiryDate" type="date" value={form.expiryDate} onChange={e => setForm(s=>({...s,expiryDate:e.target.value}))} /></label>
       </div>
       {form.buyingPrice !== "" && form.price !== "" && <div className="blitz-admin-margin">Profit per item: <b>{money(parseFloat(form.price)-parseFloat(form.buyingPrice))}</b></div>}
+      <ProductSellingFields form={form} setForm={setForm} suppliers={suppliers} />
       <label className="blitz-admin-full" htmlFor="add-stock-desc">Description<textarea id="add-stock-desc" name="description" value={form.description} onChange={e => setForm(s=>({...s,description:e.target.value}))} placeholder="Optional notes for customers" /></label>
       
       {/* ONLINE IMAGE FINDER */}
@@ -675,8 +678,12 @@ function Admin({ onExit }) {
   const authPost = (url, body) => authFetch(url, { method: 'POST', body: JSON.stringify(body) });
   const authPut = (url, body) => authFetch(url, { method: 'PUT', body: JSON.stringify(body) });
   const authDelete = (url) => authFetch(url, { method: 'DELETE' });
+  const extrasApi = React.useMemo(() => ({ API_URL, authGet, authPost, authPut, authDelete }), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const [supplierList, setSupplierList] = useState([]);
+  const loadSupplierList = async () => { try { const r = await authGet(API_URL + '/admin/suppliers'); const d = await r.json(); setSupplierList(Array.isArray(d) ? d : []); } catch (e) { setSupplierList([]); } };
 
   const checkAlerts = async () => {
+    if (user?.role === 'rider') return; // riders only get their run sheet (the server 403s the rest)
     try {
       const r = await authGet(API_URL + '/admin/summary');
       if (!r.ok) return;
@@ -726,6 +733,7 @@ function Admin({ onExit }) {
     }
   };
   const loadOrders = async () => {
+    if (user?.role === 'rider') return; // riders only get their run sheet (the server 403s the rest)
     try {
       const r = await authGet(withBranch(API_URL + '/admin/orders'));
       const list = asArray(await r.json());
@@ -738,6 +746,7 @@ function Admin({ onExit }) {
   };
   const loadSales = async () => { try { const r = await authGet(withBranch(API_URL + '/admin/sales?limit=15')); setRecentSales(asArray(await r.json())); } catch (e) { console.error(e); setRecentSales([]); } };
   const loadSummary = async () => {
+    if (user?.role === 'rider') return; // riders only get their run sheet (the server 403s the rest)
     try {
       const r = await authGet(withBranch(API_URL + '/admin/summary'));
       if (!r.ok) throw new Error('Server returned ' + r.status);
@@ -753,6 +762,7 @@ function Admin({ onExit }) {
   const loadBanners = async () => { try { const r = await authGet(API_URL + '/admin/banners'); setBanners(asArray(await r.json())); } catch (e) { console.error(e); setBanners([]); } };
 
   const checkActiveShift = async () => {
+    if (user?.role === 'rider') return; // riders only get their run sheet (the server 403s the rest)
     try {
       const r = await authGet(API_URL + '/admin/shifts/active');
       const d = await r.json();
@@ -1164,7 +1174,8 @@ const loadStockTransfers = async () => {
     else if (tab === 'loyalty') { loadLoyaltyMembers(); loadCoupons(); loadLoyaltySettings(); loadLoyaltyStats(); }
     else if (tab === 'branches' && (!user || user.role === 'owner')) loadBranches();
     else if (tab === 'wipe' && user?.role === 'owner') loadRecordCounts();
-    else if (tab === 'inventory') { loadProducts(); loadCategories(); loadPricingRules(); loadStockTransfers(); }
+    else if (tab === 'inventory') { loadProducts(); loadCategories(); loadPricingRules(); loadStockTransfers(); loadSupplierList(); }
+    else if (tab === 'stocktake') loadProducts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, loggedIn]);
 
@@ -1317,7 +1328,7 @@ const loadStockTransfers = async () => {
   // POST another sale, which would double-record it.
   const finishMpesaSale = () => {
     const cartItems = window._pendingSaleCart || [...saleCart];
-    const total = cartItems.reduce((s, i) => s + i.price * i.qty, 0);
+    const total = cartItems.reduce((s, i) => s + lineTotalFor(i, i.qty), 0);
     setLastChange({ change: 0, total });
     setReceipt({ items: cartItems, total, change: 0, paymentMethod: 'mpesa', cashier, date: new Date(), phone: custPhone });
     setSaleCart([]); setAmountGiven(''); setCashPart(''); setMpesaPart(''); setCustPhone('');
@@ -1563,7 +1574,7 @@ const loadStockTransfers = async () => {
   const handleFormSubmit = React.useCallback((data) => submitRef.current(data), []);
   const handleFormNext = React.useCallback((data) => nextRef.current(data), []);
 
-  const editProduct = (p) => { setForm({ name: p.name||'', category: p.category||'', barcode: p.barcode||'', buyingPrice: p.buyingPrice??'', price: p.price??'', stock: p.stock??'', description: p.description||'', image: p.image||null, expiryDate: p.expiryDate ? new Date(p.expiryDate).toISOString().slice(0,10) : '' }); setEditingId(p._id); setShowForm(true); window.scrollTo(0,0); };
+  const editProduct = (p) => { setForm({ name: p.name||'', category: p.category||'', barcode: p.barcode||'', buyingPrice: p.buyingPrice??'', price: p.price??'', stock: p.stock??'', description: p.description||'', image: p.image||null, expiryDate: p.expiryDate ? new Date(p.expiryDate).toISOString().slice(0,10) : '', unit: p.unit || 'pcs', soldLoose: !!p.soldLoose, qtyStep: p.qtyStep ?? '', bulkDeals: Array.isArray(p.bulkDeals) ? p.bulkDeals : [], supplierId: p.supplierId || '', taxCategory: p.taxCategory || '' }); setEditingId(p._id); setShowForm(true); window.scrollTo(0,0); };
   const delProduct = async (id) => { if (!window.confirm('Delete this item?')) return; try { const r = await authDelete(API_URL + '/admin/products/' + id); const d = await r.json().catch(() => ({})); if (d && d.success) loadProducts(); else alert('❌ ' + ((d && d.error) || 'Could not delete item (HTTP ' + r.status + ').')); } catch (e) { console.error(e); alert('❌ Network error — could not delete.'); } };
   const updateOrder = async (id, payload) => {
     try {
@@ -1640,15 +1651,15 @@ const loadStockTransfers = async () => {
 
   const pid = (p) => p._id || p.id;
   const stockOf = (id) => { const p = products.find(x => pid(x) === id); return p ? (p.stock ?? null) : null; };
-  const addToSale = (p) => { const id = pid(p); setSaleCart(c => { const ex = c.find(i => i.productId === id); if (ex) return c.map(i => i.productId === id ? { ...i, qty: i.qty+1 } : i); return [...c, { productId: id, name: p.name, price: p.price||0, buyingPrice: p.buyingPrice||0, qty: 1 }]; }); setScan(''); setLastChange(null); if (scanRef.current) scanRef.current.focus(); };
+  const addToSale = (p) => { const id = pid(p); setSaleCart(c => { const ex = c.find(i => i.productId === id); if (ex) return c.map(i => i.productId === id ? { ...i, qty: snapQty(i, i.qty + qtyStepOf(i)) } : i); return [...c, { productId: id, name: p.name, price: p.price||0, buyingPrice: p.buyingPrice||0, qty: qtyStepOf(p), unit: p.unit, soldLoose: p.soldLoose, qtyStep: p.qtyStep, bulkDeals: p.bulkDeals }]; }); setScan(''); setLastChange(null); if (scanRef.current) scanRef.current.focus(); };
   const handleScanSubmit = (e) => { e.preventDefault(); const t = scan.trim(); if (!t) return; const byCode = products.find(p => p.barcode && p.barcode === t); if (byCode) { addToSale(byCode); return; } const byName = products.filter(p => p.name.toLowerCase().includes(t.toLowerCase())); if (byName.length === 1) addToSale(byName[0]); };
   const scanMatches = React.useMemo(() => {
     const term = scan.trim().toLowerCase();
     return term ? products.filter(p => p.name.toLowerCase().includes(term) || (p.barcode||'').includes(scan)).slice(0,6) : [];
   }, [products, scan]);
   const setSaleQty = (id, q) => { if (q <= 0) setSaleCart(c => c.filter(i => i.productId !== id)); else setSaleCart(c => c.map(i => i.productId === id ? { ...i, qty: q } : i)); };
-  const saleTotal = saleCart.reduce((s, i) => s + i.price * i.qty, 0);
-  const saleProfit = saleCart.reduce((s, i) => s + (i.price - i.buyingPrice) * i.qty, 0);
+  const saleTotal = Math.round(saleCart.reduce((s, i) => s + lineTotalFor(i, i.qty), 0) * 100) / 100;
+  const saleProfit = saleCart.reduce((s, i) => s + lineTotalFor(i, i.qty) - i.buyingPrice * i.qty, 0);
   const change = payMethod === 'cash' && parseFloat(amountGiven) > saleTotal ? (parseFloat(amountGiven) - saleTotal) : 0;
   const splitCovered = (parseFloat(cashPart)||0) + (parseFloat(mpesaPart)||0);
 
@@ -2059,14 +2070,18 @@ const loadStockTransfers = async () => {
     { id: 'staff', label: '👷 Staff' },
     { id: 'branches', label: '🏪 Branches' },
     { id: 'notify', label: '📣 Notify' },
+    { id: 'deliveries', label: '🛵 Deliveries' },
+    { id: 'suppliers', label: '🚚 Suppliers' },
+    { id: 'stocktake', label: '📋 Stock-take' },
+    { id: 'tax', label: '🧾 Tax' },
     { id: 'wipe', label: '🗑️ Delete' },
     { id: 'settings', label: '⚙️ Settings' },
   ];
   // Navigation groups — shown as section headings in the PC sidebar.
   const TAB_GROUP = {
-    sales: 'Sell', orders: 'Sell',
-    inventory: 'Store', banners: 'Store',
-    records: 'Money', expenses: 'Money', credit: 'Money',
+    sales: 'Sell', orders: 'Sell', deliveries: 'Sell',
+    inventory: 'Store', banners: 'Store', suppliers: 'Store', stocktake: 'Store',
+    records: 'Money', expenses: 'Money', credit: 'Money', tax: 'Money',
     loyalty: 'Customers', reviews: 'Customers', notify: 'Customers',
     staff: 'Team', branches: 'Team', wipe: 'Team',
     settings: 'App'
@@ -2280,10 +2295,10 @@ ${div}
                   <div className="pos-cart-row" key={i.productId}>
                     <div className="pos-cart-info">
                       <b>{i.name}</b>
-                      <span className="pos-line">{money(i.price)} × {i.qty} = <b>{money(i.price * i.qty)}</b></span>
+                      <span className="pos-line">{money(i.price)} × {formatQty(i, i.qty)} = <b>{money(lineTotalFor(i, i.qty))}</b>{dealSavingsFor(i, i.qty) > 0 && <span className="pos-deal"> 🏷️ deal −{money(dealSavingsFor(i, i.qty))}</span>}</span>
                       {warn && <span className="pos-warn">⚠ only {left} in stock</span>}
                     </div>
-                    <div className="blitz-admin-qty"><button onClick={() => setSaleQty(i.productId, i.qty-1)}>−</button><b>{i.qty}</b><button onClick={() => setSaleQty(i.productId, i.qty+1)}>+</button></div>
+                    <div className="blitz-admin-qty"><button onClick={() => setSaleQty(i.productId, Math.round((i.qty - qtyStepOf(i)) * 100) / 100)}>−</button>{isLoose(i) ? <input className="pos-qty-input" type="number" step={qtyStepOf(i)} value={i.qty} onChange={e => setSaleQty(i.productId, parseFloat(e.target.value) || 0)} /> : <b>{i.qty}</b>}<button onClick={() => setSaleQty(i.productId, Math.round((i.qty + qtyStepOf(i)) * 100) / 100)}>+</button></div>
                     <button className="pos-x" onClick={() => setSaleQty(i.productId, 0)}>✕</button>
                   </div>
                 );
@@ -2422,6 +2437,7 @@ ${div}
               setShowCategoriesModal={setShowCategoriesModal}
               onSubmit={handleFormSubmit}
               onNext={handleFormNext}
+              suppliers={supplierList}
             />
           )}
           <div className="blitz-admin-search"><span>🔍</span><input placeholder="Search name, barcode or category…" value={search} onChange={e => setSearch(e.target.value)} /></div>
@@ -2630,7 +2646,8 @@ ${div}
               return (
               <div className="blitz-admin-order" key={o._id}>
                 <div className="blitz-admin-order-top"><b>{o.customerName}</b><span className="blitz-admin-phone">{o.customerId}</span></div>
-                <div className="blitz-admin-order-items">{o.items.map((it,k) => <p key={k}>{it.name} ×{it.quantity} — {money(it.price*it.quantity)}</p>)}</div>
+                <div className="blitz-admin-order-items">{o.items.map((it,k) => <p key={k}>{it.name} ×{formatQty(it, it.quantity)} — {money(typeof it.lineTotal === 'number' ? it.lineTotal : it.price*it.quantity)}</p>)}</div>
+                {(o.deliverySlot || o.rider) && <div className="ax-orderinfo">{o.deliverySlot && <span>🕒 {o.deliverySlot.label}</span>}{o.rider && <span>🛵 {o.rider.name}</span>}</div>}
                 
                 {/* Delivery details, maps link, and fee adjustments */}
                 <div style={{marginTop: 8, padding: 8, background: 'var(--bg-2)', borderRadius: 8, fontSize: '.8rem', display: 'flex', flexDirection: 'column', gap: 6}}>
@@ -2769,6 +2786,7 @@ ${div}
       {safeTab === "records" && (
         <div className="blitz-admin-body">
           <div className="blitz-admin-row-between"><h2>Records</h2><div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="blitz-admin-btn small" onClick={loadSummary}>↻ Refresh</button><button className="blitz-admin-btn small" onClick={exportSalesPDF}>📄 PDF</button><button className="blitz-admin-btn small" onClick={exportBackup}>⬇ JSON</button></div></div>
+          <DailyReportCard api={extrasApi} user={user} />
           <div className="rec-periods">{Object.keys(periodLabel).map(k => <button key={k} className={period===k?"on":""} onClick={() => setPeriod(k)}>{periodLabel[k]}</button>)}</div>
           {!summary ? <p className="blitz-admin-empty">Loading…</p> : (
             <>
@@ -3010,6 +3028,7 @@ ${div}
           <div className="blitz-admin-body"><h2>Reviews</h2>
             <div className="rv-head"><div className="rv-avg"><b>{avg.toFixed(1)}</b><span className="rv-stars">{stars(Math.round(avg))}</span><small>{count} review{count!==1?"s":""}</small></div>{complaints > 0 && <div className="rv-complaints">⚠ {complaints} complaint{complaints!==1?"s":""} (1–2 stars)</div>}</div>
             {count === 0 ? <p className="blitz-admin-empty">No reviews yet.</p> : <div className="blitz-admin-list">{reviews.map(r => <div className={"rv-row" + (r.rating<=2?" bad":"")} key={r._id}><div className="rv-info"><div className="rv-top"><span className="rv-stars">{stars(r.rating)}</span><b>{r.customerName}</b></div>{r.message && <p className="rv-msg">{r.message}</p>}<span className="cr-date">{new Date(r.createdAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' })}</span></div><button className="pos-void" onClick={() => delReview(r._id)}>delete</button></div>)}</div>}
+            <ProductReviewsAdmin api={extrasApi} canModerate={user && (user.role === 'owner' || user.role === 'manager')} />
           </div>
         );
       })()}
@@ -3455,6 +3474,11 @@ ${div}
         </div>
       )}
 
+      {safeTab === "deliveries" && <DeliveriesTab api={extrasApi} user={user} />}
+      {safeTab === "suppliers" && <SuppliersTab api={extrasApi} onStockChanged={loadProducts} />}
+      {safeTab === "stocktake" && <StockTakeTab api={extrasApi} products={products} onApplied={loadProducts} />}
+      {safeTab === "tax" && <TaxTab api={extrasApi} user={user} />}
+
       {safeTab === "notify" && user?.role === 'owner' && (
         <div className="blitz-admin-body">
           <div className="blitz-admin-row-between">
@@ -3596,13 +3620,15 @@ ${div}
                       setNewUserRole(r);
                       if (r === 'cashier') setNewUserPermissions(['sales']);
                       else if (r === 'staff') setNewUserPermissions(['inventory', 'orders', 'expenses', 'reviews', 'loyalty']);
-                      else if (r === 'manager') setNewUserPermissions(['sales', 'inventory', 'orders', 'records', 'expenses', 'credit', 'reviews', 'loyalty']);
+                      else if (r === 'manager') setNewUserPermissions(['sales', 'inventory', 'orders', 'records', 'expenses', 'credit', 'reviews', 'loyalty', 'deliveries', 'suppliers', 'stocktake']);
+                      else if (r === 'rider') setNewUserPermissions(['deliveries']);
                     }} 
                     style={{background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:10,padding:'10px',fontFamily:'inherit'}}
                   >
                     <option value="cashier">Cashier</option>
                     <option value="staff">Staff</option>
                     <option value="manager">Manager</option>
+                    <option value="rider">Rider (deliveries only)</option>
                   </select>
                   <select value={newUserBranch} onChange={e => setNewUserBranch(e.target.value)} style={{background:'var(--bg-2)',color:'var(--text)',border:'1px solid var(--line)',borderRadius:10,padding:'10px',fontFamily:'inherit'}}>
                     <option value="">All branches</option>

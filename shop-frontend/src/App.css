@@ -1461,6 +1461,57 @@ input, textarea {
 /* OTP step: "Resend" and "Change number" on their own lines */
 .login-card .owner-link{display:block;margin:12px auto 0;}
 
+/* ===== v0.1.51: stock on the product page ===== */
+.detail-stock{margin-top:6px;font-size:.85rem;font-weight:700;}
+.detail-stock.out{color:#ff453a;}
+.detail-stock.low{color:#ff9f0a;}
+.btn-neon:disabled{opacity:.5;cursor:not-allowed;}
+/* ===== Stars / reviews ===== */
+.stars span{color:#3a3a46;letter-spacing:1px;cursor:default;}
+.stars span.on{color:var(--gold);}
+.stars span[role=button]{cursor:pointer;}
+.detail-rating{margin-top:6px;font-size:.85rem;color:var(--muted);}
+.product-reviews{margin-top:22px;border-top:1px solid var(--line);padding-top:14px;}
+.pr-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:.9rem;margin-bottom:10px;}
+.pr-form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;margin-bottom:12px;font-size:.85rem;}
+.pr-item{padding:10px 0;border-bottom:1px solid var(--line);font-size:.85rem;}
+.pr-item-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.pr-verified{color:var(--green);font-size:.7rem;}
+.pr-comment{margin-top:4px;line-height:1.5;}
+.pr-date{color:var(--muted);font-size:.7rem;margin-top:2px;}
+.btn-neon.small{padding:8px 14px;font-size:.8rem;align-self:flex-start;}
+
+/* ===== Multi-buy deals / loose goods ===== */
+.detail-deals{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+.deal-chip{background:rgba(255,122,26,.12);border:1px solid rgba(255,122,26,.4);color:var(--orange);border-radius:20px;padding:3px 10px;font-size:.75rem;font-weight:700;}
+.cart-deal{display:block;color:var(--green);font-size:.72rem;margin-top:2px;}
+.cart-price small,.detail-price small{color:var(--muted);font-weight:500;font-size:.75em;}
+.summary-row.deal{color:var(--green);}
+
+/* ===== Delivery slots ===== */
+.slot-picker{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:0 14px 16px;}
+.slot-title{font-weight:700;margin-bottom:8px;}
+.slot-day{margin-top:8px;}
+.slot-day-label{font-size:.75rem;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;}
+.slot-chips{display:flex;flex-wrap:wrap;gap:8px;}
+.slot-chip{background:var(--bg-2);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:8px 12px;font-size:.8rem;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;}
+.slot-chip small{font-size:.65rem;color:var(--muted);}
+.slot-chip.on{border-color:var(--orange);background:rgba(255,122,26,.15);color:#fff;}
+.slot-chip:disabled{opacity:.4;cursor:not-allowed;}
+.slot-note{margin:0 14px 16px;font-size:.8rem;color:var(--muted);}
+.order-slot{margin-top:8px;font-size:.8rem;color:var(--gold);}
+
+/* ===== Wallet top-up ===== */
+.wallet-topup{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;}
+.wallet-topup-title{font-weight:800;color:var(--green);}
+.wallet-topup-quick{display:flex;gap:6px;flex-wrap:wrap;}
+.wallet-topup-quick button{flex:1;min-width:64px;background:var(--bg-2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px;font-size:.75rem;cursor:pointer;}
+.wallet-topup-quick button.on{border-color:var(--green);color:var(--green);}
+.wallet-topup-msg{font-size:.8rem;color:var(--muted);}
+.wallet-topup-msg.done{color:var(--green);}
+.wallet-topup-msg.failed{color:var(--red);}
+.modal-divider{height:1px;background:var(--line);margin:6px 0 14px;}
+
 /* ===== APP LOCK (fingerprint / PIN) ===== */
 .applock-card{max-width:360px;width:100%;}
 .applock-lockicon{font-size:2.3rem;margin:6px 0 2px;}

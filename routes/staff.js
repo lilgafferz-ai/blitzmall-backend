@@ -11,12 +11,15 @@ module.exports = function register(app) {
 
   // ===== USERS & JWT AUTH =====
 
-  const VALID_PERMISSIONS = ['sales', 'inventory', 'orders', 'records', 'expenses', 'credit', 'reviews', 'loyalty'];
+  const VALID_PERMISSIONS = ['sales', 'inventory', 'orders', 'records', 'expenses', 'credit', 'reviews', 'loyalty', 'deliveries', 'suppliers', 'stocktake', 'tax'];
   const DEFAULT_PERMISSIONS = {
     cashier: ['sales'],
     staff: ['inventory', 'orders', 'expenses', 'reviews', 'loyalty'],
-    manager: ['sales', 'inventory', 'orders', 'records', 'expenses', 'credit', 'reviews', 'loyalty']
+    manager: ['sales', 'inventory', 'orders', 'records', 'expenses', 'credit', 'reviews', 'loyalty', 'deliveries', 'suppliers', 'stocktake'],
+    // Riders only see their delivery run sheet.
+    rider: ['deliveries']
   };
+  const STAFF_ROLES = ['cashier', 'manager', 'staff', 'rider'];
   const publicUser = (u) => ({ name: u.name, role: u.role, username: u.username, branchId: u.branchId || null, permissions: u.permissions || [] });
 
   // Seed / create first owner. Only possible while the (real) database has no
@@ -103,8 +106,7 @@ module.exports = function register(app) {
     const { username, password, name, role, branchId, permissions } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
     if (String(password).length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    const validRoles = ['cashier', 'manager', 'staff'];
-    if (role && !validRoles.includes(role)) return res.status(400).json({ error: 'Role must be cashier, manager or staff' });
+    if (role && !STAFF_ROLES.includes(role)) return res.status(400).json({ error: 'Role must be cashier, manager, staff or rider' });
     const userPermissions = Array.isArray(permissions)
       ? [...new Set(permissions.filter(p => VALID_PERMISSIONS.includes(p)))]
       : (DEFAULT_PERMISSIONS[role] || ['sales']);
@@ -146,7 +148,7 @@ module.exports = function register(app) {
       const u = {};
       if (name !== undefined) u.name = String(name).trim();
       if (role !== undefined && user.role !== 'owner') {
-        if (!['cashier', 'manager', 'staff'].includes(role)) return res.status(400).json({ error: 'Role must be cashier, manager or staff' });
+        if (!STAFF_ROLES.includes(role)) return res.status(400).json({ error: 'Role must be cashier, manager, staff or rider' });
         u.role = role;
       }
       if (branchId !== undefined) u.branchId = branchId || null;

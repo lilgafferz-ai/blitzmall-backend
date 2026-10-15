@@ -2,6 +2,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import ErrorBoundary from './ErrorBoundary';
+import { t, getLanguage, setLanguage } from './i18n';
+import { lineTotalFor, dealSavingsFor, dealLabels, qtyStepOf, snapQty, formatQty, isLoose, unitLabel } from './pricing';
+import { SlotPicker, WalletTopUp, ProductReviews, Stars } from './CustomerExtras';
 import { MeScreen, RewardsScreen, SettingsScreen, EditProfileScreen, AboutScreen } from './screens/CustomerScreens';
 import { ConfirmSheet } from './components/SettingsKit';
 import { SplashScreen } from '@capacitor/splash-screen';
@@ -53,6 +56,11 @@ const custFetch = async (url, opts = {}) => {
 };
 
 let fcmWebApp = null; // reuse the Firebase web app across toggle on/off cycles
+
+// Handle for the extracted customer components (CustomerExtras.jsx).
+const api = { API_URL, custFetch: (...a) => custFetch(...a) };
+// Units the shop can still sell (products without stock tracking are unlimited).
+const stockLeft = (p) => (p && typeof p.stock === 'number' ? Math.max(0, p.stock) : Infinity);
 
 // Built-in avatars (served from public/avatars/). Upload-your-own also supported.
 const AVATARS = [
@@ -314,7 +322,7 @@ function FlashSaleCountdown({ expires }) {
 // Live delivery map — real OpenStreetMap view of the shop and the customer's
 // pinned drop-off point, connected by a dashed route line. Uses Leaflet with
 // emoji div-markers (no image assets to bundle, works offline-first).
-function LiveMap({ from, to, height = 180 }) {
+function LiveMap({ from, to, rider, height = 180 }) {
   const ref = useRef(null);
   const mapRef = useRef(null);
   const layerRef = useRef(null);
@@ -343,7 +351,7 @@ function LiveMap({ from, to, height = 180 }) {
     const map = mapRef.current;
     const layer = layerRef.current;
     if (!map || !layer) return;
-    const key = `${from && from.lat}|${from && from.lng}|${to && to.lat}|${to && to.lng}`;
+    const key = `${from && from.lat}|${from && from.lng}|${to && to.lat}|${to && to.lng}|${rider && rider.lat}|${rider && rider.lng}`;
     if (key === lastCoordsRef.current) return;
     lastCoordsRef.current = key;
     layer.clearLayers();
@@ -365,11 +373,18 @@ function LiveMap({ from, to, height = 180 }) {
         color: '#ff7a1a', weight: 3, dashArray: '6 6', opacity: 0.9
       }).addTo(layer);
     }
+    if (rider && rider.lat && rider.lng) {
+      pts.push(L.latLng(rider.lat, rider.lng));
+      L.marker([rider.lat, rider.lng], {
+        icon: L.divIcon({ className: '', html: '<div style="font-size:26px;line-height:1">🛵</div>', iconSize: [30, 30], iconAnchor: [15, 15] }),
+        zIndexOffset: 1000
+      }).addTo(layer).bindPopup(rider.name ? `${rider.name} (${t('Your rider')})` : t('Your rider'));
+    }
     try {
       if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.25));
       else map.setView([SHOP_COORDS.lat, SHOP_COORDS.lng], 13);
     } catch (e) {}
-  }, [from, to]);
+  }, [from, to, rider]);
 
   return <div ref={ref} style={{ height, width: '100%', borderRadius: 12, zIndex: 0, position: 'relative' }} />;
 }
@@ -522,6 +537,10 @@ function App() {
   const [activeProduct, setActiveProduct] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [detailQty, setDetailQty] = useState(1);
+  // English / Kiswahili — changing it re-renders every screen.
+  const [lang, setLang] = useState(getLanguage());
+  const switchLanguage = (l) => setLang(setLanguage(l));
+  const [deliverySlot, setDeliverySlot] = useState(null);
   const [payMethod, setPayMethod] = useState('delivery');
   const [myOrders, setMyOrders] = useState([]);
   const [cancelOrderTarget, setCancelOrderTarget] = useState(null); // order awaiting "cancel?" confirmation
@@ -1031,6 +1050,8 @@ function App() {
     <div className="futuristic-modal-overlay" onClick={() => setShowWalletModal(false)}>
       <div className="futuristic-modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: '340px' }}>
         <button className="modal-close-btn" onClick={() => setShowWalletModal(false)}>✕</button>
+        <WalletTopUp api={api} phone={customer?.customerId} showToast={showToast} onDone={() => loadCustLoyalty()} />
+        <div className="modal-divider" />
         <h2 className="modal-title" style={{ color: 'var(--gold)' }}>🪙 Convert Points to Cash</h2>
         <p className="modal-subtitle" style={{ marginBottom: 16 }}>Redeem your loyalty points directly into your virtual wallet at a rate of 5 points = KES 1.</p>
         
@@ -1123,7 +1144,8 @@ function App() {
     return ['All', ...[...new Set(products.map(categoryOf))].sort()];
   }, [products]);
   const productId = (p) => p._id || p.id;
-  const total = React.useMemo(() => cart.reduce((s, i) => s + i.price * i.quantity, 0), [cart]);
+  const total = React.useMemo(() => Math.round(cart.reduce((s, i) => s + lineTotalFor(i, i.quantity), 0) * 100) / 100, [cart]);
+  const dealSavings = React.useMemo(() => Math.round(cart.reduce((s, i) => s + dealSavingsFor(i, i.quantity), 0) * 100) / 100, [cart]);
   const cartCount = React.useMemo(() => cart.reduce((s, i) => s + i.quantity, 0), [cart]);
 
   const trending = React.useMemo(() => {
@@ -1292,14 +1314,21 @@ function App() {
 
   const addToCart = useCallback((p, qty = 1) => {
     const id = productId(p);
+    const max = stockLeft(p);
+    if (max <= 0) { showToast(`😕 ${p.name} is out of stock`); return; }
+    if (isLoose(p) && qty === 1) qty = qtyStepOf(p);
     setCart(prev => {
       const ex = prev.find(i => productId(i) === id);
-      if (ex) return prev.map(i => productId(i) === id ? { ...i, quantity: i.quantity + qty } : i);
-      return [...prev, { ...p, quantity: qty }];
+      const want = snapQty(p, (ex ? ex.quantity : 0) + qty);
+      if (want > max) showToast(`Only ${max} of ${p.name} left in stock`);
+      const quantity = Math.min(want, max);
+      if (ex) return prev.map(i => productId(i) === id ? { ...i, quantity } : i);
+      return [...prev, { ...p, quantity }];
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const openProduct = useCallback((p) => { setActiveProduct(p); setDetailQty(1); setScreen('product'); }, []);
+  const openProduct = useCallback((p) => { setActiveProduct(p); setDetailQty(qtyStepOf(p)); setScreen('product'); }, []);
 
   const isFavorite = useCallback((id) => favorites.some(f => productId(f) === id), [favorites]);
   const toggleFavorite = useCallback((p) => {
@@ -1483,7 +1512,13 @@ function App() {
     if (c.includes('milk') || c.includes('dairy')) return '🥛'; return '🛍️';
   };
 
-  const setQty = (id, q) => { if (q <= 0) setCart(cart.filter(i => productId(i) !== id)); else setCart(cart.map(i => productId(i) === id ? { ...i, quantity: q } : i)); };
+  const setQty = (id, q) => {
+    if (q <= 0) { setCart(cart.filter(i => productId(i) !== id)); return; }
+    const item = cart.find(i => productId(i) === id);
+    const max = stockLeft(products.find(x => productId(x) === id) || item);
+    if (q > max) { showToast(`Only ${max} left in stock`); q = max; }
+    setCart(cart.map(i => productId(i) === id ? { ...i, quantity: q } : i));
+  };
 
   const validatePhone = (p) => {
     const digits = p.replace(/[^0-9]/g, '');
@@ -1952,7 +1987,8 @@ function App() {
       deliveryArea,
       couponCode: appliedCoupon ? appliedCoupon.code : null,
       discount: discountAmt,
-      useWallet: useWalletPayment
+      useWallet: useWalletPayment,
+      deliverySlot: deliverySlot ? { date: deliverySlot.date, id: deliverySlot.id } : null
     };
     try {
       const r = await custFetch(API_URL + '/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(orderData) });
@@ -2002,6 +2038,8 @@ function App() {
       } else if (r.status === 401) {
         // Session ended — the expiry listener already sent the shopper to sign in.
       } else {
+        if (d.slotError) setDeliverySlot(null);
+        if (r.status === 409) loadProducts(); // stock moved — refresh what's left
         alert(d.error || 'Failed to place order');
       }
     } catch (e) {
@@ -2219,7 +2257,7 @@ function App() {
       <div className="splash-glow" />
       <div className="splash-inner"><BlitzLogo size={140} />
         <h1 className="splash-title">BLITZ<span>MALL</span></h1>
-        <p className="splash-tag">Everything you need. Lightning fast.</p></div>
+        <p className="splash-tag">{t('Everything you need. Lightning fast.')}</p></div>
       <span className="splash-skip">tap to enter</span>
     </div>
   );
@@ -2254,7 +2292,7 @@ function App() {
         <h1 className="brand">BLITZ<span>MALL</span></h1>
         {otpPending ? (
           <>
-            <p className="muted">Enter the 6-digit code sent to</p>
+            <p className="muted">{t('Enter the 6-digit code sent to')}</p>
             <p className="otp-phone">{formatPhoneDisplay(otpPending.phone)}</p>
             {otpDevCode && (
               <div className="otp-devcode">
@@ -2264,26 +2302,26 @@ function App() {
               </div>
             )}
             <form onSubmit={handleVerifyOtp}>
-              <input className="field otp-input" type="tel" inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="6-digit code" value={otpInput} onChange={e => setOtpInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} autoFocus />
+              <input className="field otp-input" type="tel" inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder={t('6-digit code')} value={otpInput} onChange={e => setOtpInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} autoFocus />
               {otpError && <p className="form-error">{otpError}</p>}
               <button className="btn-neon login-cta" type="submit" disabled={otpVerifying}>{otpVerifying ? 'Verifying…' : 'Verify & Sign In'}</button>
             </form>
             <button className="owner-link" type="button" disabled={otpResendIn > 0} onClick={handleResendOtp}>
               {otpResendIn > 0 ? `Resend code in ${otpResendIn}s` : 'Resend code'}
             </button>
-            <button className="owner-link" type="button" onClick={() => { setOtpPending(null); setOtpInput(''); setOtpError(''); setOtpDevCode(''); }}>← Change phone number</button>
+            <button className="owner-link" type="button" onClick={() => { setOtpPending(null); setOtpInput(''); setOtpError(''); setOtpDevCode(''); }}>{t('← Change phone number')}</button>
           </>
         ) : (
           <>
-            <p className="muted">Sign in to start shopping</p>
+            <p className="muted">{t('Sign in to start shopping')}</p>
             {sessionNotice && <p className="form-error session-notice">{sessionNotice}</p>}
             <form onSubmit={handleLogin}>
-              <input className="field" placeholder="Your name" value={name} onChange={e => setName(e.target.value)} required />
+              <input className="field" placeholder={t('Your name')} value={name} onChange={e => setName(e.target.value)} required />
               <input className="field" type="tel" placeholder="Phone (07xx xxx xxx)" value={phone} onChange={e => setPhone(e.target.value)} required />
               <input className="field" placeholder="Referral code (optional) — got invited? 🎁" value={referralCode} onChange={e => setReferralCode(e.target.value)} />
-              <button className="btn-neon login-cta" type="submit">Enter Blitz Mall</button>
+              <button className="btn-neon login-cta" type="submit">{t('Enter Blitz Mall')}</button>
             </form>
-            <button className="owner-link" onClick={() => setIsAdmin(true)}>Owner login</button>
+            <button className="owner-link" onClick={() => setIsAdmin(true)}>{t('Owner login')}</button>
           </>
         )}
       </div>
@@ -2295,11 +2333,11 @@ function App() {
     setScreen(t);
   };
   const NAV_TABS = [
-    { id: 'home', icon: '🏠', label: 'Home', on: ['home', 'category'] },
-    { id: 'offers', icon: '🏷️', label: 'Offers', on: ['offers'] },
-    { id: 'cart', icon: '🛒', label: 'Cart', on: ['cart', 'checkout'], dot: cartCount > 0 },
-    { id: 'orders', icon: '📦', label: 'Orders', on: ['orders'] },
-    { id: 'profile', icon: '👤', label: 'Me', on: ['profile', 'settings', 'rewards', 'edit-profile', 'about', 'favorites', 'referral', 'review', 'share'] },
+    { id: 'home', icon: '🏠', label: t('Home'), on: ['home', 'category'] },
+    { id: 'offers', icon: '🏷️', label: t('Offers'), on: ['offers'] },
+    { id: 'cart', icon: '🛒', label: t('Cart'), on: ['cart', 'checkout'], dot: cartCount > 0 },
+    { id: 'orders', icon: '📦', label: t('Orders'), on: ['orders'] },
+    { id: 'profile', icon: '👤', label: t('Me'), on: ['profile', 'settings', 'rewards', 'edit-profile', 'about', 'favorites', 'referral', 'review', 'share'] },
   ];
   const BottomNav = () => (
     <>
@@ -2314,7 +2352,7 @@ function App() {
         {NAV_TABS.map(t => (
           <button key={t.id} className={t.on.includes(screen) ? 'on' : ''} onClick={() => goTab(t.id)}><span>{t.icon}{t.dot && <i className="dot" />}</span>{t.label}</button>
         ))}
-        <button className={screen === 'settings' ? 'on' : ''} onClick={() => setScreen('settings')}><span>⚙️</span>Settings</button>
+        <button className={screen === 'settings' ? 'on' : ''} onClick={() => setScreen('settings')}><span>⚙️</span>{t('Settings')}</button>
       </nav>
     </>
   );
@@ -2331,9 +2369,9 @@ function App() {
             </div>
           )}
           {isRefreshing && <div className="refreshing-indicator">⏳ Refreshing…</div>}
-          {!isOnline && <div className="offline-banner">📡 You are offline — browsing cached products</div>}
+          {!isOnline && <div className="offline-banner">{t('📡 You are offline — browsing cached products')}</div>}
           {isOnline && showRefreshBtn && (
-            <button className="refresh-btn" onClick={refreshProducts}>🔄 Tap to refresh products</button>
+            <button className="refresh-btn" onClick={refreshProducts}>{t('🔄 Tap to refresh products')}</button>
           )}
         <header className="topbar">
           <div className="topbar-brand"><BlitzLogo size={30} /><span>BLITZ<b>MALL</b></span></div>
@@ -2343,7 +2381,7 @@ function App() {
 
         <div className="searchbar wide">
           <span>🔍</span>
-          <input placeholder="Search products…" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+          <input placeholder={t('Search products…')} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
           {searchTerm && <button onClick={() => setSearchTerm('')}>✕</button>}
         </div>
 
@@ -2366,7 +2404,7 @@ function App() {
                     showToast(`Code ${b.code} copied! Use it at checkout.`);
                   }}>Copy Code: {b.code}</button>
                 )}
-                <button className="promo-view-deals" onClick={(e) => { e.stopPropagation(); setScreen('offers'); }}>View today's deals →</button>
+                <button className="promo-view-deals" onClick={(e) => { e.stopPropagation(); setScreen('offers'); }}>{t("View today's deals →")}</button>
               </div>
             ))}
           </div>
@@ -2391,7 +2429,7 @@ function App() {
           return (
             <div className="flash-sale-card">
               <div className="flash-sale-header">
-                <span className="flash-sale-title">⚡ FLASH SALE</span>
+                <span className="flash-sale-title">{t('⚡ FLASH SALE')}</span>
                 <div className="flash-sale-timer">
                   Ends in: <FlashSaleCountdown expires={closestExpiry} />
                 </div>
@@ -2467,7 +2505,7 @@ function App() {
 
           <main className="home-main">
             <h3 className="section-h">{term ? `Results for “${searchTerm}”` : activeCategory === 'All' ? '🔥 Trending now' : activeCategory}</h3>
-            {trending.length === 0 ? <p className="empty">Nothing to show yet.</p> : (
+            {trending.length === 0 ? <p className="empty">{t('Nothing to show yet.')}</p> : (
               <div className="prod-grid">
                 {trending.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(p))} onFav={toggleFavorite} />)}
               </div>
@@ -2479,11 +2517,11 @@ function App() {
         <div className="futuristic-floating-actions">
           <button className="float-action-btn wheel-btn" onClick={() => setShowSpinWheel(true)}>
             <span className="float-icon">🎡</span>
-            <span className="float-label">Spin & Win</span>
+            <span className="float-label">{t('Spin & Win')}</span>
           </button>
           <button className="float-action-btn ai-btn" onClick={() => setShowAiBot(true)}>
             <span className="float-icon">🤖</span>
-            <span className="float-label">AI Assistant</span>
+            <span className="float-label">{t('AI Assistant')}</span>
           </button>
         </div>
 
@@ -2492,7 +2530,7 @@ function App() {
           <div className="futuristic-modal-overlay" onClick={() => { if (!wheelSpinning) setShowSpinWheel(false); }}>
             <div className="futuristic-modal-card wheel-card" onClick={e => e.stopPropagation()}>
               <button className="modal-close-btn" onClick={() => setShowSpinWheel(false)} disabled={wheelSpinning}>✕</button>
-              <h2 className="modal-title">🎡 Daily Spin & Win</h2>
+              <h2 className="modal-title">{t('🎡 Daily Spin & Win')}</h2>
               <p className="modal-subtitle">Spin once a day — loyal shoppers win bigger prizes!</p>
 
               {(promoStatus?.tier || wheelPrize?.tier) && (
@@ -2528,7 +2566,7 @@ function App() {
                     }}>{s.label}</span>
                   ))}
                 </div>
-                <div className="wheel-center-hub">SPIN</div>
+                <div className="wheel-center-hub">{t('SPIN')}</div>
               </div>
 
               {wheelPrize && (
@@ -2566,7 +2604,7 @@ function App() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <span className="ai-chat-avatar">🤖</span>
                 <div>
-                  <h4 style={{ margin: 0 }}>Blitz AI Assistant</h4>
+                  <h4 style={{ margin: 0 }}>{t('Blitz AI Assistant')}</h4>
                   <small style={{ color: 'var(--green)' }}>● Online</small>
                 </div>
               </div>
@@ -2576,7 +2614,7 @@ function App() {
             <div className="ai-chat-messages">
               {aiMessages.length === 1 && aiMessages[0].sender === 'bot' && aiQuickActions.length > 0 && (
                 <div className="ai-quick-actions">
-                  <p className="ai-quick-label">Try asking:</p>
+                  <p className="ai-quick-label">{t('Try asking:')}</p>
                   <div className="ai-quick-buttons">
                     {aiQuickActions.map((action, i) => (
                       <button key={i} className="ai-quick-btn" onClick={() => handleAiQuickAction(action.text)}>
@@ -2622,12 +2660,12 @@ function App() {
             <form className="ai-chat-input-row" onSubmit={sendAiMessage}>
               <input 
                 type="text" 
-                placeholder="Ask me for a recipe, rewards info..." 
+                placeholder={t('Ask me for a recipe, rewards info...')} 
                 value={aiInput} 
                 onChange={e => setAiInput(e.target.value)} 
                 disabled={aiLoading} 
               />
-              <button type="submit" className="btn-neon" disabled={aiLoading || !aiInput.trim()}>Send</button>
+              <button type="submit" className="btn-neon" disabled={aiLoading || !aiInput.trim()}>{t('Send')}</button>
             </form>
           </div>
         )}
@@ -2658,14 +2696,20 @@ function App() {
                 {isFavorite(productId(p)) ? '❤️' : '🤍'}
               </button>
             </div>
-            <div className="detail-price">KES {p.price}</div>
+            <div className="detail-price">KES {p.price}{unitLabel(p) ? <small> / {unitLabel(p)}</small> : null}</div>
+            {p.ratingCount > 0 && <div className="detail-rating"><Stars value={p.ratingAvg} /> {p.ratingAvg} ({p.ratingCount})</div>}
+            {dealLabels(p).length > 0 && <div className="detail-deals">{dealLabels(p).map(d => <span key={d} className="deal-chip">🏷️ {d}</span>)}</div>}
+            {stockLeft(p) <= 0
+              ? <div className="detail-stock out">{t('Out of stock')}</div>
+              : stockLeft(p) < 5 ? <div className="detail-stock low">{t('Only')} {stockLeft(p)} {t('left')}</div> : null}
             {p.description && <p className="detail-desc">{p.description}</p>}
-            <div className="qty-row"><span>Quantity</span>
-              <div className="qty-ctrl"><button onClick={() => setDetailQty(Math.max(1, detailQty - 1))}>−</button><b>{detailQty}</b><button onClick={() => setDetailQty(detailQty + 1)}>+</button></div></div>
+            <div className="qty-row"><span>{t('Quantity')}</span>
+              <div className="qty-ctrl"><button onClick={() => setDetailQty(q => Math.max(qtyStepOf(p), Math.round((q - qtyStepOf(p)) * 100) / 100))}>−</button><b>{formatQty(p, detailQty)}</b><button onClick={() => setDetailQty(q => Math.min(Math.max(qtyStepOf(p), stockLeft(p)), Math.round((q + qtyStepOf(p)) * 100) / 100))}>+</button></div></div>
+            <ProductReviews api={api} productId={productId(p)} signedIn={!!customer} showToast={showToast} />
           </div>
         </div>
-        <div className="detail-bar"><div className="detail-bar-total">KES {p.price * detailQty}</div>
-          <button className="btn-neon" onClick={() => { addToCart(p, detailQty); setScreen('cart'); }}>Add to cart</button></div>
+        <div className="detail-bar"><div className="detail-bar-total">KES {lineTotalFor(p, detailQty)}</div>
+          <button className="btn-neon" disabled={stockLeft(p) <= 0} onClick={() => { addToCart(p, detailQty); setScreen('cart'); }}>{stockLeft(p) <= 0 ? t('Out of stock') : t('Add to cart')}</button></div>
         {gallery && (
           <div className="img-gallery-overlay" onClick={() => setGallery(null)}>
             <button className="gallery-close" onClick={() => setGallery(null)}>✕</button>
@@ -2685,16 +2729,16 @@ function App() {
   // CART
   if (screen === 'cart') return (
     <div className="screen with-nav">
-      <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('home')}>‹</button><h2 className="topbar-title">Your Cart</h2></header>
+      <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('home')}>‹</button><h2 className="topbar-title">{t('Your Cart')}</h2></header>
       <div className="scroll">
         {cart.length === 0 ? (
           <div className="empty-cart">
             <span>🛒</span>
-            <p>Your cart is empty</p>
-            <button className="btn-ghost" onClick={() => setScreen('home')} style={{marginBottom: 20}}>Start shopping</button>
+            <p>{t('Your cart is empty')}</p>
+            <button className="btn-ghost" onClick={() => setScreen('home')} style={{marginBottom: 20}}>{t('Start shopping')}</button>
             {savedBaskets.length > 0 && (
               <div style={{marginTop: 30, width: '100%', textAlign: 'left', padding: '0 16px'}}>
-                <h3 className="section-h" style={{margin: '0 0 10px 0', padding: 0}}>📋 Saved Carts / Templates</h3>
+                <h3 className="section-h" style={{margin: '0 0 10px 0', padding: 0}}>{t('📋 Saved Carts / Templates')}</h3>
                 <div style={{display: 'flex', flexDirection: 'column', gap: 10}}>
                   {savedBaskets.map(b => (
                     <div key={b._id} style={{background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 12, padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
@@ -2705,7 +2749,7 @@ function App() {
                         </div>
                       </div>
                       <div style={{display: 'flex', gap: 6}}>
-                        <button className="btn-neon" onClick={() => loadSavedBasketToCart(b)} style={{padding: '6px 12px', fontSize: '.75rem'}}>Load</button>
+                        <button className="btn-neon" onClick={() => loadSavedBasketToCart(b)} style={{padding: '6px 12px', fontSize: '.75rem'}}>{t('Load')}</button>
                         <button className="btn-ghost" onClick={() => deleteSavedBasket(b._id)} style={{padding: '6px 8px', fontSize: '.75rem', borderColor: 'var(--red)', color: 'var(--red)'}}>✕</button>
                       </div>
                     </div>
@@ -2718,8 +2762,9 @@ function App() {
           <div className="cart-list">{cart.map(i => (
             <div className="cart-row" key={productId(i)}>
               <div className="cart-thumb">{i.image ? (Array.isArray(i.image) ? <img src={i.image[0]} alt={i.name} loading="lazy" /> : <img src={i.image} alt={i.name} loading="lazy" />) : '🛍️'}</div>
-              <div className="cart-info"><b>{i.name}</b><span className="cart-price">KES {i.price}</span></div>
-              <div className="qty-ctrl small"><button onClick={() => setQty(productId(i), i.quantity - 1)}>−</button><b>{i.quantity}</b><button onClick={() => setQty(productId(i), i.quantity + 1)}>+</button></div>
+              <div className="cart-info"><b>{i.name}</b><span className="cart-price">KES {lineTotalFor(i, i.quantity)}{unitLabel(i) ? <small> · KES {i.price}/{unitLabel(i)}</small> : null}</span>
+                {dealSavingsFor(i, i.quantity) > 0 && <span className="cart-deal">🏷️ {t('You save')} KES {dealSavingsFor(i, i.quantity)}</span>}</div>
+              <div className="qty-ctrl small"><button onClick={() => setQty(productId(i), Math.round((i.quantity - qtyStepOf(i)) * 100) / 100)}>−</button><b>{formatQty(i, i.quantity)}</b><button onClick={() => setQty(productId(i), Math.round((i.quantity + qtyStepOf(i)) * 100) / 100)}>+</button></div>
               <button className="trash" onClick={() => setQty(productId(i), 0)}>🗑️</button>
             </div>))}
           </div>
@@ -2728,13 +2773,13 @@ function App() {
           <div className="gamified-delivery-bar" style={{background:'var(--card)',border:'1px solid var(--line)',borderRadius:16,padding:'16px',margin:'12px 16px'}}>
             {total >= 1500 ? (
               <div style={{textAlign:'center'}}>
-                <span style={{fontSize:'1.3rem'}}>🎉</span> <b style={{color:'var(--green)',fontSize:'.88rem'}}>Free Delivery Unlocked!</b>
-                <p className="muted" style={{fontSize:'.75rem',marginTop:4,marginBottom:0}}>Your order qualifies for free shipping (save KES 150).</p>
+                <span style={{fontSize:'1.3rem'}}>🎉</span> <b style={{color:'var(--green)',fontSize:'.88rem'}}>{t('Free Delivery Unlocked!')}</b>
+                <p className="muted" style={{fontSize:'.75rem',marginTop:4,marginBottom:0}}>{t('Your order qualifies for free shipping (save KES 150).')}</p>
               </div>
             ) : (
               <div>
                 <div style={{display:'flex',justifyContent:'space-between',fontSize:'.82rem',marginBottom:6}}>
-                  <span>Free Delivery progress:</span>
+                  <span>{t('Free Delivery progress:')}</span>
                   <b>KES {total} / KES 1,500</b>
                 </div>
                 <div style={{background:'var(--bg-2)',height:8,borderRadius:4,overflow:'hidden',border:'1px solid var(--line)'}}>
@@ -2755,21 +2800,21 @@ function App() {
               </button>
             ) : (
               <div style={{background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 12, padding: '12px 14px'}}>
-                <h4 style={{margin: '0 0 8px 0', fontSize: '.85rem'}}>Save Cart Template</h4>
+                <h4 style={{margin: '0 0 8px 0', fontSize: '.85rem'}}>{t('Save Cart Template')}</h4>
                 <div style={{display: 'flex', gap: 8}}>
                   <input className="field" placeholder="Template name e.g. Weekly Groceries" value={basketNameInput} onChange={e => setBasketNameInput(e.target.value)} style={{flex: 1, padding: 8, borderRadius: 8, fontSize: '.82rem'}} />
-                  <button className="btn-neon" onClick={saveCurrentBasket} style={{padding: '8px 12px', fontSize: '.82rem'}}>Save</button>
+                  <button className="btn-neon" onClick={saveCurrentBasket} style={{padding: '8px 12px', fontSize: '.82rem'}}>{t('Save')}</button>
                   <button className="btn-ghost" onClick={() => { setShowBasketSaveForm(false); setBasketNameInput(''); }} style={{padding: '8px 10px', fontSize: '.82rem'}}>✕</button>
                 </div>
               </div>
             )}
           </div>
 
-          <div className="summary"><div className="summary-row"><span>Subtotal</span><b>KES {total}</b></div>
-            <div className="summary-row muted"><span>Delivery</span><span>Calculated later</span></div></div>
+          <div className="summary"><div className="summary-row"><span>{t('Subtotal')}</span><b>KES {total}</b></div>{dealSavings > 0 && <div className="summary-row deal"><span>🏷️ {t('You save')}</span><b>KES {dealSavings}</b></div>}
+            <div className="summary-row muted"><span>{t('Delivery')}</span><span>{t('Calculated later')}</span></div></div>
         </>)}
       </div>
-      {cart.length > 0 && <div className="detail-bar"><div className="detail-bar-total">KES {total}</div><button className="btn-neon" onClick={() => setScreen('checkout')}>Checkout</button></div>}
+      {cart.length > 0 && <div className="detail-bar"><div className="detail-bar-total">KES {total}</div><button className="btn-neon" onClick={() => setScreen('checkout')}>{t('Checkout')}</button></div>}
       {renderToasts()}
     </div>
   );
@@ -2794,28 +2839,28 @@ function App() {
             setGpsAddress('');
             setScreen('cart');
           }}>‹</button>
-          <h2 className="topbar-title">Checkout</h2>
+          <h2 className="topbar-title">{t('Checkout')}</h2>
         </header>
         <div className="scroll">
-          <h3 className="section-h">Delivery to</h3>
+          <h3 className="section-h">{t('Delivery to')}</h3>
           <div className="info-card">
             <b>{customer?.name}</b>
             <span className="muted">{customer?.customerId}</span>
           </div>
 
-          <h3 className="section-h">Delivery destination</h3>
+          <h3 className="section-h">{t('Delivery destination')}</h3>
           <div className="info-card" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             <label style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
               Select Delivery Area:
               <select className="field" value={deliveryArea} onChange={e => setDeliveryArea(e.target.value)} style={{ width: '100%', padding: '8px', borderRadius: '8px', background: 'var(--bg-2)', border: '1px solid var(--line)', color: 'var(--text)' }}>
-                <option value="mall">Mall Area (KES 0 - Free)</option>
-                <option value="standard">Standard Delivery (KES 150)</option>
+                <option value="mall">{t('Mall Area (KES 0 - Free)')}</option>
+                <option value="standard">{t('Standard Delivery (KES 150)')}</option>
               </select>
             </label>
 
             <label style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
               Detailed Address / Landmark:
-              <input className="field" placeholder="e.g. Apartment, House No, Landmark" value={deliveryLocation} onChange={e => setDeliveryLocation(e.target.value)} style={{ padding: '8px', borderRadius: '8px' }} required />
+              <input className="field" placeholder={t('e.g. Apartment, House No, Landmark')} value={deliveryLocation} onChange={e => setDeliveryLocation(e.target.value)} style={{ padding: '8px', borderRadius: '8px' }} required />
             </label>
 
             <button type="button" className="btn-ghost" onClick={pinGpsLocation} style={{ width: '100%', padding: '10px', fontSize: '0.85rem', borderRadius: '10px', border: '1px dashed var(--orange)', background: 'rgba(255,122,26,0.06)' }} disabled={gpsLoading}>
@@ -2842,15 +2887,17 @@ function App() {
             )}
           </div>
 
-          <h3 className="section-h">Promo code</h3>
+          <SlotPicker api={api} value={deliverySlot} onChange={setDeliverySlot} />
+
+          <h3 className="section-h">{t('Promo code')}</h3>
           <div className="info-card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <div style={{ display: 'flex', gap: '8px' }}>
-              <input className="field" placeholder="Enter coupon code (e.g. BLITZ10)" value={couponInput} onChange={e => setCouponInput(e.target.value)} style={{ flex: 1, padding: '8px', borderRadius: '8px' }} />
-              <button type="button" className="btn-neon" onClick={validateCoupon} style={{ padding: '8px 16px', fontSize: '0.85rem' }}>Apply</button>
+              <input className="field" placeholder={t('Enter coupon code (e.g. BLITZ10)')} value={couponInput} onChange={e => setCouponInput(e.target.value)} style={{ flex: 1, padding: '8px', borderRadius: '8px' }} />
+              <button type="button" className="btn-neon" onClick={validateCoupon} style={{ padding: '8px 16px', fontSize: '0.85rem' }}>{t('Apply')}</button>
             </div>
             {appliedCoupon && (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(54, 211, 153, 0.1)', color: 'var(--green)', padding: '6px 10px', borderRadius: '6px', fontSize: '0.85rem' }}>
-                <span>Applied: <b>{appliedCoupon.code}</b> (- KES {appliedCoupon.discount})</span>
+                <span>{t('Applied:')} <b>{appliedCoupon.code}</b> (- KES {appliedCoupon.discount})</span>
                 <button type="button" onClick={() => { setAppliedCoupon(null); setCouponInput(''); }} style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: '1rem' }}>✕</button>
               </div>
             )}
@@ -2861,11 +2908,11 @@ function App() {
 
           {custAccount && (custAccount.walletBalance > 0 || useWalletPayment) && (
             <>
-              <h3 className="section-h">Virtual Wallet</h3>
+              <h3 className="section-h">{t('Virtual Wallet')}</h3>
               <div className="info-card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <b style={{ fontSize: '.85rem', color: '#fff' }}>Use Virtual Wallet Cash</b>
+                    <b style={{ fontSize: '.85rem', color: '#fff' }}>{t('Use Virtual Wallet Cash')}</b>
                     <div style={{ fontSize: '.7rem', color: 'var(--muted)', marginTop: 2 }}>Available: KES {custAccount.walletBalance.toLocaleString('en-KE')}</div>
                   </div>
                   <input 
@@ -2884,12 +2931,12 @@ function App() {
             </>
           )}
 
-          <h3 className="section-h">Payment method</h3>
+          <h3 className="section-h">{t('Payment method')}</h3>
           <button className={`pay-opt ${payMethod === 'delivery' ? 'sel' : ''}`} onClick={() => setPayMethod('delivery')}>
             <span>💵</span>
             <div>
-              <b>Pay on delivery</b>
-              <small>Pay cash when it arrives</small>
+              <b>{t('Pay on delivery')}</b>
+              <small>{t('Pay cash when it arrives')}</small>
             </div>
             <i className="radio" />
           </button>
@@ -2897,21 +2944,21 @@ function App() {
             <span>📱</span>
             <div>
               <b>M-Pesa</b>
-              <small>Pay instantly via secure M-Pesa STK Push</small>
+              <small>{t('Pay instantly via secure M-Pesa STK Push')}</small>
             </div>
             <i className="radio" />
           </button>
 
           <div className="summary">
-            <div className="summary-row"><span>Subtotal</span><b>KES {total}</b></div>
-            <div className="summary-row"><span>Delivery fee</span><b>KES {finalFee}</b></div>
+            <div className="summary-row"><span>{t('Subtotal')}</span><b>KES {total}</b></div>{dealSavings > 0 && <div className="summary-row deal"><span>🏷️ {t('You save')}</span><b>KES {dealSavings}</b></div>}
+            <div className="summary-row"><span>{t('Delivery fee')}</span><b>KES {finalFee}</b></div>
             {discountAmt > 0 && (
-              <div className="summary-row" style={{ color: 'var(--green)' }}><span>Discount</span><b>- KES {discountAmt}</b></div>
+              <div className="summary-row" style={{ color: 'var(--green)' }}><span>{t('Discount')}</span><b>- KES {discountAmt}</b></div>
             )}
             {appliedWalletAmt > 0 && (
-              <div className="summary-row" style={{ color: 'var(--green)' }}><span>Wallet Applied</span><b>- KES {appliedWalletAmt}</b></div>
+              <div className="summary-row" style={{ color: 'var(--green)' }}><span>{t('Wallet Applied')}</span><b>- KES {appliedWalletAmt}</b></div>
             )}
-            <div className="summary-row total"><span>Total</span><b>KES {finalTotal}</b></div>
+            <div className="summary-row total"><span>{t('Total')}</span><b>KES {finalTotal}</b></div>
           </div>
         </div>
         <div className="detail-bar">
@@ -2925,7 +2972,7 @@ function App() {
           <div className="futuristic-modal-overlay" style={{ zIndex: 9999 }}>
             <div className="futuristic-modal-card" style={{ textAlign: 'center', padding: '30px' }}>
               <div className="spinner" style={{ margin: '0 auto 20px auto', width: '50px', height: '50px', borderRadius: '50%', border: '4px solid rgba(255,255,255,0.1)', borderTopColor: 'var(--gold)', animation: 'spin 1s linear infinite' }}></div>
-              <h3 style={{ fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)' }}>Waiting for Payment</h3>
+              <h3 style={{ fontFamily: 'Unbounded, sans-serif', color: 'var(--gold)' }}>{t('Waiting for Payment')}</h3>
               <p className="muted" style={{ fontSize: '0.9rem', margin: '12px 0' }}>
                 We have sent an M-Pesa STK push prompt to your phone number <b>{customer?.phone || customer?.customerId}</b>.<br />
                 Please enter your M-Pesa PIN to authorize the payment of <b>KES {finalTotal}</b>.
@@ -2943,7 +2990,7 @@ function App() {
           <div className="futuristic-modal-overlay" style={{ zIndex: 9999 }}>
             <div className="futuristic-modal-card" style={{ textAlign: 'center', padding: '30px' }}>
               <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>❌</div>
-              <h3 style={{ fontFamily: 'Unbounded, sans-serif', color: 'var(--orange, #ff7a1a)' }}>Payment Failed</h3>
+              <h3 style={{ fontFamily: 'Unbounded, sans-serif', color: 'var(--orange, #ff7a1a)' }}>{t('Payment Failed')}</h3>
               <p className="muted" style={{ fontSize: '0.9rem', margin: '12px 0' }}>
                 {stkError || 'The M-Pesa payment could not be completed. Please try again.'}
               </p>
@@ -2960,16 +3007,16 @@ function App() {
   // CONFIRMATION
   if (screen === 'confirmation') return (
     <div className="screen center-screen"><div className="ambient ambient-a" />
-      <div className="confirm-card"><div className="confirm-mark">⚡</div><h1>Order placed!</h1>
-        <p className="muted">Blitz Mall is preparing your order. Watch your phone for updates.</p>
+      <div className="confirm-card"><div className="confirm-mark">⚡</div><h1>{t('Order placed!')}</h1>
+        <p className="muted">{t('Blitz Mall is preparing your order. Watch your phone for updates.')}</p>
         {lastOrderWasDelivery && (
           <p className="muted" style={{ fontSize: '.75rem', marginTop: 6, background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.25)', borderRadius: 10, padding: '8px 12px' }}>
             🛵 Delivery order — our rider will confirm your transport fee and notify you with the final amount to pay.
           </p>
         )}
-        <button className="btn-neon" onClick={() => { loadMyOrders(); setScreen('orders'); }}>Track my order</button>
-        <button className="btn-ghost" onClick={() => { setReviewStars(0); setReviewMsg(''); setReviewSent(false); setScreen('review'); }}>Rate your experience</button>
-        <button className="btn-ghost" onClick={() => setScreen('home')}>Keep shopping</button></div>
+        <button className="btn-neon" onClick={() => { loadMyOrders(); setScreen('orders'); }}>{t('Track my order')}</button>
+        <button className="btn-ghost" onClick={() => { setReviewStars(0); setReviewMsg(''); setReviewSent(false); setScreen('review'); }}>{t('Rate your experience')}</button>
+        <button className="btn-ghost" onClick={() => setScreen('home')}>{t('Keep shopping')}</button></div>
     </div>
   );
 
@@ -2991,6 +3038,8 @@ function App() {
     go: setScreen, goBack, showToast,
     openWallet: () => { loadCustLoyalty(); setShowWalletModal(true); },
     notifEnabled, enablePush: registerPushToken, disablePush, sendTestPush, testPushBusy,
+    lang,
+    switchLanguage,
     perfMode,
     setPerfMode: (v) => { setPerfMode(v); try { localStorage.setItem('blitz_perf_mode', String(v)); } catch (e) {} },
     defaultArea,
@@ -3068,10 +3117,10 @@ function App() {
 
   if (screen === 'orders') return (
     <div className="screen with-nav">
-      <header className="topbar"><h2 className="topbar-title">📦 My Orders</h2><button className="icon-btn" onClick={loadMyOrders} aria-label="Refresh orders">⟳</button></header>
+      <header className="topbar"><h2 className="topbar-title">{t('📦 My Orders')}</h2><button className="icon-btn" onClick={loadMyOrders} aria-label={t('Refresh orders')}>⟳</button></header>
       <div className="scroll">
         {myOrders.length === 0 ? (
-          <div className="empty-cart"><span>📦</span><p>No orders yet</p><button className="btn-ghost" onClick={() => setScreen('home')}>Start shopping</button></div>
+          <div className="empty-cart"><span>📦</span><p>{t('No orders yet')}</p><button className="btn-ghost" onClick={() => setScreen('home')}>{t('Start shopping')}</button></div>
         ) : myOrders.map(o => {
           const idx = steps.indexOf(o.status);
           const progress = orderTrackingProgress[o._id] || 0;
@@ -3092,32 +3141,32 @@ function App() {
                 ) : o.paymentStatus === 'partial' ? (
                   <span className="order-badge gold">💳 Part-paid · KES {Math.max(0, (o.totalPrice || 0) - (o.amountPaid || 0))} due</span>
                 ) : o.paymentMethod === 'mpesa' ? (
-                  <span className="order-badge gold">⏳ Awaiting M-Pesa payment</span>
+                  <span className="order-badge gold">{t('⏳ Awaiting M-Pesa payment')}</span>
                 ) : (
-                  <span className="order-badge">💵 Pay on delivery</span>
+                  <span className="order-badge">{t('💵 Pay on delivery')}</span>
                 )}
                 {o.walletApplied > 0 && <span className="order-badge">🪙 KES {o.walletApplied} wallet</span>}
                 {o.discount > 0 && <span className="order-badge">🏷️ KES {o.discount} off</span>}
-                {o.deliveryLocation && !o.deliveryFeeConfirmed && o.status !== 'cancelled' && <span className="order-badge">🚚 Transport fee being confirmed</span>}
+                {o.deliveryLocation && !o.deliveryFeeConfirmed && o.status !== 'cancelled' && <span className="order-badge">{t('🚚 Transport fee being confirmed')}</span>}
               </div>
               
               {o.status === 'on_the_way' && (
                 <>
                   <div className="bike-anim-container">
-                    <span className="bike-node start">🏪 Shop</span>
+                    <span className="bike-node start">{t('🏪 Shop')}</span>
                     <div className="bike-track" />
                     <div className="bike-track-progress" style={{ width: progressWidth }} />
                     <span className="bike-emoji" style={{ left: bikeLeft }}>🛵</span>
                     <span className="bike-node end">📍 You</span>
                   </div>
                   {etaMinutes !== null && (
-                    <div className="delivery-eta">🕐 Estimated arrival: <b>{etaMinutes > 0 ? `~${etaMinutes} min` : 'Any moment now!'}</b></div>
+                    <div className="delivery-eta">{t('🕐 Estimated arrival:')} <b>{etaMinutes > 0 ? `~${etaMinutes} min` : 'Any moment now!'}</b></div>
                   )}
                 </>
               )}
 
               {o.status === 'delivered' && (
-                <div className="bike-delivered-badge">✅ Delivered successfully!</div>
+                <div className="bike-delivered-badge">{t('✅ Delivered successfully!')}</div>
               )}
 
               {o.gpsCoords && o.gpsCoords.lat && o.gpsCoords.lng && (
@@ -3125,6 +3174,7 @@ function App() {
                   <LiveMap
                     from={{ lat: o.shopCoords?.lat || SHOP_COORDS.lat, lng: o.shopCoords?.lng || SHOP_COORDS.lng }}
                     to={{ lat: o.gpsCoords.lat, lng: o.gpsCoords.lng }}
+                    rider={o.status === 'on_the_way' && o.riderLocation ? { ...o.riderLocation, name: o.rider && o.rider.name } : null}
                   />
                 </div>
               )}
@@ -3137,16 +3187,16 @@ function App() {
 
               <div className="order-actions">
                 {o.status === 'pending' && (
-                  <button type="button" className="btn-ghost small order-cancel" onClick={() => setCancelOrderTarget(o)}>Cancel order</button>
+                  <button type="button" className="btn-ghost small order-cancel" onClick={() => setCancelOrderTarget(o)}>{t('Cancel order')}</button>
                 )}
-                <button type="button" className="btn-ghost small" onClick={() => reOrderPastOrder(o)}>🔄 Order again</button>
+                <button type="button" className="btn-ghost small" onClick={() => reOrderPastOrder(o)}>{t('🔄 Order again')}</button>
               </div>
             </div>
           );
         })}
       </div>
       <BottomNav />
-      <ConfirmSheet open={!!cancelOrderTarget} title="Cancel this order?"
+      <ConfirmSheet open={!!cancelOrderTarget} title={t('Cancel this order?')}
         message={cancelOrderTarget ? `KES ${cancelOrderTarget.totalPrice} order.${cancelOrderTarget.walletApplied > 0 ? ` KES ${cancelOrderTarget.walletApplied} goes back to your wallet.` : ''}${(cancelOrderTarget.amountPaid || 0) > 0 ? ' Your M-Pesa payment will be refunded by the shop.' : ''}` : ''}
         confirmLabel="Cancel order" danger onCancel={() => setCancelOrderTarget(null)} onConfirm={confirmCancelOrder} />
       {renderToasts()}
@@ -3156,14 +3206,14 @@ function App() {
   // FAVORITES — products the shopper hearted on the grid or detail page.
   if (screen === 'favorites') return (
     <div className="screen with-nav">
-      <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button><h2 className="topbar-title">❤️ My Favorites</h2></header>
+      <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button><h2 className="topbar-title">{t('❤️ My Favorites')}</h2></header>
       <div className="scroll">
         <div className="offers-hero">
-          <h2>❤️ Your favorites</h2>
+          <h2>{t('❤️ Your favorites')}</h2>
           <p>{favorites.length} item{favorites.length === 1 ? '' : 's'} saved — tap 🤍 to remove one.</p>
         </div>
         {favorites.length === 0 ? (
-          <div className="empty-cart"><span>🤍</span><p>No favorites yet</p><button className="btn-ghost" onClick={() => setScreen('home')}>Browse products</button></div>
+          <div className="empty-cart"><span>🤍</span><p>{t('No favorites yet')}</p><button className="btn-ghost" onClick={() => setScreen('home')}>{t('Browse products')}</button></div>
         ) : (
           <div className="prod-grid" style={{ padding: '0 16px' }}>
             {favorites.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} fav onFav={toggleFavorite} />)}
@@ -3184,30 +3234,30 @@ function App() {
       <div className="screen with-nav">
         <header className="topbar">
           <button className="icon-btn back" onClick={() => setScreen('home')}>‹</button>
-          <h2 className="topbar-title">Today's Deals</h2>
+          <h2 className="topbar-title">{t("Today's Deals")}</h2>
           <button className="icon-btn cart-icon" onClick={() => setScreen('cart')}>🛒{cartCount > 0 && <span className="cart-badge">{cartCount}</span>}</button>
         </header>
         <div className="scroll">
           <div className="offers-hero">
-            <h2>🔥 Today's Deals</h2>
+            <h2>{t("🔥 Today's Deals")}</h2>
             <p>{flashSaleProducts.length + discounted.length} items on offer right now — grab them before they're gone!</p>
           </div>
 
           {activeBanner && activeBanner.code && (
             <div className="deal-banner-chip">
               🎟️ {activeBanner.title}: use code <b>{activeBanner.code}</b> at checkout
-              <button onClick={() => { navigator.clipboard.writeText(activeBanner.code); showToast('Code copied! Use it at checkout.'); }} style={{ marginLeft: 4, background: 'none', border: 'none', color: 'var(--gold)', fontWeight: 'bold', cursor: 'pointer', fontSize: '0.72rem' }}>Copy</button>
+              <button onClick={() => { navigator.clipboard.writeText(activeBanner.code); showToast('Code copied! Use it at checkout.'); }} style={{ marginLeft: 4, background: 'none', border: 'none', color: 'var(--gold)', fontWeight: 'bold', cursor: 'pointer', fontSize: '0.72rem' }}>{t('Copy')}</button>
             </div>
           )}
 
           {flashSaleProducts.length === 0 && discounted.length === 0 && (
-            <div className="empty-cart"><span>🎈</span><p>No offers right now — check back soon!</p>
-              <button className="btn-ghost" onClick={() => setScreen('home')}>Back to shop</button></div>
+            <div className="empty-cart"><span>🎈</span><p>{t('No offers right now — check back soon!')}</p>
+              <button className="btn-ghost" onClick={() => setScreen('home')}>{t('Back to shop')}</button></div>
           )}
 
           {flashSaleProducts.length > 0 && (
             <>
-              <div className="offer-section-title">⚡ Flash Sale <span className="deal-countdown-chip">ends soon</span></div>
+              <div className="offer-section-title">{t('⚡ Flash Sale')} <span className="deal-countdown-chip">{t('ends soon')}</span></div>
               <div className="flash-sale-card" style={{ margin: '0 16px' }}>
                 <div className="flash-sale-items">
                   {flashSaleProducts.map(p => {
@@ -3238,7 +3288,7 @@ function App() {
 
           {discounted.length > 0 && (
             <>
-              <div className="offer-section-title">🏷️ Discounted Goods</div>
+              <div className="offer-section-title">{t('🏷️ Discounted Goods')}</div>
               <div className="prod-grid" style={{ padding: '0 16px' }}>
                 {discounted.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(p))} onFav={toggleFavorite} />)}
               </div>
@@ -3254,21 +3304,21 @@ function App() {
   // REVIEW
   if (screen === 'review') return (
     <div className="screen with-nav">
-      <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button><h2 className="topbar-title">Rate us</h2></header>
+      <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button><h2 className="topbar-title">{t('Rate us')}</h2></header>
       <div className="scroll">
         {reviewSent ? (
-          <div className="empty-cart"><span>💛</span><p>Thank you for your feedback!</p>
-            <button className="btn-ghost" onClick={() => setScreen('home')}>Back to shop</button></div>
+          <div className="empty-cart"><span>💛</span><p>{t('Thank you for your feedback!')}</p>
+            <button className="btn-ghost" onClick={() => setScreen('home')}>{t('Back to shop')}</button></div>
         ) : (
           <div className="review-box">
-            <h3 className="section-h">How was your experience with Blitz Mall?</h3>
+            <h3 className="section-h">{t('How was your experience with Blitz Mall?')}</h3>
             <div className="star-pick">
               {[1, 2, 3, 4, 5].map(n => (
                 <button key={n} className={n <= reviewStars ? 'on' : ''} onClick={() => setReviewStars(n)}>★</button>
               ))}
             </div>
-            <textarea className="review-text" placeholder="Tell us what went well, or any complaint…" value={reviewMsg} onChange={e => setReviewMsg(e.target.value)} />
-            <button className="btn-neon" onClick={submitReview}>Send feedback</button>
+            <textarea className="review-text" placeholder={t('Tell us what went well, or any complaint…')} value={reviewMsg} onChange={e => setReviewMsg(e.target.value)} />
+            <button className="btn-neon" onClick={submitReview}>{t('Send feedback')}</button>
           </div>
         )}
       </div>
@@ -3288,7 +3338,7 @@ function App() {
       <div className="screen with-nav">
         <header className="topbar">
           <button className="icon-btn back" onClick={goBack}>‹</button>
-          <h2 className="topbar-title">Share App</h2>
+          <h2 className="topbar-title">{t('Share App')}</h2>
         </header>
         <div className="scroll">
           <div className="share-box">
@@ -3341,26 +3391,26 @@ function App() {
     const waMsg = encodeURIComponent(`Hey! 👋 Shop at Blitz Mall and we BOTH earn bonus loyalty points. Use my referral code when signing in: ${myCode} — download the app: ${appInfo?.apkUrl || 'https://blitzmall-backend.onrender.com/'}`);
     return (
       <div className="screen with-nav">
-        <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button><h2 className="topbar-title">Invite Friends</h2></header>
+        <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button><h2 className="topbar-title">{t('Invite Friends')}</h2></header>
         <div className="scroll">
           <div className="referral-hero">
             <span style={{ fontSize: '3rem', display: 'block' }}>🎁</span>
-            <h3 style={{ fontFamily: 'Unbounded, sans-serif', margin: '10px 0 6px 0', color: 'var(--gold)' }}>Invite & Earn Points</h3>
+            <h3 style={{ fontFamily: 'Unbounded, sans-serif', margin: '10px 0 6px 0', color: 'var(--gold)' }}>{t('Invite & Earn Points')}</h3>
             <p className="muted" style={{ fontSize: '.82rem', lineHeight: 1.6 }}>
               When a friend signs in with <b>your code</b>, you earn <b style={{ color: 'var(--orange)' }}>+100 points</b> and they get a <b style={{ color: 'var(--green)' }}>+50 welcome bonus</b>. Points unlock vouchers in your Points Redemption Store!
             </p>
             <div className="referral-code-box" onClick={() => { navigator.clipboard.writeText(myCode); showToast('Referral code copied! Send it to a friend 🎉'); }}>
-              <small>YOUR REFERRAL CODE</small>
+              <small>{t('YOUR REFERRAL CODE')}</small>
               <b>{myCode}</b>
               <span>tap to copy</span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 16, width: '100%' }}>
-              <a className="btn-neon" style={{ textAlign: 'center', textDecoration: 'none', color: '#000' }} href={`https://wa.me/?text=${waMsg}`} target="_blank" rel="noreferrer">💬 Share on WhatsApp</a>
-              <button className="btn-ghost" onClick={() => { navigator.clipboard.writeText(myCode); showToast('Code copied!'); }}>📋 Copy my code</button>
+              <a className="btn-neon" style={{ textAlign: 'center', textDecoration: 'none', color: '#000' }} href={`https://wa.me/?text=${waMsg}`} target="_blank" rel="noreferrer">{t('💬 Share on WhatsApp')}</a>
+              <button className="btn-ghost" onClick={() => { navigator.clipboard.writeText(myCode); showToast('Code copied!'); }}>{t('📋 Copy my code')}</button>
             </div>
             <div className="referral-stats">
-              <div><b>{refCount}</b><small>friends invited</small></div>
-              <div><b>{custLoyalty?.points || 0}</b><small>my points</small></div>
+              <div><b>{refCount}</b><small>{t('friends invited')}</small></div>
+              <div><b>{custLoyalty?.points || 0}</b><small>{t('my points')}</small></div>
             </div>
           </div>
         </div>

@@ -45,7 +45,21 @@ Online shop + POS + admin dashboard for Blitz Mall (Matunda, Kakamega).
 | `MPESA_CALLBACK_SECRET` | Random string; append `?secret=<value>` to `CALLBACK_URL` |
 | `MPESA_MOCK_ENABLED` | Development only — auto-confirms every payment. Never `true` in production |
 | `FCM_SERVICE_ACCOUNT_JSON` | Firebase service account (raw or base64) for real device push |
+| `ETIMS_VSCU_URL`, `ETIMS_VSCU_KEY` | KRA eTIMS connection (after KRA onboarding). Empty = tax invoices are numbered and queued in Admin → Tax, and sent automatically once set |
 | `TZ` | Defaults to `Africa/Nairobi` (reports, happy hours and M-Pesa timestamps use shop time) |
+
+### Shop features (v0.1.51)
+
+- **Wallet top-up by M-Pesa** (customer wallet → Top up). Credited only after Safaricom confirms.
+- **Delivery time slots** with per-slot capacity and a cut-off (Admin → Deliveries).
+- **Riders:** a `rider` staff role sees only their own run sheet; they start, share live GPS (the customer sees the rider on the map) and mark orders delivered. Every other staff endpoint answers 403.
+- **Multi-buy deals and loose items** (e.g. "6 for KES 300", sugar per 0.5 kg). App, till and server all price them the same way.
+- **KRA eTIMS tax invoices and credit notes** for sales and delivered orders (Admin → Tax). They queue until `ETIMS_VSCU_URL` is set.
+- **Daily closing report** pushed to the owner (and optionally sent by SMS) at the set time (Admin → Records).
+- **Suppliers, re-order suggestions and purchase orders**. Receiving an order adds the stock and updates buying prices.
+- **Stock-take mode**. Sales made during the count are kept.
+- **Kiswahili** for the main customer screens (Me → Settings → Language).
+- **Product reviews** from verified buyers, which staff can hide.
 
 ---
 
