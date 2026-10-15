@@ -28,6 +28,7 @@ export function MeScreen({ ctx }) {
             <h2>{profile?.name || customer?.name || 'Shopper'}</h2>
             <p>📱 {customer?.customerId}</p>
             <span className="ui-chip">{TIER_ICON[tier] || '⭐'} {tier} member</span>
+            {custAccount?.isOwner && <span className="ui-chip" style={{ marginLeft: 6 }}>👑 Owner</span>}
           </div>
           <span className="ui-row-chevron">›</span>
         </button>

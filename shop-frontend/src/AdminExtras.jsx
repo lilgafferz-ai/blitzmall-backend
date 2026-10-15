@@ -598,12 +598,40 @@ export function CustomersTab({ api }) {
     openDetail(phone); load(q.trim());
   };
 
+  const makeOwner = async (phone, name) => {
+    if (!window.confirm(`Make ${name || phone} YOUR owner account?\n\nIt gets the 👑 Owner label and a one-time 1,000,000-point starter boost (Platinum). Any other account labelled Owner loses the label.`)) return;
+    const d = await json(await api.authPost(api.API_URL + '/admin/customers/' + encodeURIComponent(phone) + '/make-owner', {}));
+    if (!d.success) { alert(d.error || 'Failed'); return; }
+    alert(`👑 Done — ${d.boosted ? '1,000,000 points added. ' : ''}Balance ${Number(d.points).toLocaleString('en-KE')} pts (${d.tier}).`);
+    openDetail(phone); load(q.trim());
+  };
+
+  // Two-step: preview what would go, then the owner types the phrase to confirm.
+  const wipeAll = async () => {
+    const p = await json(await api.authPost(api.API_URL + '/admin/customers/wipe', { dryRun: true }));
+    if (!p.success) { alert(p.error || 'Failed'); return; }
+    const c = p.counts || {};
+    const typed = window.prompt(
+      `DELETE ALL CUSTOMERS?\n\n${c.customers || 0} accounts, their points, wallets (KES ${Number(p.walletMoney || 0).toLocaleString('en-KE')} total), AI chats, baskets and personal vouchers will be removed.\n` +
+      (p.keptOwnerAccounts ? 'Your 👑 Owner account is kept.\n' : '') +
+      'Orders, sales, tax invoices and credit debts are kept. A backup copy is saved so this can be undone.\n\nType DELETE ALL CUSTOMERS to confirm:'
+    );
+    if (typed == null) return;
+    const d = await json(await api.authPost(api.API_URL + '/admin/customers/wipe', { confirm: typed.trim() }));
+    if (!d.success) { alert(d.error || 'Failed'); return; }
+    alert(`✅ Deleted ${(d.deleted && d.deleted.customers) || 0} customer accounts. Backup: ${d.wipeId}`);
+    setSelected(null); setDetail(null); load(q.trim());
+  };
+
   const S = detail && detail.security ? detail.security : {};
   return (
     <div className="blitz-admin-body">
       <div className="blitz-admin-row-between">
         <h2>👥 Customers</h2>
         <span className="blitz-admin-muted" style={{ fontSize: '.78rem' }}>Owner · {rows.length} shown</span>
+      </div>
+      <div className="ax-actions" style={{ marginBottom: 10 }}>
+        <button className="pos-void" onClick={wipeAll}>🗑️ Delete all customers</button>
       </div>
       <input
         placeholder="🔍 Search name or phone…" value={q} onChange={e => setQ(e.target.value)}
@@ -616,6 +644,7 @@ export function CustomersTab({ api }) {
             <div key={c.phone} className="exp-row" style={{ cursor: 'pointer' }} onClick={() => openDetail(c.phone)}>
               <div>
                 <b>{c.name || '(no name)'}</b>
+                {c.isOwner && <span className="ax-badge" style={{ marginLeft: 6 }}>👑 Owner</span>}
                 {c.locked && <span className="ax-badge cancelled" style={{ marginLeft: 6 }}>locked</span>}
                 {!c.hasPin && <span className="blitz-admin-muted" style={{ marginLeft: 6 }}>no PIN</span>}
                 <div className="blitz-admin-muted">{c.phone} · {c.tier} · {c.orderCount} orders</div>
@@ -637,7 +666,7 @@ export function CustomersTab({ api }) {
           </div>
           {detailLoading ? <p className="blitz-admin-muted">Loading…</p> : !detail || detail.error ? <p className="blitz-admin-empty">Could not load this customer.</p> : (
             <div className="ax-card">
-              <div className="blitz-admin-row-between"><b style={{ fontSize: '1.05rem' }}>{detail.name || '(no name)'}</b><span>{detail.phone}</span></div>
+              <div className="blitz-admin-row-between"><b style={{ fontSize: '1.05rem' }}>{detail.name || '(no name)'}{detail.isOwner && ' 👑 Owner'}</b><span>{detail.phone}</span></div>
               <div className="blitz-admin-muted">Member since {when(detail.createdAt) || '—'} · last seen {when(detail.lastLoginAt) || '—'}</div>
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, margin: '12px 0' }}>
@@ -660,6 +689,7 @@ export function CustomersTab({ api }) {
                 <div className="blitz-admin-muted">Security question: {S.securityQuestion || '—'}</div>
                 <div className="ax-actions">
                   <button className="blitz-admin-btn small" onClick={() => resetPin(detail.phone, detail.name)}>Reset PIN (recover account)</button>
+                  {!detail.isOwner && <button className="blitz-admin-btn small" onClick={() => makeOwner(detail.phone, detail.name)}>👑 Make this my owner account</button>}
                 </div>
                 <p className="blitz-admin-muted" style={{ fontSize: '.72rem' }}>Resets the PIN only — you never see it. Confirm it's really them first (ask their security question). Money, points and orders stay safe.</p>
               </div>

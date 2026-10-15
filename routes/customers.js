@@ -10,6 +10,9 @@ const { cleanPhone, samePhone } = require('../lib/util');
 // Escape a user-typed search string so it is matched literally (never as a regex).
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+const OWNER_BOOST_POINTS = 1000000;            // owner account's one-time starter boost
+const WIPE_CONFIRM = 'DELETE ALL CUSTOMERS';    // phrase the owner types to wipe customers
+
 module.exports = function register(app) {
   app.post('/api/reviews', reviewLimiter, optionalCustomer, async (req, res) => {
     const { customerName, rating, message } = req.body;
@@ -143,6 +146,7 @@ module.exports = function register(app) {
         return {
           phone: c.phone,
           name: c.name || l.customerName || '',
+          isOwner: !!c.isOwner,
           points: l.points || 0,
           tier: l.tier || 'Bronze',
           walletBalance: l.walletBalance || 0,
@@ -155,7 +159,7 @@ module.exports = function register(app) {
           locked: !!(c.lockedUntil && new Date(c.lockedUntil).getTime() > now),
           referralCount: c.referralCount || 0
         };
-      }).sort((a, b) => (b.walletBalance - a.walletBalance) || (new Date(b.lastLoginAt || 0) - new Date(a.lastLoginAt || 0)));
+      }).sort((a, b) => (b.isOwner - a.isOwner) || (b.walletBalance - a.walletBalance) || (new Date(b.lastLoginAt || 0) - new Date(a.lastLoginAt || 0)));
       res.json({ count: rows.length, customers: rows });
     } catch (e) { console.error('admin customers list error:', e); res.status(500).json({ error: 'Failed' }); }
   });
@@ -181,6 +185,7 @@ module.exports = function register(app) {
       res.json({
         phone,
         name: (cust && cust.name) || (active.length ? active[0].customerName : '') || '',
+        isOwner: !!(cust && cust.isOwner),
         createdAt: (cust && cust.createdAt) || null,
         lastLoginAt: (cust && cust.lastLoginAt) || null,
         orderCount: active.length,
@@ -228,6 +233,80 @@ module.exports = function register(app) {
       auditLog(req, 'customer_pin_reset', `Reset PIN for ${phone} (${cust.name || 'no name'})`);
       res.json({ success: true, message: 'PIN cleared. The customer sets a new PIN with "Forgot PIN" + their security question.' });
     } catch (e) { console.error('admin reset-pin error:', e); res.status(500).json({ error: 'Failed' }); }
+  });
+
+  // The shop owner's own shopping account: labelled "Owner" everywhere and given a
+  // one-time 1,000,000-point starter boost (→ Platinum). Only one account carries
+  // the label; the boost is paid once per account, so re-clicking can't stack it.
+  app.post('/api/admin/customers/:phone/make-owner', authenticate, authorize('owner'), async (req, res) => {
+    try {
+      const phone = cleanPhone(req.params.phone);
+      const cust = await col.customers.findOne({ phone });
+      if (!cust) return res.status(404).json({ error: 'Customer not found — sign up in the app with this number first.' });
+      await col.customers.updateMany({ isOwner: true, phone: { $ne: phone } }, { $unset: { isOwner: '' } });
+      await col.customers.updateMany({ phone }, { $set: { isOwner: true } });
+      const existing = await col.loyalty.findOne({ phone });
+      let points = existing ? existing.points || 0 : 0;
+      const boosted = !cust.ownerBoostGiven;
+      if (boosted) {
+        points += OWNER_BOOST_POINTS;
+        if (existing) {
+          await col.loyalty.updateOne({ phone }, { $set: { points, tier: tierFromPoints(points), updatedAt: new Date() } });
+        } else {
+          await col.loyalty.insertOne({ phone, customerName: cust.name || '', totalSpent: 0, points, tier: tierFromPoints(points), createdAt: new Date(), updatedAt: new Date() });
+        }
+        await col.customers.updateMany({ phone }, { $set: { ownerBoostGiven: true } });
+        await col.redemptions.insertOne({ customerId: phone, rewardName: 'Manual bonus — owner starter boost', pointsSpent: 0, rewardValue: 0, manualPoints: OWNER_BOOST_POINTS, reason: 'owner starter boost', redeemedAt: new Date() });
+      }
+      auditLog(req, 'customer_make_owner', `Marked ${phone} (${cust.name || 'no name'}) as the owner's account${boosted ? ` + ${OWNER_BOOST_POINTS} pts` : ''}`);
+      res.json({ success: true, boosted, points, tier: tierFromPoints(points) });
+    } catch (e) { console.error('admin make-owner error:', e); res.status(500).json({ error: 'Failed' }); }
+  });
+
+  // "Delete all customers" — clears every shopper account and its points, wallet,
+  // chats, baskets, promo history and personal vouchers. The owner's own account
+  // (isOwner) is kept. Orders, sales, tax invoices and credit debts are NOT touched
+  // (they're the shop's books). Every removed document is copied to
+  // customer_wipe_archive first, so a wipe can be restored. { dryRun: true }
+  // returns the counts only; the real wipe needs confirm === WIPE_CONFIRM.
+  app.post('/api/admin/customers/wipe', authenticate, authorize('owner'), async (req, res) => {
+    try {
+      const keep = (await col.customers.find({ isOwner: true }).toArray()).map(c => c.phone);
+      const notKept = (field, extra = {}) => ({ [field]: { ...extra, ...(keep.length ? { $nin: keep } : {}) } });
+      const targets = [
+        ['customers', notKept('phone', { $exists: true })],
+        ['loyalty', notKept('phone', { $exists: true })],
+        ['wallet_transactions', notKept('phone', { $exists: true })],
+        ['ai_chats', notKept('phone', { $exists: true })],
+        ['promo_claims', notKept('phone', { $exists: true })],
+        ['promo_cooldowns', notKept('phone', { $exists: true })],
+        ['notification_tokens', notKept('phone', { $exists: true })],   // staff tokens have no phone
+        ['notifications_feed', { audience: 'customer', ...notKept('phone', { $exists: true }) }],
+        ['saved_baskets', notKept('customerId', { $exists: true })],
+        ['redemptions', notKept('customerId', { $exists: true })],
+        ['coupons', { ownerPhone: { $exists: true, $nin: [null, ...keep] } }] // personal vouchers only
+      ].filter(([name]) => col[name]);
+
+      const counts = {};
+      for (const [name, filter] of targets) counts[name] = await col[name].countDocuments(filter);
+      const walletDocs = await col.loyalty.find(targets.find(t => t[0] === 'loyalty')[1]).toArray();
+      const walletMoney = Math.round(walletDocs.reduce((s, l) => s + (l.walletBalance || 0), 0) * 100) / 100;
+      if (req.body && req.body.dryRun) return res.json({ success: true, dryRun: true, counts, walletMoney, keptOwnerAccounts: keep.length });
+
+      if (!req.body || req.body.confirm !== WIPE_CONFIRM) return res.status(400).json({ error: `Type ${WIPE_CONFIRM} to confirm.` });
+      const wipeId = `wipe-${Date.now()}`;
+      const archivedAt = new Date();
+      const deleted = {};
+      for (const [name, filter] of targets) {
+        const docs = await col[name].find(filter).toArray();
+        if (!docs.length) { deleted[name] = 0; continue; }
+        await col.customer_wipe_archive.insertMany(docs.map(doc => ({ wipeId, collection: name, doc, archivedAt })));
+        const r = await col[name].deleteMany({ _id: { $in: docs.map(d => d._id) } });
+        deleted[name] = r.deletedCount || 0;
+      }
+      auditLog(req, 'customers_wiped', `Deleted all customers (${deleted.customers || 0} accounts, KES ${walletMoney} wallet money) — archive ${wipeId}`);
+      res.json({ success: true, wipeId, deleted, walletMoney, keptOwnerAccounts: keep.length });
+    } catch (e) { console.error('admin customers wipe error:', e); res.status(500).json({ error: 'Failed' }); }
   });
 
 };

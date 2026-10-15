@@ -85,6 +85,9 @@ input, textarea {
 .owner-link:disabled{opacity:.55;cursor:not-allowed;}
 .otp-phone{font-family:'Unbounded',sans-serif;font-size:1.05rem;font-weight:700;color:var(--text);margin-top:8px;letter-spacing:1px;}
 .otp-input{text-align:center;font-size:1.5rem;letter-spacing:12px;font-family:'Unbounded',sans-serif;font-weight:700;}
+/* The big spaced-out digit style is for the typed PIN only — the hint text
+   ("Create a PIN (4–6 digits)", "Confirm PIN") must fit the box and be readable. */
+.otp-input::placeholder{font-family:'Manrope',sans-serif;font-size:.95rem;font-weight:500;letter-spacing:normal;}
 .form-error{color:#ff5a5f;font-size:.8rem;margin-top:2px;text-align:center;}
 /* Small privacy/consent line under the sign-up form. */
 .consent-note{font-size:.68rem;opacity:.7;line-height:1.4;margin-top:10px;text-align:center;}
