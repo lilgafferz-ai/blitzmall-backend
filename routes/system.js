@@ -7,6 +7,7 @@ const { col } = require('../lib/db');
 
 const APK_DIR = path.join(ROOT, 'shop-frontend/downloads');
 const OTA_LATEST = path.join(ROOT, 'shop-frontend/ota/latest.json');
+const PC_RELEASES_REPO_DEFAULT = 'yrngaffer/blitzmall-backend';
 
 // Newest downloadable APK. Picks by filename version first (blitzmall-v8.apk →
 // 8), mtime second: on a fresh Render checkout every file shares the deploy
@@ -99,6 +100,22 @@ module.exports = function register(app) {
       console.error('native-update error:', e);
       res.json({ version: null });
     }
+  });
+
+  // Update feed for the PC app (electron-updater, generic provider). Each file
+  // redirects to the newest GitHub release asset, so moving the releases repo
+  // (new account, rename) is a PC_RELEASES_REPO change here, not a new
+  // installer on every PC. Only update file names are accepted.
+  app.get('/api/pc-update/:file', (req, res) => {
+    const file = req.params.file;
+    if (!/^(latest\.yml|[\w.-]+\.exe(\.blockmap)?)$/i.test(file)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const repo = /^[\w.-]+\/[\w.-]+$/.test(process.env.PC_RELEASES_REPO || '')
+      ? process.env.PC_RELEASES_REPO
+      : PC_RELEASES_REPO_DEFAULT;
+    res.set('Cache-Control', 'no-store');
+    res.redirect(302, `https://github.com/${repo}/releases/latest/download/${encodeURIComponent(file)}`);
   });
 
   // Public shop contact for the apps' Help & support screens. Set SHOP_PHONE /

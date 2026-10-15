@@ -299,16 +299,18 @@ app.whenReady().then(() => {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
-  // Use the direct GitHub release-download feed (a plain file URL served from
-  // the release assets) instead of the api.github.com JSON API. The API is
-  // rate-limited to 60 req/hr per IP and can fail silently — the raw file URL
-  // is a static CDN download that is never throttled. This is the same URL we
-  // already use for the guaranteed "Download New Version" fallback.
-  const GITHUB_REPO = 'lilgafferz-ai/blitzmall-backend';
+  // Update feed: our own server's /api/pc-update, which 302-redirects each file
+  // to the newest GitHub release asset (a plain file download, so no
+  // api.github.com rate limits). Going through the server means the releases
+  // repo can move — new GitHub account, rename — by changing PC_RELEASES_REPO
+  // on Render, without stranding installed PCs on a hardcoded GitHub URL.
+  // GITHUB_DL_FEED is the direct fallback if the server can't be reached.
+  const GITHUB_REPO = 'yrngaffer/blitzmall-backend';
   const GITHUB_DL_FEED = `https://github.com/${GITHUB_REPO}/releases/latest/download`;
+  const UPDATE_FEED = 'https://blitzmall-backend.onrender.com/api/pc-update';
   try {
-    autoUpdater.setFeedURL({ provider: 'generic', url: GITHUB_DL_FEED });
-    console.log('[updater] feed switched to direct release-download URL (no API rate limits)');
+    autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED });
+    console.log('[updater] feed switched to server release-download URL (no API rate limits)');
   } catch (e) {
     console.error('[updater] setFeedURL failed (will keep packaged app-update.yml):', e && e.message);
   }
@@ -327,7 +329,7 @@ app.whenReady().then(() => {
       fs.appendFileSync(p, `${new Date().toISOString()} ${line}\n`);
     } catch (e) { /* logging must never break the updater */ }
   };
-  logUpdater(`app start, installed version v${app.getVersion()}, feed=${GITHUB_DL_FEED}`);
+  logUpdater(`app start, installed version v${app.getVersion()}, feed=${UPDATE_FEED}`);
   const broadcastUpdaterStatus = (status) => {
     logUpdater(`event: ${status.status}${status.newVersion ? ' (new ' + status.newVersion + ')' : ''}${status.message ? ' — ' + status.message : ''}`);
     for (const w of BrowserWindow.getAllWindows()) {
@@ -363,34 +365,41 @@ app.whenReady().then(() => {
     } catch (e) {}
   });
 
-  // Belt-and-suspenders update source: read the raw `latest.yml` asset from
-  // the GitHub release (a plain file download — NO api.github.com rate limits
-  // and no JSON API at all), so we ALWAYS know the newest published version
-  // even if the electron-updater API check is being throttled or fails.
-  const LATEST_YML_URL = `https://github.com/${GITHUB_REPO}/releases/latest/download/latest.yml`;
-  const fetchLatestReleaseInfo = async () => {
+  // Belt-and-suspenders update source: read the raw `latest.yml` release asset
+  // (a plain file download — NO api.github.com rate limits and no JSON API at
+  // all), so we ALWAYS know the newest published version even if the
+  // electron-updater check fails. Tries our server's feed first, then GitHub
+  // directly, so a sleeping/unreachable server never hides a new version.
+  const fetchLatestFrom = async (feed) => {
+    // Hard 10s timeout so a stalled network can never hang the IPC call.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
     try {
-      // Hard 10s timeout so a stalled network can never hang the IPC call.
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 10000);
-      try {
-        const r = await fetch(LATEST_YML_URL, { redirect: 'follow', headers: { Accept: 'text/plain' }, signal: ctrl.signal });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const txt = await r.text();
-        const ver = (txt.match(/^version:\s*(\S+)/m) || [])[1];
-        const file = (txt.match(/^path:\s*(\S+)/m) || [])[1];
-        if (!ver || !file) throw new Error('unparseable latest.yml');
-        return {
-          version: ver,
-          fileName: file,
-          downloadUrl: `https://github.com/${GITHUB_REPO}/releases/latest/download/${encodeURIComponent(file)}`
-        };
-      } finally {
-        clearTimeout(timer);
-      }
-    } catch (e) {
-      return { error: (e && e.message) || 'failed' };
+      const r = await fetch(`${feed}/latest.yml`, { redirect: 'follow', headers: { Accept: 'text/plain' }, signal: ctrl.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const txt = await r.text();
+      const ver = (txt.match(/^version:\s*(\S+)/m) || [])[1];
+      const file = (txt.match(/^path:\s*(\S+)/m) || [])[1];
+      if (!ver || !file) throw new Error('unparseable latest.yml');
+      return {
+        version: ver,
+        fileName: file,
+        downloadUrl: `${feed}/${encodeURIComponent(file)}`
+      };
+    } finally {
+      clearTimeout(timer);
     }
+  };
+  const fetchLatestReleaseInfo = async () => {
+    let lastErr;
+    for (const feed of [UPDATE_FEED, GITHUB_DL_FEED]) {
+      try {
+        return await fetchLatestFrom(feed);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    return { error: (lastErr && lastErr.message) || 'failed' };
   };
 
   const checkForUpdates = () => {
@@ -433,10 +442,12 @@ app.whenReady().then(() => {
   });
 
   // Open the newest installer in the default browser (guaranteed download).
-  // Defense-in-depth: only ever open our own GitHub release URLs.
+  // Defense-in-depth: only ever open our own update feed / GitHub release URLs.
   ipcMain.handle('updater:openDownload', async (_evt, url) => {
     const githubHost = `https://github.com/${GITHUB_REPO}`;
-    const target = typeof url === 'string' && url.startsWith(githubHost)
+    const ours = typeof url === 'string' &&
+      (url.startsWith(`${UPDATE_FEED}/`) || url.startsWith(`${githubHost}/`));
+    const target = ours
       ? url
       : `${githubHost}/releases/latest`;
     await shell.openExternal(target);
