@@ -4,6 +4,8 @@ import { ProductSellingFields, DeliveriesTab, SuppliersTab, StockTakeTab, TaxTab
 import { lineTotalFor, dealSavingsFor, qtyStepOf, snapQty, formatQty, isLoose } from './pricing';
 import AdminSettings from './screens/AdminSettings';
 import { getPushToken, onPushTap, pushPlatform } from './push';
+import LockScreen from './LockScreen';
+import { isLockEnabled, onAppBackground, biometricCapability, hasPin, disableLock } from './appLock';
 import { cacheProducts, getCachedProducts, queueSale, syncQueuedSales, getPendingCount, onOnline, onOffline } from './offline';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import jsPDF from 'jspdf';
@@ -349,6 +351,37 @@ function Admin({ onExit }) {
       return false;
     }
   });
+
+  // --- Admin app lock (M-Pesa-style 4-digit PIN / fingerprint for staff) ---
+  // A device re-entry gate: after staff sign in, require a 4-digit PIN (or
+  // fingerprint) to enter, and again every time the app is closed/backgrounded.
+  // Staff still authenticate with username+password (the real security); this PIN
+  // is local to the device and scoped separately from the customer PIN.
+  const [adminLockConfigured, setAdminLockConfigured] = useState(() => isLockEnabled('admin'));
+  const [adminLocked, setAdminLocked] = useState(() => {
+    try { return !!localStorage.getItem('bm_token') && isLockEnabled('admin'); } catch (e) { return false; }
+  });
+  const [adminLockCap, setAdminLockCap] = useState({ usable: false, isFingerprint: false });
+  const [adminLockCapReady, setAdminLockCapReady] = useState(false);
+  const [forceAdminLockSetup, setForceAdminLockSetup] = useState(false);
+
+  // Probe this device's fingerprint capability once a staff member is logged in.
+  useEffect(() => {
+    if (!loggedIn) return;
+    let alive = true;
+    biometricCapability()
+      .then(c => { if (alive) { setAdminLockCap(c); setAdminLockCapReady(true); } })
+      .catch(() => { if (alive) setAdminLockCapReady(true); });
+    return () => { alive = false; };
+  }, [loggedIn]);
+
+  // Lock the admin app the instant it leaves the foreground (M-Pesa style).
+  useEffect(() => {
+    const unsub = onAppBackground(() => {
+      try { if (localStorage.getItem('bm_token') && isLockEnabled('admin')) setAdminLocked(true); } catch (e) {}
+    });
+    return unsub;
+  }, []);
 
   useEffect(() => {
     try {
@@ -1351,6 +1384,7 @@ const loadStockTransfers = async () => {
     sessionStorage.removeItem('bm_token'); sessionStorage.removeItem('bm_user');
     staffPushRegisteredRef.current = false; // next login re-registers this device
     setLoggedIn(false); setUser(null);
+    setAdminLocked(false); setForceAdminLockSetup(false); // the admin lock PIN itself stays set on the device
   };
 
   // The server revoked this session (account deleted, role/permissions
@@ -2040,6 +2074,43 @@ const loadStockTransfers = async () => {
         </form>
         {onExit && <button type="button" className="hq-login-back" onClick={onExit}>← Back to the shop</button>}
       </div></div>
+    );
+  }
+
+  // ===== ADMIN APP LOCK GATE =====
+  // After staff sign-in, show the 4-digit PIN / fingerprint lock: on first setup,
+  // and again whenever the app was closed or backgrounded. Staff who forget the
+  // PIN tap "Sign out" to reset it (they set a new one after signing in again).
+  if (loggedIn && (forceAdminLockSetup || !adminLockConfigured || adminLocked)) {
+    const inSetup = forceAdminLockSetup || !adminLockConfigured || !hasPin('admin');
+    if (!inSetup && !adminLockCapReady) {
+      return (
+        <div className="blitz-admin-login"><div className="blitz-admin-login-card">
+          <div className="blitz-admin-logo">🔒</div>
+          <p className="blitz-admin-muted">Locked</p>
+        </div></div>
+      );
+    }
+    return (
+      <LockScreen
+        scope="admin"
+        pinMin={4}
+        pinMax={4}
+        mode={inSetup ? 'setup' : 'unlock'}
+        hasBiometric={!inSetup && adminLockCap.usable && adminLockCap.isFingerprint}
+        allowCancel={true}
+        cancelLabel={forceAdminLockSetup ? 'Cancel' : 'Sign out'}
+        logo={<div style={{ fontSize: 46, lineHeight: 1 }}>⚡</div>}
+        onDone={() => { setAdminLockConfigured(true); setForceAdminLockSetup(false); setAdminLocked(false); }}
+        onUnlock={() => setAdminLocked(false)}
+        onCancel={() => {
+          if (forceAdminLockSetup) { setForceAdminLockSetup(false); return; } // abort an intentional PIN change
+          // Unlock screen (or first-time setup): sign out to escape / recover a forgotten PIN.
+          if (window.confirm('Sign out of the admin app? You can set a new PIN after signing in again.')) {
+            disableLock('admin'); setAdminLockConfigured(false); setAdminLocked(false); logout();
+          }
+        }}
+      />
     );
   }
 
