@@ -6,7 +6,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client } = require('../server');
-const { getOwnerToken, bearer } = require('./helpers');
+const { getOwnerToken, bearer, REAUTH } = require('./helpers');
 
 beforeAll(async () => { await connectDb(); });
 afterAll(async () => { if (client) await client.close(); });
@@ -63,10 +63,10 @@ describe('delete one customer', () => {
     const session = (await enroll(phone, 'Mark')).body.token;
     await request(app).post(`/api/admin/customers/${phone}/make-owner`).set(bearer(token));
     // Funded account with no way back in: enroll refuses.
-    await request(app).post('/api/admin/customers/' + phone + '/reset-pin').set(bearer(token));
+    await request(app).post('/api/admin/customers/' + phone + '/reset-pin').set(bearer(token)).send(REAUTH);
     expect((await request(app).post(`/api/admin/customers/${phone}/delete`)).statusCode).toBe(401);
 
-    const del = await request(app).post(`/api/admin/customers/${phone}/delete`).set(bearer(token));
+    const del = await request(app).post(`/api/admin/customers/${phone}/delete`).set(bearer(token)).send(REAUTH);
     expect(del.statusCode).toBe(200);
     expect(del.body.deleted.customers).toBe(1);
     expect(del.body.deleted.loyalty).toBe(1);
@@ -82,7 +82,7 @@ describe('delete one customer', () => {
 
   it('404s for an unknown number', async () => {
     const token = await getOwnerToken(request, app);
-    expect((await request(app).post(`/api/admin/customers/${newPhone()}/delete`).set(bearer(token))).statusCode).toBe(404);
+    expect((await request(app).post(`/api/admin/customers/${newPhone()}/delete`).set(bearer(token)).send(REAUTH)).statusCode).toBe(404);
   });
 });
 
@@ -105,9 +105,9 @@ describe('delete all customers (wipe)', () => {
     // Dry run deleted nothing.
     expect((await request(app).get('/api/auth/me').set(bearer(shopperSession))).statusCode).toBe(200);
 
-    expect((await request(app).post('/api/admin/customers/wipe').set(bearer(token)).send({ confirm: 'yes' })).statusCode).toBe(400);
+    expect((await request(app).post('/api/admin/customers/wipe').set(bearer(token)).send({ confirm: 'yes', ...REAUTH })).statusCode).toBe(400);
 
-    const wipe = await request(app).post('/api/admin/customers/wipe').set(bearer(token)).send({ confirm: 'DELETE ALL CUSTOMERS' });
+    const wipe = await request(app).post('/api/admin/customers/wipe').set(bearer(token)).send({ confirm: 'DELETE ALL CUSTOMERS', ...REAUTH });
     expect(wipe.statusCode).toBe(200);
     expect(wipe.body.deleted.customers).toBeGreaterThanOrEqual(1);
     expect(wipe.body.wipeId).toMatch(/^wipe-/);

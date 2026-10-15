@@ -12,6 +12,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@otplib/plugin-crypto-node": "^13.5.0",
+    "@otplib/totp": "^13.5.0",
+    "@otplib/uri": "^13.5.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
@@ -22,7 +25,8 @@
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.2.0",
-    "node-cache": "^5.1.2"
+    "node-cache": "^5.1.2",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "jest": "^30.4.2",

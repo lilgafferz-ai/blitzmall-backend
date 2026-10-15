@@ -6,7 +6,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
-const { getOwnerToken, customerToken, bearer } = require('./helpers');
+const { getOwnerToken, customerToken, bearer, REAUTH } = require('./helpers');
 const { notifyStaffAlerts } = _test || {};
 
 // Unique 10-digit phone per call so a prior test run's data can never
@@ -72,7 +72,7 @@ describe('Staff test push endpoint', () => {
     const created = await request(app)
       .post('/api/admin/users')
       .set(auth())
-      .send({ username: uname, password: 'pass12345', name: 'Notif Staff', role: 'cashier', permissions: ['sales'] });
+      .send({ username: uname, password: 'pass12345', name: 'Notif Staff', role: 'cashier', permissions: ['sales'], ...REAUTH });
     expect(created.body.success).toBe(true);
 
     const login = await request(app).post('/api/admin/login').send({ username: uname, password: 'pass12345' });

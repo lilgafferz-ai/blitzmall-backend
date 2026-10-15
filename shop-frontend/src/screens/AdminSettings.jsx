@@ -13,7 +13,7 @@ const ROLE_LABEL = { owner: '👑 Owner', manager: '🧭 Manager', cashier: '�
 
 export default function AdminSettings({ ctx }) {
   const {
-    API_URL, user, branchName, authGet, authPost, logout, onTokenRefreshed, onExit,
+    API_URL, user, branchName, authGet, authPost, askReauth, logout, onTokenRefreshed, onUserChanged, onExit,
     muted, setMuted, showBanner, setShowBanner, perfMode, setPerfMode,
     pushStatus, sendStaffTestPush, staffPushRegistered
   } = ctx;
@@ -24,6 +24,74 @@ export default function AdminSettings({ ctx }) {
   const [pwMsg, setPwMsg] = useState('');
   const [pwBusy, setPwBusy] = useState(false);
   const [confirm, setConfirm] = useState(null);
+
+  // ----- two-step sign-in (TOTP) -----
+  const [mfa, setMfa] = useState(null);           // status from the server
+  const [mfaSetup, setMfaSetup] = useState(null); // { qr, manualKey } while enrolling
+  const [mfaCode, setMfaCode] = useState('');
+  const [mfaMsg, setMfaMsg] = useState('');
+  const [mfaBusy, setMfaBusy] = useState(false);
+  const [recoveryCodes, setRecoveryCodes] = useState(null); // shown once
+  const loadMfa = async () => {
+    try { const r = await authGet(API_URL + '/admin/me/mfa'); const d = await r.json(); if (r.ok) setMfa(d); } catch (e) {}
+  };
+  useEffect(() => { loadMfa(); }, [API_URL]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startMfaSetup = async () => {
+    setMfaMsg('');
+    const out = await askReauth({
+      title: mfa && mfa.enabled ? 'Move two-step sign-in to a new phone?' : 'Set up two-step sign-in?',
+      message: mfa && mfa.enabled ? 'Your current authenticator keeps working until the new one is confirmed.' : '',
+      confirmLabel: 'Continue', needCode: !!(mfa && mfa.enabled),
+      run: (creds) => authPost(API_URL + '/admin/me/mfa/setup', creds)
+    });
+    if (!out) return;
+    if (out.data.success) { setMfaSetup({ qr: out.data.qr, manualKey: out.data.manualKey }); setMfaCode(''); }
+    else setMfaMsg('❌ ' + (out.data.error || 'Could not start setup.'));
+  };
+  const activateMfa = async () => {
+    setMfaBusy(true); setMfaMsg('');
+    try {
+      const r = await authPost(API_URL + '/admin/me/mfa/activate', { code: mfaCode.trim() });
+      const d = await r.json().catch(() => ({}));
+      if (d.success) {
+        if (d.token) onTokenRefreshed(d.token);
+        if (onUserChanged) onUserChanged({ mfaEnabled: true });
+        setMfaSetup(null); setMfaCode('');
+        setRecoveryCodes(d.recoveryCodes || []);
+        setMfaMsg('✅ Two-step sign-in is on. Other devices were signed out.');
+        loadMfa();
+      } else {
+        if (d.restart) setMfaSetup(null);
+        setMfaMsg('❌ ' + (d.error || 'That code did not work.'));
+      }
+    } catch (e) { setMfaMsg('❌ Network error — try again.'); }
+    setMfaBusy(false);
+  };
+  const newRecoveryCodes = async () => {
+    setMfaMsg('');
+    const out = await askReauth({
+      title: 'Make new recovery codes?', message: 'Your old recovery codes stop working.', confirmLabel: 'Make new codes', needCode: true,
+      run: (creds) => authPost(API_URL + '/admin/me/mfa/recovery-codes', creds)
+    });
+    if (!out) return;
+    if (out.data.success) { setRecoveryCodes(out.data.recoveryCodes || []); loadMfa(); }
+    else setMfaMsg('❌ ' + (out.data.error || 'Failed'));
+  };
+  const disableMfa = async () => {
+    setMfaMsg('');
+    const out = await askReauth({
+      title: 'Turn off two-step sign-in?', message: 'You will sign in with just your password.', confirmLabel: 'Turn off', needCode: true,
+      run: (creds) => authPost(API_URL + '/admin/me/mfa/disable', creds)
+    });
+    if (!out) return;
+    if (out.data.success) { if (onUserChanged) onUserChanged({ mfaEnabled: false }); setMfaMsg('Two-step sign-in is off.'); loadMfa(); }
+    else setMfaMsg('❌ ' + (out.data.error || 'Failed'));
+  };
+  const copyRecoveryCodes = async () => {
+    try { await navigator.clipboard.writeText((recoveryCodes || []).join('\n')); setMfaMsg('📋 Recovery codes copied.'); }
+    catch (e) { setMfaMsg('Copy failed — write the codes down instead.'); }
+  };
 
   // ----- wallet ledger check (owner) -----
   const [walletAudit, setWalletAudit] = useState(null);
@@ -181,6 +249,57 @@ export default function AdminSettings({ ctx }) {
         )}
         {pwMsg && <SettingsRow label={pwMsg} />}
       </SettingsGroup>
+
+      {mfa && mfa.available && (
+        <SettingsGroup title="Security — two-step sign-in"
+          footer={user?.role === 'owner'
+            ? 'Strongly recommended for the owner: a stolen password alone can no longer open HQ. Once on, it stays on for the owner (you can move it to a new phone).'
+            : 'After your password, HQ asks for a 6-digit code from an authenticator app (Google Authenticator, Microsoft Authenticator, Authy…).'}>
+          <SettingsRow icon="🔐" tone={mfa.enabled ? 'green' : 'gold'} label="Two-step sign-in"
+            sub={mfa.enabled
+              ? `On${mfa.enabledAt ? ' since ' + new Date(mfa.enabledAt).toLocaleDateString('en-KE', { timeZone: 'Africa/Nairobi' }) : ''} · ${mfa.recoveryCodesLeft} recovery code(s) left`
+              : 'Off — add a code from your phone to every sign-in'}
+            right={mfa.enabled ? <span className="ui-row-value">✓ On</span> : <PillButton onClick={startMfaSetup} disabled={!!mfaSetup}>Set up</PillButton>} />
+          {mfaSetup && (
+            <>
+              <div className="ui-field">
+                <label>1. Scan this QR code with your authenticator app</label>
+                <img src={mfaSetup.qr} alt="Two-step sign-in QR code" style={{ width: 200, height: 200, background: '#fff', borderRadius: 12, padding: 6, alignSelf: 'center' }} />
+                <span style={{ fontSize: '.78rem', color: 'var(--muted)' }}>Can't scan? Enter this key instead: <b style={{ fontFamily: 'monospace', userSelect: 'all' }}>{mfaSetup.manualKey}</b></span>
+              </div>
+              <div className="ui-field">
+                <label>2. Enter the 6-digit code it shows</label>
+                <input type="text" inputMode="numeric" autoComplete="one-time-code" placeholder="123456" value={mfaCode} onChange={e => setMfaCode(e.target.value)} />
+              </div>
+              <SettingsRow label="" right={<span style={{ display: 'flex', gap: 8 }}>
+                <PillButton kind="ghost" onClick={() => { setMfaSetup(null); setMfaCode(''); }}>Cancel</PillButton>
+                <PillButton onClick={activateMfa} disabled={mfaBusy || mfaCode.trim().length < 6}>{mfaBusy ? 'Checking…' : 'Turn on'}</PillButton>
+              </span>} />
+            </>
+          )}
+          {recoveryCodes && (
+            <div className="ui-field">
+              <label>Recovery codes — save them now, they are shown only once</label>
+              <span style={{ fontSize: '.78rem', color: 'var(--muted)' }}>Each code signs you in once if you lose your phone. Keep them somewhere safe (not on this device).</span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6, fontFamily: 'monospace', fontSize: '.95rem', userSelect: 'all' }}>
+                {recoveryCodes.map(c => <span key={c}>{c}</span>)}
+              </div>
+              <span style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                <PillButton kind="ghost" onClick={copyRecoveryCodes}>Copy</PillButton>
+                <PillButton onClick={() => setRecoveryCodes(null)}>I've saved them</PillButton>
+              </span>
+            </div>
+          )}
+          {mfa.enabled && !mfaSetup && (
+            <>
+              <SettingsRow icon="📱" label="Move to a new phone" sub="Set up a new authenticator app" onClick={startMfaSetup} />
+              <SettingsRow icon="🧾" label="New recovery codes" sub="The old ones stop working" onClick={newRecoveryCodes} />
+              {mfa.canDisable && <SettingsRow icon="🚫" label="Turn off two-step sign-in" danger onClick={disableMfa} />}
+            </>
+          )}
+          {mfaMsg && <SettingsRow label={mfaMsg} />}
+        </SettingsGroup>
+      )}
 
       <SettingsGroup title="Notifications" footer="New orders, M-Pesa payments and stock alerts reach staff devices that have notifications on.">
         <SettingsRow icon="🔔" tone="gold" label="Alert sounds" sub="Chime when a new order or alert arrives"

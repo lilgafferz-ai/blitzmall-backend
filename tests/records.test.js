@@ -10,7 +10,7 @@ process.env.MOCK_DB = '1';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
-const { getOwnerToken } = require('./helpers');
+const { getOwnerToken, REAUTH } = require('./helpers');
 
 const SEED_PRODUCTS = 3;
 const SEED_SALES = 2;
@@ -58,7 +58,7 @@ describe('Delete Records (owner wipe tool)', () => {
     expect(countsRes.body.counts.audit_logs).toBeUndefined();
 
     // 2) Deleting selected types actually removes their records
-    const delRes = await request(app).delete('/api/admin/records').set('Authorization', 'Bearer ' + token).send({ types: ['products', 'sales'] });
+    const delRes = await request(app).delete('/api/admin/records').set('Authorization', 'Bearer ' + token).send({ types: ['products', 'sales'], ...REAUTH });
     expect(delRes.statusCode).toBe(200);
     expect(delRes.body.success).toBe(true);
     expect(delRes.body.deleted).toBe(SEED_PRODUCTS + SEED_SALES);

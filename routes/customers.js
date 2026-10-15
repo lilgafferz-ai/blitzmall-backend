@@ -1,6 +1,7 @@
 // Customer profile, saved baskets and reviews.
 const { ObjectId } = require('mongodb');
 const { auditLog, authenticate, authenticateCustomer, authorize, optionalCustomer, requirePermission } = require('../lib/auth');
+const { requireReauth } = require('../lib/mfa');
 const { ensureReferralCode } = require('../lib/customers');
 const { col } = require('../lib/db');
 const { reviewLimiter } = require('../lib/limiters');
@@ -250,7 +251,7 @@ module.exports = function register(app) {
   // Reset a customer's PIN (account recovery). Clears the PIN + any lock and bumps
   // tokenVersion so old/stolen sessions are signed out; the customer sets a fresh
   // PIN on their next sign-in. Wallet money, points and orders are untouched.
-  app.post('/api/admin/customers/:phone/reset-pin', authenticate, authorize('owner'), async (req, res) => {
+  app.post('/api/admin/customers/:phone/reset-pin', authenticate, authorize('owner'), requireReauth, async (req, res) => {
     try {
       const phone = cleanPhone(req.params.phone);
       const cust = await col.customers.findOne({ phone });
@@ -304,8 +305,10 @@ module.exports = function register(app) {
   // (isOwner) is kept. Orders, sales, tax invoices and credit debts are NOT touched
   // (they're the shop's books). Every removed document is copied to
   // customer_wipe_archive first, so a wipe can be restored. { dryRun: true }
-  // returns the counts only; the real wipe needs confirm === WIPE_CONFIRM.
-  app.post('/api/admin/customers/wipe', authenticate, authorize('owner'), async (req, res) => {
+  // returns the counts only; the real wipe needs confirm === WIPE_CONFIRM plus
+  // the owner's password (and authenticator code) — see requireReauth.
+  const reauthUnlessDryRun = (req, res, next) => (req.body && req.body.dryRun ? next() : requireReauth(req, res, next));
+  app.post('/api/admin/customers/wipe', authenticate, authorize('owner'), reauthUnlessDryRun, async (req, res) => {
     try {
       const keep = (await col.customers.find({ isOwner: true }).toArray()).map(c => c.phone);
       const targets = customerDataTargets(
@@ -330,7 +333,7 @@ module.exports = function register(app) {
   // Delete ONE customer account (owner's own included) with the same data and the
   // same archive as "Delete all customers". Orders and the shop's books stay. The
   // number can then sign up fresh.
-  app.post('/api/admin/customers/:phone/delete', authenticate, authorize('owner'), async (req, res) => {
+  app.post('/api/admin/customers/:phone/delete', authenticate, authorize('owner'), requireReauth, async (req, res) => {
     try {
       const phone = cleanPhone(req.params.phone);
       const cust = await col.customers.findOne({ phone });

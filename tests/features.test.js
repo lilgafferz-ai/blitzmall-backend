@@ -5,7 +5,7 @@ process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 process.env.MPESA_MOCK_ENABLED = 'true'; // the 3-second simulator (allowed outside production)
 
 const { app, connectDb, client } = require('../server');
-const { getOwnerToken, customerToken, bearer } = require('./helpers');
+const { getOwnerToken, customerToken, bearer, REAUTH } = require('./helpers');
 const { bestLineTotal, normalizeQty } = require('../lib/units');
 
 // Unique Kenyan-style phone per call (clock + counter + random).
@@ -23,7 +23,7 @@ const createProduct = async (fields) => {
 };
 const staff = async (role, permissions) => {
   const username = `ft_${role}_${Date.now()}_${Math.floor(Math.random() * 1e5)}`;
-  const c = await request(app).post('/api/admin/users').set(auth()).send({ username, password: 'staffpass123', name: 'FT ' + role, role, permissions });
+  const c = await request(app).post('/api/admin/users').set(auth()).send({ username, password: 'staffpass123', name: 'FT ' + role, role, permissions, ...REAUTH });
   const l = await request(app).post('/api/admin/login').send({ username, password: 'staffpass123' });
   return { userId: String(c.body.userId), token: l.body.token };
 };

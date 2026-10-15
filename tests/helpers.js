@@ -4,11 +4,11 @@
 // share the same password so login always succeeds after the first creation.
 async function getOwnerToken(request, app) {
   for (const uname of ['test_owner', 'sec_owner', 'promo_owner', 'dbg_owner']) {
-    const r = await request(app).post('/api/admin/login').send({ username: uname, password: 'secure123' });
+    const r = await request(app).post('/api/admin/login').send({ username: uname, password: OWNER_PASSWORD });
     if (r.body && r.body.token) return r.body.token;
   }
-  await request(app).post('/api/admin/setup').send({ username: 'test_owner', password: 'secure123', name: 'Test Owner' });
-  const r = await request(app).post('/api/admin/login').send({ username: 'test_owner', password: 'secure123' });
+  await request(app).post('/api/admin/setup').send({ username: 'test_owner', password: OWNER_PASSWORD, name: 'Test Owner' });
+  const r = await request(app).post('/api/admin/login').send({ username: 'test_owner', password: OWNER_PASSWORD });
   return r.body && r.body.token;
 }
 
@@ -33,4 +33,9 @@ async function customerToken(request, app, phone, name = 'Test Shopper', extra =
 
 const bearer = (token) => ({ Authorization: 'Bearer ' + token });
 
-module.exports = { getOwnerToken, customerToken, bearer };
+// Destructive owner actions (user admin, wipes, PIN resets, loyalty economy)
+// need the owner's password again in the body — step-up re-auth.
+const OWNER_PASSWORD = 'secure123';
+const REAUTH = { currentPassword: OWNER_PASSWORD };
+
+module.exports = { getOwnerToken, customerToken, bearer, OWNER_PASSWORD, REAUTH };

@@ -8,7 +8,7 @@ process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const jwt = require('jsonwebtoken');
 const { app, connectDb, client, _test } = require('../server');
-const { getOwnerToken, customerToken, bearer } = require('./helpers');
+const { getOwnerToken, customerToken, bearer, REAUTH } = require('./helpers');
 const { earnPoints } = require('../lib/loyalty');
 
 let seq = 0;
@@ -27,7 +27,7 @@ const createProduct = async (fields = {}) => {
 };
 const staff = async (role, permissions) => {
   const username = `aud_${role}_${Date.now()}_${Math.floor(Math.random() * 1e5)}`;
-  const c = await request(app).post('/api/admin/users').set(owner()).send({ username, password: 'staffpass123', name: 'AUD ' + role, role, permissions });
+  const c = await request(app).post('/api/admin/users').set(owner()).send({ username, password: 'staffpass123', name: 'AUD ' + role, role, permissions, ...REAUTH });
   expect(c.body.success).toBe(true);
   const l = await request(app).post('/api/admin/login').send({ username, password: 'staffpass123' });
   expect(l.body.token).toBeTruthy();
@@ -93,7 +93,7 @@ describe('A cashier (sales only) cannot read data outside the till', () => {
     expect(r.statusCode).toBe(200);
     expect(r.body.length).toBeGreaterThan(0);
     const before = await db().collection('audit_logs').countDocuments({});
-    const wipe = await request(app).delete('/api/admin/records').set(owner()).send({ types: ['audit_logs'] });
+    const wipe = await request(app).delete('/api/admin/records').set(owner()).send({ types: ['audit_logs'], ...REAUTH });
     expect(wipe.body.types || []).not.toContain('audit_logs');
     expect(await db().collection('audit_logs').countDocuments({})).toBeGreaterThanOrEqual(before);
   });
@@ -106,9 +106,9 @@ describe('Loyalty economy is owner-controlled and points are money', () => {
   });
 
   it('settings reject an absurd earn rate and ignore unknown fields (no mass assignment)', async () => {
-    const bad = await request(app).put('/api/admin/loyalty/settings').set(owner()).send({ earnRate: 0.001 });
+    const bad = await request(app).put('/api/admin/loyalty/settings').set(owner()).send({ earnRate: 0.001, ...REAUTH });
     expect(bad.statusCode).toBe(400);
-    const ok = await request(app).put('/api/admin/loyalty/settings').set(owner()).send({ earnRate: 200, injectedFlag: true, walletRatePointsPerKsh: 0.0001 });
+    const ok = await request(app).put('/api/admin/loyalty/settings').set(owner()).send({ earnRate: 200, injectedFlag: true, walletRatePointsPerKsh: 0.0001, ...REAUTH });
     expect(ok.statusCode).toBe(200);
     expect(ok.body.settings.injectedFlag).toBeUndefined();
     expect(ok.body.settings.walletRatePointsPerKsh).toBeUndefined();
@@ -237,7 +237,7 @@ describe('Records wipe protects money and evidence', () => {
     const phone = freshPhone();
     await request(app).post('/api/admin/loyalty/add-points').set(owner()).send({ phone, points: 500 });
     await request(app).post('/api/loyalty/convert-to-wallet').set(bearer(await customerToken(request, app, phone))).send({ points: 500 });
-    const r = await request(app).delete('/api/admin/records').set(owner()).send({ types: ['loyalty'] });
+    const r = await request(app).delete('/api/admin/records').set(owner()).send({ types: ['loyalty'], ...REAUTH });
     expect(r.statusCode).toBe(409);
     expect((await card(phone)).walletBalance).toBe(100);
   });
@@ -281,7 +281,7 @@ describe('Staff sign-in brute force', () => {
   });
 
   it('new staff passwords need 8+ characters', async () => {
-    const r = await request(app).post('/api/admin/users').set(owner()).send({ username: 'short_' + Date.now(), password: 'abc123', role: 'cashier' });
+    const r = await request(app).post('/api/admin/users').set(owner()).send({ username: 'short_' + Date.now(), password: 'abc123', role: 'cashier', ...REAUTH });
     expect(r.statusCode).toBe(400);
   });
 

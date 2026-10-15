@@ -6,7 +6,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
-const { getOwnerToken, customerToken, bearer } = require('./helpers');
+const { getOwnerToken, customerToken, bearer, REAUTH } = require('./helpers');
 const { parseServiceAccount } = _test || {};
 
 // Unique 10-digit phone per call so a prior test run's data can never
@@ -130,7 +130,7 @@ describe('Loyalty endpoint security', () => {
     const created = await request(app)
       .post('/api/admin/users')
       .set(auth())
-      .send({ username, password: 'cashpass123', name: 'Cashier', role: 'cashier', permissions: ['sales'] });
+      .send({ username, password: 'cashpass123', name: 'Cashier', role: 'cashier', permissions: ['sales'], ...REAUTH });
     if (created.body && created.body.success) {
       const cashierLogin = await request(app)
         .post('/api/admin/login')
@@ -257,7 +257,7 @@ describe('Notification token registration (staff push)', () => {
     const created = await request(app)
       .post('/api/admin/users')
       .set(auth())
-      .send({ username: uname, password: 'pass12345', name: 'Notif Staff', role: 'cashier', permissions: ['sales'] });
+      .send({ username: uname, password: 'pass12345', name: 'Notif Staff', role: 'cashier', permissions: ['sales'], ...REAUTH });
     expect(created.body.success).toBe(true);
 
     const login = await request(app).post('/api/admin/login').send({ username: uname, password: 'pass12345' });

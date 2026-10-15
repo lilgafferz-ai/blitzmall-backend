@@ -2,6 +2,7 @@
 const crypto = require('crypto');
 const { ObjectId } = require('mongodb');
 const { CUSTOMER_AUTH_ERROR, auditLog, authenticate, authenticateCustomer, authorize, optionalCustomer, requirePermission } = require('../lib/auth');
+const { requireReauth } = require('../lib/mfa');
 const { col } = require('../lib/db');
 const { couponCheckLimiter, promosLimiter, walletLimiter } = require('../lib/limiters');
 const { LOYALTY_SETTINGS_DEFAULTS, WHEEL_SECTORS, getLoyaltySettings, incPoints, promoDayKey, runPromo, saveLoyaltySettings, spendPoints, tierFromPoints } = require('../lib/loyalty');
@@ -200,9 +201,9 @@ module.exports = function register(app) {
   });
 
   // The loyalty economy (earn rate, prize odds, redemption values) decides how
-  // much wallet cash the shop owes, so only the owner may change it, and only
-  // the known fields are taken from the request.
-  app.put('/api/admin/loyalty/settings', authenticate, authorize('owner'), async (req, res) => {
+  // much wallet cash the shop owes, so only the owner may change it (after
+  // re-confirming their password), and only the known fields are taken.
+  app.put('/api/admin/loyalty/settings', authenticate, authorize('owner'), requireReauth, async (req, res) => {
     try {
       const current = await getLoyaltySettings();
       const b = req.body || {};

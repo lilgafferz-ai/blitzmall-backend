@@ -10,6 +10,9 @@ services:
       # All secrets are set in the Render dashboard (Environment tab), never committed here.
       - key: JWT_SECRET
         sync: false
+      # Encrypts staff authenticator (TOTP) secrets; set once, before anyone enrols.
+      - key: MFA_ENCRYPTION_KEY
+        sync: false
       - key: MPESA_ENV
         sync: false
       - key: MPESA_CONSUMER_KEY

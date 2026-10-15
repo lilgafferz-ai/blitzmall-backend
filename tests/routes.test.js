@@ -6,7 +6,7 @@ process.env.JWT_SECRET = 'test_secret_key';
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client } = require('../server');
-const { getOwnerToken, bearer } = require('./helpers');
+const { getOwnerToken, bearer, REAUTH } = require('./helpers');
 
 let ownerToken = null;
 
@@ -36,12 +36,12 @@ describe('Loyalty Controls routes are reachable', () => {
   it('PUT /api/admin/loyalty/settings actually saves', async () => {
     const before = (await request(app).get('/api/admin/loyalty/settings').set(bearer(ownerToken))).body;
     const nextCooldown = before.spinCooldownHours === 24 ? 25 : 24;
-    const r = await request(app).put('/api/admin/loyalty/settings').set(bearer(ownerToken)).send({ ...before, spinCooldownHours: nextCooldown });
+    const r = await request(app).put('/api/admin/loyalty/settings').set(bearer(ownerToken)).send({ ...before, spinCooldownHours: nextCooldown, ...REAUTH });
     expect(r.body.success).toBe(true);
     const after = (await request(app).get('/api/admin/loyalty/settings').set(bearer(ownerToken))).body;
     expect(after.spinCooldownHours).toBe(nextCooldown);
     // Put it back so other test files see the default 24h window.
-    await request(app).put('/api/admin/loyalty/settings').set(bearer(ownerToken)).send({ ...after, spinCooldownHours: 24 });
+    await request(app).put('/api/admin/loyalty/settings').set(bearer(ownerToken)).send({ ...after, spinCooldownHours: 24, ...REAUTH });
   });
 });
 
@@ -97,7 +97,7 @@ describe('Settings endpoints', () => {
 
   it('staff can change their own password; old sessions end, the new token works', async () => {
     const username = 'settings_staff_' + Date.now();
-    await request(app).post('/api/admin/users').set(bearer(ownerToken)).send({ username, password: 'oldpass1', role: 'cashier', permissions: ['sales'] });
+    await request(app).post('/api/admin/users').set(bearer(ownerToken)).send({ username, password: 'oldpass1', role: 'cashier', permissions: ['sales'], ...REAUTH });
     const login = await request(app).post('/api/admin/login').send({ username, password: 'oldpass1' });
     const oldToken = login.body.token;
     const wrong = await request(app).post('/api/admin/me/password').set(bearer(oldToken)).send({ currentPassword: 'nope', newPassword: 'newpass1' });

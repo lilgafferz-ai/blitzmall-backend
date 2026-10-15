@@ -1,5 +1,6 @@
 // Dashboard summary, predictions, export, audit log and record cleanup.
 const { auditLog, authenticate, authorize, branchFilter, hasPermission, requirePermission } = require('../lib/auth');
+const { requireReauth } = require('../lib/mfa');
 const { productCache } = require('../lib/cache');
 const { col } = require('../lib/db');
 const { costMap, generatePredictions, liveSales, orderProfit } = require('../lib/reports');
@@ -140,7 +141,7 @@ module.exports = function register(app) {
     }
   });
 
-  app.delete('/api/admin/records', authenticate, authorize('owner'), async (req, res) => {
+  app.delete('/api/admin/records', authenticate, authorize('owner'), requireReauth, async (req, res) => {
     const types = Array.isArray(req.body && req.body.types) ? req.body.types : [];
     if (!types.length) return res.status(400).json({ error: 'Select at least one record type to delete' });
     try {
