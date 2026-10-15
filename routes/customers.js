@@ -13,6 +13,39 @@ const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const OWNER_BOOST_POINTS = 1000000;            // owner account's one-time starter boost
 const WIPE_CONFIRM = 'DELETE ALL CUSTOMERS';    // phrase the owner types to wipe customers
 
+// Everything that belongs to a customer account, as [collection, filter] pairs.
+// `phoneMatch` selects by phone (a value or an operator object); `voucherMatch`
+// selects personal vouchers by ownerPhone. Staff push tokens have no phone, so
+// they never match.
+const customerDataTargets = (phoneMatch, voucherMatch) => [
+  ['customers', { phone: phoneMatch }],
+  ['loyalty', { phone: phoneMatch }],
+  ['wallet_transactions', { phone: phoneMatch }],
+  ['ai_chats', { phone: phoneMatch }],
+  ['promo_claims', { phone: phoneMatch }],
+  ['promo_cooldowns', { phone: phoneMatch }],
+  ['notification_tokens', { phone: phoneMatch }],
+  ['notifications_feed', { audience: 'customer', phone: phoneMatch }],
+  ['saved_baskets', { customerId: phoneMatch }],
+  ['redemptions', { customerId: phoneMatch }],
+  ['coupons', { ownerPhone: voucherMatch }]
+].filter(([name]) => col[name]);
+
+// Copy every matching doc to customer_wipe_archive (so it can be restored), then
+// delete exactly those docs. Returns { collection: deletedCount }.
+async function archiveAndDelete(targets, wipeId) {
+  const archivedAt = new Date();
+  const deleted = {};
+  for (const [name, filter] of targets) {
+    const docs = await col[name].find(filter).toArray();
+    if (!docs.length) { deleted[name] = 0; continue; }
+    await col.customer_wipe_archive.insertMany(docs.map(doc => ({ wipeId, collection: name, doc, archivedAt })));
+    const r = await col[name].deleteMany({ _id: { $in: docs.map(d => d._id) } });
+    deleted[name] = r.deletedCount || 0;
+  }
+  return deleted;
+}
+
 module.exports = function register(app) {
   app.post('/api/reviews', reviewLimiter, optionalCustomer, async (req, res) => {
     const { customerName, rating, message } = req.body;
@@ -272,20 +305,10 @@ module.exports = function register(app) {
   app.post('/api/admin/customers/wipe', authenticate, authorize('owner'), async (req, res) => {
     try {
       const keep = (await col.customers.find({ isOwner: true }).toArray()).map(c => c.phone);
-      const notKept = (field, extra = {}) => ({ [field]: { ...extra, ...(keep.length ? { $nin: keep } : {}) } });
-      const targets = [
-        ['customers', notKept('phone', { $exists: true })],
-        ['loyalty', notKept('phone', { $exists: true })],
-        ['wallet_transactions', notKept('phone', { $exists: true })],
-        ['ai_chats', notKept('phone', { $exists: true })],
-        ['promo_claims', notKept('phone', { $exists: true })],
-        ['promo_cooldowns', notKept('phone', { $exists: true })],
-        ['notification_tokens', notKept('phone', { $exists: true })],   // staff tokens have no phone
-        ['notifications_feed', { audience: 'customer', ...notKept('phone', { $exists: true }) }],
-        ['saved_baskets', notKept('customerId', { $exists: true })],
-        ['redemptions', notKept('customerId', { $exists: true })],
-        ['coupons', { ownerPhone: { $exists: true, $nin: [null, ...keep] } }] // personal vouchers only
-      ].filter(([name]) => col[name]);
+      const targets = customerDataTargets(
+        { $exists: true, ...(keep.length ? { $nin: keep } : {}) },
+        { $exists: true, $nin: [null, ...keep] }
+      );
 
       const counts = {};
       for (const [name, filter] of targets) counts[name] = await col[name].countDocuments(filter);
@@ -295,18 +318,25 @@ module.exports = function register(app) {
 
       if (!req.body || req.body.confirm !== WIPE_CONFIRM) return res.status(400).json({ error: `Type ${WIPE_CONFIRM} to confirm.` });
       const wipeId = `wipe-${Date.now()}`;
-      const archivedAt = new Date();
-      const deleted = {};
-      for (const [name, filter] of targets) {
-        const docs = await col[name].find(filter).toArray();
-        if (!docs.length) { deleted[name] = 0; continue; }
-        await col.customer_wipe_archive.insertMany(docs.map(doc => ({ wipeId, collection: name, doc, archivedAt })));
-        const r = await col[name].deleteMany({ _id: { $in: docs.map(d => d._id) } });
-        deleted[name] = r.deletedCount || 0;
-      }
+      const deleted = await archiveAndDelete(targets, wipeId);
       auditLog(req, 'customers_wiped', `Deleted all customers (${deleted.customers || 0} accounts, KES ${walletMoney} wallet money) — archive ${wipeId}`);
       res.json({ success: true, wipeId, deleted, walletMoney, keptOwnerAccounts: keep.length });
     } catch (e) { console.error('admin customers wipe error:', e); res.status(500).json({ error: 'Failed' }); }
+  });
+
+  // Delete ONE customer account (owner's own included) with the same data and the
+  // same archive as "Delete all customers". Orders and the shop's books stay. The
+  // number can then sign up fresh.
+  app.post('/api/admin/customers/:phone/delete', authenticate, authorize('owner'), async (req, res) => {
+    try {
+      const phone = cleanPhone(req.params.phone);
+      const cust = await col.customers.findOne({ phone });
+      if (!cust) return res.status(404).json({ error: 'Customer not found' });
+      const wipeId = `delete-${phone}-${Date.now()}`;
+      const deleted = await archiveAndDelete(customerDataTargets(phone, phone), wipeId);
+      auditLog(req, 'customer_deleted', `Deleted customer ${phone} (${cust.name || 'no name'}) — archive ${wipeId}`);
+      res.json({ success: true, wipeId, deleted });
+    } catch (e) { console.error('admin customer delete error:', e); res.status(500).json({ error: 'Failed' }); }
   });
 
 };

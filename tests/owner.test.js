@@ -56,6 +56,36 @@ describe('owner account (make-owner)', () => {
   });
 });
 
+describe('delete one customer', () => {
+  it('deletes even the owner-labelled account, so the number can sign up fresh', async () => {
+    const token = await getOwnerToken(request, app);
+    const phone = newPhone();
+    const session = (await enroll(phone, 'Mark')).body.token;
+    await request(app).post(`/api/admin/customers/${phone}/make-owner`).set(bearer(token));
+    // Funded account with no way back in: enroll refuses.
+    await request(app).post('/api/admin/customers/' + phone + '/reset-pin').set(bearer(token));
+    expect((await request(app).post(`/api/admin/customers/${phone}/delete`)).statusCode).toBe(401);
+
+    const del = await request(app).post(`/api/admin/customers/${phone}/delete`).set(bearer(token));
+    expect(del.statusCode).toBe(200);
+    expect(del.body.deleted.customers).toBe(1);
+    expect(del.body.deleted.loyalty).toBe(1);
+    expect((await request(app).get('/api/auth/me').set(bearer(session))).statusCode).toBe(401);
+    expect((await request(app).get('/api/admin/customers/' + phone).set(bearer(token))).statusCode).toBe(404);
+
+    const fresh = await enroll(phone, 'RedMan');
+    expect(fresh.statusCode).toBe(200);
+    const again = await request(app).post(`/api/admin/customers/${phone}/make-owner`).set(bearer(token));
+    expect(again.body.boosted).toBe(true);
+    expect(again.body.points).toBe(1000000);
+  });
+
+  it('404s for an unknown number', async () => {
+    const token = await getOwnerToken(request, app);
+    expect((await request(app).post(`/api/admin/customers/${newPhone()}/delete`).set(bearer(token))).statusCode).toBe(404);
+  });
+});
+
 describe('delete all customers (wipe)', () => {
   it('previews, refuses without the phrase, then wipes everyone except the owner account', async () => {
     const token = await getOwnerToken(request, app);
