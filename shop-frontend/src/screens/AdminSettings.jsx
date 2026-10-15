@@ -13,7 +13,7 @@ const ROLE_LABEL = { owner: '👑 Owner', manager: '🧭 Manager', cashier: '�
 
 export default function AdminSettings({ ctx }) {
   const {
-    API_URL, user, branchName, authPost, logout, onTokenRefreshed, onExit,
+    API_URL, user, branchName, authGet, authPost, logout, onTokenRefreshed, onExit,
     muted, setMuted, showBanner, setShowBanner, perfMode, setPerfMode,
     pushStatus, sendStaffTestPush, staffPushRegistered
   } = ctx;
@@ -24,6 +24,19 @@ export default function AdminSettings({ ctx }) {
   const [pwMsg, setPwMsg] = useState('');
   const [pwBusy, setPwBusy] = useState(false);
   const [confirm, setConfirm] = useState(null);
+
+  // ----- wallet ledger check (owner) -----
+  const [walletAudit, setWalletAudit] = useState(null);
+  const [walletBusy, setWalletBusy] = useState(false);
+  const runWalletAudit = async () => {
+    setWalletBusy(true);
+    try {
+      const r = await authGet(API_URL + '/admin/wallet/reconcile');
+      const d = await r.json();
+      setWalletAudit(r.ok ? d : { error: d.error || 'Check failed' });
+    } catch (e) { setWalletAudit({ error: 'Could not reach the server' }); }
+    setWalletBusy(false);
+  };
 
   const changePassword = async () => {
     setPwMsg('');
@@ -206,6 +219,23 @@ export default function AdminSettings({ ctx }) {
         <SettingsRow icon="🏷️" label="Version" value={`v${APP_VERSION}${desktopInfo && desktopInfo.version ? ` · desktop ${desktopInfo.version}` : ''}`} />
         <SettingsRow icon="💡" label="Running as" value={platform} />
       </SettingsGroup>
+
+      {user?.role === 'owner' && (
+        <SettingsGroup title="Wallet ledger" footer="Every shilling of customer wallet cash is recorded in an append-only ledger. The check confirms each wallet balance matches its history.">
+          <SettingsRow icon="🧾" tone="green" label="Check wallet balances"
+            sub={walletAudit && !walletAudit.error
+              ? `${walletAudit.accounts} wallet(s) · KES ${Number(walletAudit.totalBalance || 0).toLocaleString()} held · ${walletAudit.entries} ledger entries`
+              : 'Compare every balance with its transaction history'}
+            right={<PillButton onClick={runWalletAudit} disabled={walletBusy}>{walletBusy ? 'Checking…' : 'Check'}</PillButton>} />
+          {walletAudit && walletAudit.error && <SettingsRow icon="⚠️" label={walletAudit.error} />}
+          {walletAudit && !walletAudit.error && walletAudit.ok && <SettingsRow icon="✅" tone="green" label="All wallets match the ledger" />}
+          {walletAudit && !walletAudit.error && !walletAudit.ok && walletAudit.mismatches.slice(0, 20).map(m => (
+            <SettingsRow key={m.phone} icon="❗" danger label={m.phone}
+              sub={`Balance KES ${m.balance} · ledger KES ${m.ledger}${m.cardMissing ? ' · loyalty card missing' : ''}`}
+              value={`${m.difference > 0 ? '+' : ''}${m.difference}`} />
+          ))}
+        </SettingsGroup>
+      )}
 
       {onExit && (
         <SettingsGroup title="Switch">

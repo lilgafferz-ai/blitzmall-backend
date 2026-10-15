@@ -150,6 +150,10 @@ module.exports = function register(app) {
           deleted += (r.deletedCount || 0);
           done.push(t);
           if (t === 'products') productCache.del('all_products'); // never serve wiped inventory from cache
+          // Wallet cash lives on the loyalty cards — wiping them wipes the
+          // balances, so their ledger goes too (or every account would show up
+          // as a reconciliation mismatch).
+          if (t === 'loyalty' && col.wallet_transactions) deleted += (await col.wallet_transactions.deleteMany({})).deletedCount || 0;
         } catch (e) { console.error('Failed to wipe collection:', t, e); }
       }
       auditLog(req, 'records_deleted', `Wiped ${deleted} record(s) from: ${done.join(', ')}`);

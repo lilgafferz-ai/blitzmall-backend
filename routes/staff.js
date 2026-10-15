@@ -1,9 +1,7 @@
 // Staff accounts, sessions and branches.
-const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { ObjectId } = require('mongodb');
-const { auditLog, authenticate, authorize, forgetStaffSession } = require('../lib/auth');
-const { JWT_EXPIRES, JWT_SECRET } = require('../lib/config');
+const { auditLog, authenticate, authorize, forgetStaffSession, signStaffToken } = require('../lib/auth');
 const { col } = require('../lib/db');
 const { authLimiter } = require('../lib/limiters');
 const { idFilter } = require('../lib/util');
@@ -20,11 +18,6 @@ module.exports = function register(app) {
     manager: ['sales', 'inventory', 'orders', 'records', 'expenses', 'credit', 'reviews', 'loyalty']
   };
   const publicUser = (u) => ({ name: u.name, role: u.role, username: u.username, branchId: u.branchId || null, permissions: u.permissions || [] });
-  const signStaffToken = (user) => jwt.sign(
-    { userId: String(user._id), username: user.username, role: user.role, tv: user.tokenVersion || 0 },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES }
-  );
 
   // Seed / create first owner. Only possible while the (real) database has no
   // owner — production no longer falls back to an empty file DB (see connectDb).

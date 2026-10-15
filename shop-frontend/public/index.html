@@ -46,17 +46,7 @@
       @keyframes pfloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
       @keyframes pspin{to{transform:rotate(360deg)}}
     </style>
-    <script>
-      // Remove pre-splash once React renders
-      const observer = new MutationObserver(() => {
-        if (document.getElementById('root') && document.getElementById('root').children.length > 0) {
-          const ps = document.getElementById('pre-splash');
-          if (ps) { ps.style.opacity = '0'; setTimeout(() => ps.remove(), 500); }
-          observer.disconnect();
-        }
-      });
-      observer.observe(document.getElementById('root'), { childList: true });
-    </script>
+    <script src="%PUBLIC_URL%/splash.js"></script>
     <!--
       This HTML file is a template.
       If you open it directly in the browser, you will see an empty page.

@@ -1,4 +1,5 @@
 // App/OTA update info, old-APK redirects and the health probe.
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { ROOT, SHOP_COORDS } = require('../lib/config');
@@ -21,6 +22,18 @@ function latestApk() {
   return apks[0] || null;
 }
 
+// SHA-256 of the newest APK, so anyone sideloading it can check the download
+// (published on the Share screen / /api/app-info). Cached per file + mtime.
+let apkHashCache = { key: '', sha256: null };
+function apkSha256(latest) {
+  const key = `${latest.f}:${latest.t}`;
+  if (apkHashCache.key !== key) {
+    const sha256 = crypto.createHash('sha256').update(fs.readFileSync(path.join(APK_DIR, latest.f))).digest('hex');
+    apkHashCache = { key, sha256 };
+  }
+  return apkHashCache.sha256;
+}
+
 const APP_VERSION = (() => {
   try { return require(path.join(ROOT, 'shop-frontend/package.json')).version; } catch (e) { return 'unknown'; }
 })();
@@ -41,6 +54,7 @@ module.exports = function register(app) {
         apkUrl: `${base}/apk/${encodeURIComponent(latest.f)}`,
         fileName: latest.f,
         version: new Date(latest.t).toISOString().slice(0, 10),
+        sha256: apkSha256(latest),
       });
     } catch (e) {
       console.error('app-info error:', e);
@@ -65,13 +79,22 @@ module.exports = function register(app) {
   // calls this on launch; if the version differs from what it's running, it
   // downloads the bundle and applies it on the next reopen. The bundle + its
   // latest.json are produced by `npm run build` (see scripts/make-ota-bundle.js).
+  // The app installs it only if `signature` verifies against the public key
+  // compiled into it and the zip matches `sha256` (src/otaUpdate.js) — this
+  // endpoint just relays what the signed build wrote.
   app.get('/api/native-update', (req, res) => {
     try {
       if (!fs.existsSync(OTA_LATEST)) return res.json({ version: null });
       const info = JSON.parse(fs.readFileSync(OTA_LATEST, 'utf8'));
       if (!info.fileName || !info.version) return res.json({ version: null });
       const base = `${req.protocol}://${req.get('host')}`;
-      res.json({ version: info.version, url: `${base}/updates/${encodeURIComponent(info.fileName)}` });
+      res.json({
+        version: info.version,
+        url: `${base}/updates/${encodeURIComponent(info.fileName)}`,
+        appVersion: info.appVersion || null,
+        sha256: info.sha256 || null,
+        signature: info.signature || null
+      });
     } catch (e) {
       console.error('native-update error:', e);
       res.json({ version: null });
