@@ -26,9 +26,12 @@ jobs:
         working-directory: ./shop-frontend
         run: npm ci
 
+      # Web build only. The signed OTA bundle for phones is made on the owner's
+      # PC (`npm run build` needs ~/.blitzmall/ota-signing-key.pem, which must
+      # never live in CI) and committed under shop-frontend/ota/.
       - name: Build React App
         working-directory: ./shop-frontend
-        run: npm run build
+        run: npm run build:strict
 
       # electron-builder needs Windows Developer Mode enabled so 7-Zip can
       # create the symlinks inside its winCodeSign cache; without it the
@@ -41,4 +44,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npm run electron:build -- -p always
+        run: npx electron-builder -p always
