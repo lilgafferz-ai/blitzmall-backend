@@ -16,10 +16,21 @@ const freshPhone = () => { seq += 7; return '07' + String(Date.now() + seq * 791
 // Orders now REQUIRE every item to resolve to a real catalogue product (server
 // prices are authoritative), so the promo tests create their own products.
 let PRODUCTS = {};
+let ownerTok = null;
+// Promos unlock on DELIVERED orders only (an unpaid pending order must never
+// unlock a prize), so the tests place an order and have the shop deliver it.
+async function orderDelivered(phone, name, productId) {
+  const r = await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
+    customerName: name, items: [{ _id: productId, quantity: 1 }], paymentMethod: 'delivery'
+  });
+  await request(app).put('/api/admin/orders/' + r.body.orderId).set(bearer(ownerTok)).send({ status: 'delivered' });
+  return r;
+}
 
 beforeAll(async () => {
   await connectDb();
   const token = await getOwnerToken(request, app);
+  ownerTok = token;
   const create = async (name, price) => {
     const r = await request(app)
       .post('/api/admin/products')
@@ -118,9 +129,7 @@ describe('Promos API (spin wheel + scratch card)', () => {
   it('requires TWO completed orders before the spin unlocks', async () => {
     const phone = freshPhone();
     // One order is NOT enough — gate blocks the spin.
-    await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
-      customerId: phone, customerName: 'One Order', items: [{ _id: PRODUCTS.milk, quantity: 1 }], paymentMethod: 'delivery'
-    });
+    await orderDelivered(phone, 'One Order', PRODUCTS.milk);
     const blocked = await request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'One Order' });
     expect(blocked.statusCode).toBe(200);
     expect(blocked.body.success).toBe(false);
@@ -128,9 +137,7 @@ describe('Promos API (spin wheel + scratch card)', () => {
     expect(blocked.body.orderCount).toBe(1);
 
     // Second order unlocks it — spin succeeds and lands on a real sector.
-    await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
-      customerId: phone, customerName: 'One Order', items: [{ _id: PRODUCTS.bread, quantity: 1 }], paymentMethod: 'delivery'
-    });
+    await orderDelivered(phone, 'One Order', PRODUCTS.bread);
     const res = await request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'One Order' });
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
@@ -154,9 +161,7 @@ describe('Promos API (spin wheel + scratch card)', () => {
   it('the scratch card works after two orders and never guarantees a prize', async () => {
     const phone = freshPhone();
     for (let i = 0; i < 2; i++) {
-      await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
-        customerId: phone, customerName: 'Scratcher', items: [{ _id: i === 0 ? PRODUCTS.item0 : PRODUCTS.item1, quantity: 1 }], paymentMethod: 'delivery'
-      });
+      await orderDelivered(phone, 'Scratcher', i === 0 ? PRODUCTS.item0 : PRODUCTS.item1);
     }
     const res = await request(app).post('/api/promos/scratch').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'Scratcher' });
     expect(res.statusCode).toBe(200);
@@ -173,9 +178,7 @@ describe('Promos API (spin wheel + scratch card)', () => {
     // orders (loyal shoppers only), so a cash win must be rerolled to a
     // non-cash outcome every single time for a 2-order shopper.
     for (let i = 0; i < 2; i++) {
-      await request(app).post('/api/orders').set(bearer(await customerToken(request, app, phone))).send({
-        customerId: phone, customerName: 'Low Spender', items: [{ _id: i === 0 ? PRODUCTS.item0 : PRODUCTS.item1, quantity: 1 }], paymentMethod: 'delivery'
-      });
+      await orderDelivered(phone, 'Low Spender', i === 0 ? PRODUCTS.item0 : PRODUCTS.item1);
     }
     const res = await request(app).post('/api/promos/spin').set(bearer(await customerToken(request, app, phone))).send({ phone, name: 'Low Spender' });
     expect(res.statusCode).toBe(200);

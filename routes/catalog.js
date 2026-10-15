@@ -1,6 +1,6 @@
 // Products, categories, banners, flash sales, pricing rules and stock transfers.
 const { ObjectId } = require('mongodb');
-const { authenticate, authorize, branchFilter, logAction, requirePermission } = require('../lib/auth');
+const { auditLog, authenticate, authorize, branchFilter, logAction, requirePermission } = require('../lib/auth');
 const { productCache } = require('../lib/cache');
 const { col } = require('../lib/db');
 const { autoFetchProductImage, isMobileUA, searchProductImages, upgradeImagesForClient } = require('../lib/images');
@@ -82,15 +82,17 @@ module.exports = function register(app) {
     try {
 
       const product = {
-        name, category: (category || '').trim() || 'Other', barcode: (barcode || '').trim(),
+        name: String(name).trim().slice(0, 120), category: String(category || '').trim().slice(0, 60) || 'Other', barcode: String(barcode || '').trim().slice(0, 64),
         buyingPrice: parseFloat(buyingPrice) || 0, price: parseFloat(price) || 0, stock: Math.max(0, Math.round((parseFloat(stock) || 0) * 100) / 100),
-        description: description || '', image: image || await autoFetchProductImage(name, barcode),
+        description: String(description || '').slice(0, 2000), image: image || await autoFetchProductImage(name, barcode),
         expiryDate: expiryDate ? new Date(expiryDate) : null,
         branchId: branchId || req.user.branchId || null,
         ...extraProductFields(req.body),
         createdAt: new Date(),
       };
+      if (!(product.price >= 0 && product.price <= 10000000)) return res.status(400).json({ error: 'Enter a valid selling price' });
       const result = await col.products.insertOne(product);
+      auditLog(req, 'product_created', `${product.name}: price KES ${product.price}, cost KES ${product.buyingPrice}, stock ${product.stock}`);
       productCache.del('all_products');
       scheduleAlertSweep(); // a product added with 0 / low stock should alert immediately
       res.json({ success: true, productId: result.insertedId, message: 'Product added!' });
@@ -99,26 +101,37 @@ module.exports = function register(app) {
   app.put('/api/admin/products/:productId', authenticate, requirePermission('inventory'), async (req, res) => {
     const { name, category, barcode, buyingPrice, price, stock, description, image, expiryDate } = req.body;
     try {
+      if (!ObjectId.isValid(req.params.productId)) return res.status(400).json({ error: 'Invalid product' });
+      // Copied: the offline mock DB hands back the live document, which the update below would change.
+      const found = await col.products.findOne({ _id: new ObjectId(req.params.productId) });
+      const before = found ? { ...found } : null;
+      if (!before) return res.status(404).json({ error: 'Product not found' });
       const u = {};
-      if (name !== undefined) u.name = name;
-      if (category !== undefined) u.category = (category || '').trim() || 'Other';
-      if (barcode !== undefined) u.barcode = (barcode || '').trim();
+      if (name !== undefined) u.name = String(name).trim().slice(0, 120);
+      if (category !== undefined) u.category = String(category || '').trim().slice(0, 60) || 'Other';
+      if (barcode !== undefined) u.barcode = String(barcode || '').trim().slice(0, 64);
       if (buyingPrice !== undefined) u.buyingPrice = parseFloat(buyingPrice) || 0;
       if (price !== undefined) u.price = parseFloat(price) || 0;
       if (stock !== undefined) u.stock = Math.max(0, Math.round((parseFloat(stock) || 0) * 100) / 100);
-      if (description !== undefined) u.description = description;
+      if (description !== undefined) u.description = String(description || '').slice(0, 2000);
+      if (u.price !== undefined && !(u.price >= 0 && u.price <= 10000000)) return res.status(400).json({ error: 'Enter a valid selling price' });
       if (image !== undefined) u.image = image;
       if (expiryDate !== undefined) u.expiryDate = expiryDate ? new Date(expiryDate) : null;
       Object.assign(u, extraProductFields(req.body));
       const r = await col.products.updateOne({ _id: new ObjectId(req.params.productId) }, { $set: u });
       if (!r.matchedCount) return res.status(404).json({ error: 'Product not found' });
+      // Price, cost and stock edits are where shrinkage hides — record each change.
+      const changes = ['price', 'buyingPrice', 'stock']
+        .filter(k => u[k] !== undefined && u[k] !== before[k])
+        .map(k => `${k} ${before[k] === undefined ? '—' : before[k]} → ${u[k]}`);
+      if (changes.length) auditLog(req, 'product_updated', `${before.name}: ${changes.join(', ')}`);
       productCache.del('all_products');
       scheduleAlertSweep(); // stock/expiry may have changed — re-check alerts immediately
       res.json({ success: true, message: 'Product updated!' });
     } catch (e) { console.error('Failed to update product:', e); res.status(500).json({ error: 'Failed to update product' }); }
   });
   app.delete('/api/admin/products/:productId', authenticate, requirePermission('inventory'), async (req, res) => {
-    try { const r = await col.products.deleteOne({ _id: new ObjectId(req.params.productId) }); if (!r.deletedCount) return res.status(404).json({ error: 'Product not found' }); productCache.del('all_products'); res.json({ success: true });} catch (e) { console.error('Failed to delete product:', e); res.status(500).json({ error: 'Failed to delete product' }); }
+    try { if (!ObjectId.isValid(req.params.productId)) return res.status(400).json({ error: 'Invalid product' }); const p = await col.products.findOne({ _id: new ObjectId(req.params.productId) }); const r = await col.products.deleteOne({ _id: new ObjectId(req.params.productId) }); if (!r.deletedCount) return res.status(404).json({ error: 'Product not found' }); auditLog(req, 'product_deleted', `${p ? p.name : req.params.productId} (stock ${p ? p.stock : '?'}, price KES ${p ? p.price : '?'})`); productCache.del('all_products'); res.json({ success: true });} catch (e) { console.error('Failed to delete product:', e); res.status(500).json({ error: 'Failed to delete product' }); }
   });
 
   // ===== CATEGORIES =====
@@ -255,10 +268,11 @@ module.exports = function register(app) {
 
       let u = {};
       if (flashSale !== undefined) u.flashSale = !!flashSale;
-      if (flashSaleDiscount !== undefined) u.flashSaleDiscount = parseFloat(flashSaleDiscount) || 0;
+      // Capped at 90%: a 100% (or bigger) discount would give goods away for free.
+      if (flashSaleDiscount !== undefined) u.flashSaleDiscount = Math.min(90, Math.max(0, parseFloat(flashSaleDiscount) || 0));
 
       if (flashSale) {
-        const duration = parseFloat(durationHours) || 24; // default 24 hours
+        const duration = Math.min(24 * 30, Math.max(0.25, parseFloat(durationHours) || 24)); // default 24 hours, max 30 days
         u.flashSaleExpires = new Date(Date.now() + duration * 60 * 60 * 1000);
       } else {
         u.flashSaleExpires = null;
@@ -266,12 +280,13 @@ module.exports = function register(app) {
 
       const r = await col.products.updateOne({ _id: new ObjectId(productId) }, { $set: u });
       if (!r.matchedCount) return res.status(404).json({ error: 'Product not found' });
+      auditLog(req, 'flash_sale_set', `Product ${productId}: ${flashSale ? `${u.flashSaleDiscount}% off until ${u.flashSaleExpires.toISOString()}` : 'flash sale off'}`);
       productCache.del('all_products');
       // Turning a flash sale ON announces it to every customer device.
       if (flashSale) {
         const product = await col.products.findOne({ _id: new ObjectId(productId) });
         if (product) {
-          const disc = Math.round((parseFloat(flashSaleDiscount) || 0) * 100) / 100;
+          const disc = Math.round((u.flashSaleDiscount || 0) * 100) / 100;
           sendPushToAll('🔥 Flash sale!', `${product.name} — ${disc}% off for ${parseFloat(durationHours) || 24}h. Hurry!`);
         }
       }
@@ -282,7 +297,7 @@ module.exports = function register(app) {
   });
 
   // Dynamic Pricing: Fetch active rules
-  app.get('/api/admin/pricing-rules', authenticate, async (req, res) => {
+  app.get('/api/admin/pricing-rules', authenticate, requirePermission('inventory'), async (req, res) => {
     try {
       res.json(await col.pricing_rules.find().toArray());
     } catch (e) {
@@ -295,9 +310,11 @@ module.exports = function register(app) {
   app.post('/api/admin/pricing-rules', authenticate, authorize('owner'), async (req, res) => {
     const { name, type, discountPercent, conditionValue, startHour, endHour, active } = req.body;
     if (!name || !type || !discountPercent) return res.status(400).json({ error: 'Missing pricing fields' });
+    if (!['happy_hour', 'expiry'].includes(type)) return res.status(400).json({ error: 'Rule type must be happy_hour or expiry' });
+    if (!(parseFloat(discountPercent) > 0 && parseFloat(discountPercent) <= 90)) return res.status(400).json({ error: 'Discount must be between 1% and 90%' });
     try {
       const rule = {
-        name,
+        name: String(name).slice(0, 80),
         type,
         discountPercent: parseFloat(discountPercent),
         conditionValue: parseInt(conditionValue) || 0,
@@ -321,7 +338,12 @@ module.exports = function register(app) {
       const { active, discountPercent } = req.body;
       const update = {};
       if (active !== undefined) update.active = active;
-      if (discountPercent !== undefined) update.discountPercent = parseFloat(discountPercent);
+      if (discountPercent !== undefined) {
+        const d = parseFloat(discountPercent);
+        if (!(d > 0 && d <= 90)) return res.status(400).json({ error: 'Discount must be between 1% and 90%' });
+        update.discountPercent = d;
+      }
+      if (update.active !== undefined) update.active = !!update.active;
       await col.pricing_rules.updateOne({ _id: new ObjectId(req.params.id) }, { $set: update });
       await logAction(req.user.userId, req.user.username, 'UPDATE_PRICING_RULE', `Updated rule ${req.params.id}`, req.user.branchId);
       res.json({ success: true });
@@ -344,7 +366,7 @@ module.exports = function register(app) {
   });
 
   // Inter-Branch Stock Transfers: Fetch transfers list
-  app.get('/api/admin/transfers', authenticate, async (req, res) => {
+  app.get('/api/admin/transfers', authenticate, requirePermission('inventory'), async (req, res) => {
     try {
       const list = await col.stock_transfers.find().sort({ createdAt: -1 }).toArray();
       res.json(list);
@@ -357,14 +379,20 @@ module.exports = function register(app) {
   // Inter-Branch Stock Transfers: Request transfer
   app.post('/api/admin/transfers', authenticate, authorize('owner'), async (req, res) => {
     const { fromBranchId, toBranchId, items } = req.body;
-    if (!fromBranchId || !toBranchId || !items || !items.length) {
+    if (!fromBranchId || !toBranchId || !Array.isArray(items) || !items.length || items.length > 200) {
       return res.status(400).json({ error: 'Invalid transfer details' });
+    }
+    // Whole positive quantities of real product ids only: a NaN or negative
+    // qty would corrupt both branches' stock when the transfer completes.
+    const cleanItems = items.map(it => ({ productId: String((it && it.productId) || ''), qty: parseInt(it && it.qty, 10) }));
+    if (cleanItems.some(it => !ObjectId.isValid(it.productId) || !(it.qty > 0 && it.qty <= 100000))) {
+      return res.status(400).json({ error: 'Each transfer line needs a product and a positive quantity' });
     }
     try {
       const transfer = {
-        fromBranchId,
-        toBranchId,
-        items,
+        fromBranchId: String(fromBranchId).slice(0, 40),
+        toBranchId: String(toBranchId).slice(0, 40),
+        items: cleanItems,
         status: 'pending',
         createdAt: new Date(),
         createdBy: req.user.username
@@ -385,25 +413,29 @@ module.exports = function register(app) {
       if (!transfer) return res.status(404).json({ error: 'Transfer not found' });
       if (transfer.status === 'completed') return res.status(400).json({ error: 'Already completed' });
 
+      // Claim the transfer first so two clicks can't move the stock twice.
+      const claim = await col.stock_transfers.updateOne({ _id: transfer._id, status: { $ne: 'completed' } }, { $set: { status: 'completed', completedAt: new Date() } });
+      if (!claim.matchedCount) return res.status(400).json({ error: 'Already completed' });
       for (const it of transfer.items) {
+        const qty = parseInt(it.qty, 10);
+        if (!(qty > 0) || !ObjectId.isValid(it.productId)) continue; // old malformed line — skip rather than corrupt stock
         const prod = await col.products.findOne({ _id: new ObjectId(it.productId) });
         if (prod) {
           const targetProd = await col.products.findOne({ name: prod.name, branchId: transfer.toBranchId });
           if (targetProd) {
-            await col.products.updateOne({ _id: targetProd._id }, { $inc: { stock: parseInt(it.qty) } });
+            await col.products.updateOne({ _id: targetProd._id }, { $inc: { stock: qty } });
           } else {
             const { _id, ...cleanProd } = prod;
             await col.products.insertOne({
               ...cleanProd,
               branchId: transfer.toBranchId,
-              stock: parseInt(it.qty)
+              stock: qty
             });
           }
-          await col.products.updateOne({ _id: prod._id }, { $inc: { stock: -parseInt(it.qty) } });
+          await col.products.updateOne({ _id: prod._id }, { $inc: { stock: -qty } });
         }
       }
 
-      await col.stock_transfers.updateOne({ _id: transfer._id }, { $set: { status: 'completed', completedAt: new Date() } });
       await logAction(req.user.userId, req.user.username, 'TRANSFER_COMPLETE', `Completed transfer ${transfer._id}`, req.user.branchId);
       res.json({ success: true });
     } catch (err) {

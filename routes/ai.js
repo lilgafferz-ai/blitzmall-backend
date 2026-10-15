@@ -1,11 +1,31 @@
 // Shop and admin AI assistant chat endpoints.
 const { adminLlmSystem, askOllama, customerLlmSystem, detectAdminIntent, detectAiIntent, generateAdminAiResponse, generateAiResponse } = require('../lib/ai');
-const { authenticate, optionalCustomer } = require('../lib/auth');
+const { auditLog, authenticate, hasPermission, optionalCustomer } = require('../lib/auth');
 const { productCache } = require('../lib/cache');
 const { col } = require('../lib/db');
 const { aiChatLimiter } = require('../lib/limiters');
 const { scheduleAlertSweep } = require('../lib/notifications');
 const { pricedCatalog } = require('../lib/pricing');
+
+// The admin assistant reads and writes the same data as the admin screens, so
+// it obeys the same permissions: each intent needs the permission of the tab
+// that shows/edits that data (owner always passes). Anything not listed here
+// is treated as a business-figures question and needs Records access.
+const AI_OPEN_INTENTS = new Set(['greeting', 'general']);
+const AI_INTENT_PERMISSIONS = {
+  out_of_stock: ['inventory', 'sales'], low_stock: ['inventory', 'sales'], expiring: ['inventory', 'sales'],
+  inventory_count: ['inventory', 'sales'], inventory_summary: ['inventory', 'sales'],
+  pending_orders: ['orders', 'records'], delivered_orders: ['orders', 'records'], cancelled_orders: ['orders', 'records'], orders_summary: ['orders', 'records'],
+  loyalty_summary: ['loyalty'], coupons_summary: ['loyalty'], coupon_redemptions: ['loyalty'], list_coupons: ['loyalty'], repeat_customers: ['loyalty'],
+  customer_lookup: ['loyalty', 'credit'], credit_list: ['credit'],
+  expenses: ['expenses', 'records'],
+  // writes (also need the owner or manager role — see AI_WRITE_INTENTS)
+  add_product: ['inventory'], update_price: ['inventory'], set_discount: ['inventory'], adjust_stock: ['inventory'], restock: ['inventory'],
+  add_points: ['loyalty'], create_coupon: ['loyalty'], disable_coupon: ['loyalty'],
+  record_sale: ['sales'], order_action: ['orders'], add_expense: ['expenses'],
+  add_staff: ['records'], refund_sale: ['records']
+};
+const AI_WRITE_INTENTS = new Set(['add_product', 'update_price', 'set_discount', 'adjust_stock', 'add_points', 'create_coupon', 'disable_coupon', 'add_staff', 'refund_sale', 'record_sale', 'restock', 'order_action', 'add_expense']);
 
 module.exports = function register(app) {
   app.post('/api/ai/chat', aiChatLimiter, optionalCustomer, async (req, res) => {
@@ -48,16 +68,22 @@ module.exports = function register(app) {
 
   app.post('/api/admin/ai/chat', authenticate, async (req, res) => {
     const { message } = req.body;
-    if (!message || !message.trim()) return res.status(400).json({ error: 'Message required' });
+    if (!message || !String(message).trim()) return res.status(400).json({ error: 'Message required' });
     try {
-      const text = message.trim();
+      const text = String(message).trim().slice(0, 1000);
       const intent = detectAdminIntent(text);
       // Write commands require owner/manager access - mirrors the role gates on the admin UI.
-      const AI_WRITE_INTENTS = new Set(['add_product','update_price','set_discount','adjust_stock','add_points','create_coupon','disable_coupon','add_staff','refund_sale','record_sale','restock','order_action','add_expense']);
       if (AI_WRITE_INTENTS.has(intent.type) && req.user.role !== 'owner' && req.user.role !== 'manager') {
+        auditLog(req, 'permission_denied', `AI assistant: ${intent.type}`);
         return res.status(403).json({ response: '🔒 That action needs **owner or manager** access. Please ask the shop owner to do it.', action: null });
       }
-      let response = await generateAdminAiResponse(intent, text, req.user.branchId || null, req.user.name);
+      if (!AI_OPEN_INTENTS.has(intent.type) && !hasPermission(req.user, ...(AI_INTENT_PERMISSIONS[intent.type] || ['records']))) {
+        auditLog(req, 'permission_denied', `AI assistant: ${intent.type}`);
+        return res.status(403).json({ response: '🔒 Your account doesn\'t have access to that information. Please ask the shop owner.', action: null });
+      }
+      let response = await generateAdminAiResponse(intent, text, req.user.branchId || null, req.user.name, req.user);
+      // Every change the assistant makes is audit-logged like the same change made on screen.
+      if (intent.didWrite) auditLog(req, 'ai_' + intent.type, `AI assistant: "${text.slice(0, 200)}" → ${String(response || '').replace(/\*\*/g, '').slice(0, 180)}`);
       if (intent.type === 'general') {
         const llm = await askOllama(adminLlmSystem(), text);
         if (llm) response = llm;

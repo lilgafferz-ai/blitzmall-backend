@@ -11,8 +11,8 @@ const { sendPushToPhone, sendPushToStaffUser } = require('../lib/notifications')
 const ACTIVE = ['pending', 'packed', 'on_the_way'];
 const sendErr = (res, e, fallback) => { console.error(fallback, e); return res.status(500).json({ error: fallback }); };
 // Run a status change through the shared order logic; answer like it did.
-const moveOrder = async (res, orderId, status, by) => {
-  const r = await updateOrderStatus(String(orderId), { status }, by);
+const moveOrder = async (res, orderId, status, by, role) => {
+  const r = await updateOrderStatus(String(orderId), { status }, by, { role });
   if (r.status !== 200) { res.status(r.status).json(r.body); return false; }
   return true;
 };
@@ -97,7 +97,7 @@ module.exports = function register(app) {
   const by = (req) => req.user.name || req.user.username || 'rider';
 
   app.post('/api/admin/rider/orders/:orderId/start', authenticate, requirePermission('deliveries', 'orders'), riderAction(async (req, res, order) => {
-    if (!(await moveOrder(res, order._id, 'on_the_way', by(req)))) return;
+    if (!(await moveOrder(res, order._id, 'on_the_way', by(req), req.user.role))) return;
     res.json({ success: true });
   }));
 
@@ -111,7 +111,7 @@ module.exports = function register(app) {
   }));
 
   app.post('/api/admin/rider/orders/:orderId/delivered', authenticate, requirePermission('deliveries', 'orders'), riderAction(async (req, res, order) => {
-    if (!(await moveOrder(res, order._id, 'delivered', by(req)))) return;
+    if (!(await moveOrder(res, order._id, 'delivered', by(req), req.user.role))) return;
     await col.orders.updateOne({ _id: order._id }, { $set: { riderLocation: null } });
     res.json({ success: true });
   }));

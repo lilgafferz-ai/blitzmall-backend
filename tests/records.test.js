@@ -51,9 +51,11 @@ describe('Delete Records (owner wipe tool)', () => {
     expect(countsRes.body.counts.products).toBe(SEED_PRODUCTS);
     expect(countsRes.body.counts.sales).toBe(SEED_SALES);
     // Every known record type is reported (>= 0)
-    for (const key of ['orders', 'expenses', 'credit', 'reviews', 'coupons', 'customers', 'banners', 'loyalty', 'promo_claims', 'saved_baskets', 'stock_transfers', 'shifts', 'audit_logs']) {
+    for (const key of ['orders', 'expenses', 'credit', 'reviews', 'coupons', 'customers', 'banners', 'loyalty', 'promo_claims', 'saved_baskets', 'stock_transfers', 'shifts']) {
       expect(typeof countsRes.body.counts[key]).toBe('number');
     }
+    // The audit trail is not a wipeable record type (it must outlive whoever it records).
+    expect(countsRes.body.counts.audit_logs).toBeUndefined();
 
     // 2) Deleting selected types actually removes their records
     const delRes = await request(app).delete('/api/admin/records').set('Authorization', 'Bearer ' + token).send({ types: ['products', 'sales'] });

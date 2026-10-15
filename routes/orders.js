@@ -4,7 +4,7 @@ const { auditLog, authenticate, authenticateCustomer, authorize, branchFilter, r
 const { SHOP_COORDS } = require('../lib/config');
 const { col } = require('../lib/db');
 const { orderLimiter } = require('../lib/limiters');
-const { cancelOrderAndRestore, placeOrder, updateOrderStatus } = require('../lib/orders');
+const { cancelOrderAndRestore, placeOrder, publicOrder, updateOrderStatus } = require('../lib/orders');
 const { samePhone } = require('../lib/util');
 
 module.exports = function register(app) {
@@ -24,12 +24,12 @@ module.exports = function register(app) {
   app.get('/api/customer-orders/:customerId', authenticateCustomer, async (req, res) => {
     if (!samePhone(req.params.customerId, req.customerPhone)) return res.status(403).json({ error: 'Not your account' });
     try {
-      res.json(await col.orders.find({ customerId: req.customerPhone }).sort({ createdAt: -1 }).toArray());
+      res.json((await col.orders.find({ customerId: req.customerPhone }).sort({ createdAt: -1 }).limit(200).toArray()).map(publicOrder));
     } catch (e) { console.error('Failed to fetch orders:', e); res.status(500).json({ error: 'Failed to fetch orders' }); }
   });
 
   // ===== ORDERS =====
-  app.get('/api/admin/orders', authenticate, async (req, res) => {
+  app.get('/api/admin/orders', authenticate, requirePermission('orders', 'deliveries'), async (req, res) => {
     try { const filter = branchFilter(req); res.json(await col.orders.find(filter).sort({ createdAt: -1 }).toArray()); }
     catch { res.status(500).json({ error: 'Failed' }); }
   });
@@ -39,7 +39,7 @@ module.exports = function register(app) {
   app.put('/api/admin/orders/:orderId', authenticate, requirePermission('orders'), async (req, res) => {
     try {
       const { status, deliveryFee, deliveryProgress } = req.body;
-      const r = await updateOrderStatus(req.params.orderId, { status, deliveryFee, deliveryProgress }, req.user.name || req.user.username || 'staff');
+      const r = await updateOrderStatus(req.params.orderId, { status, deliveryFee, deliveryProgress }, req.user.name || req.user.username || 'staff', { role: req.user.role });
       if (r.status === 200) {
         if (r.cancelled) auditLog(req, 'order_cancelled', `Order ${req.params.orderId} cancelled${r.refundDue ? ' — M-Pesa refund due KES ' + r.refundDue : ''}`);
         else auditLog(req, 'order_updated', `Order ${req.params.orderId} updated${status ? ' → ' + status : ''}${r.feeNotify ? ' — transport fee set to KES ' + r.feeNotify.fee : ''}`);

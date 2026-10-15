@@ -3,7 +3,7 @@
 // editable. Ratings show on the product page and in the catalogue.
 const { ObjectId } = require('mongodb');
 const { col } = require('../lib/db');
-const { authenticate, authorize, authenticateCustomer, optionalCustomer, auditLog } = require('../lib/auth');
+const { authenticate, authorize, authenticateCustomer, optionalCustomer, auditLog, requirePermission } = require('../lib/auth');
 const { reviewLimiter } = require('../lib/limiters');
 const { productCache } = require('../lib/cache');
 
@@ -66,7 +66,7 @@ module.exports = function register(app) {
   });
 
   // ===== ADMIN MODERATION =====
-  app.get('/api/admin/product-reviews', authenticate, async (req, res) => {
+  app.get('/api/admin/product-reviews', authenticate, requirePermission('reviews'), async (req, res) => {
     try {
       const list = await col.product_reviews.find().sort({ createdAt: -1 }).limit(300).toArray();
       res.json(list.map(({ phone, ...r }) => ({ ...r, phoneTail: phone ? '…' + String(phone).slice(-3) : '' })));

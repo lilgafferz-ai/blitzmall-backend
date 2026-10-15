@@ -40,7 +40,6 @@ const RECORD_OPTIONS = [
   { key: 'saved_baskets', label: 'Saved Baskets', icon: '🧺', desc: 'Customers\' saved basket templates' },
   { key: 'stock_transfers', label: 'Stock Transfers', icon: '🔄', desc: 'Inter-branch transfer history' },
   { key: 'shifts', label: 'Shifts', icon: '⏰', desc: 'Cashier shift records' },
-  { key: 'audit_logs', label: 'Audit Logs', icon: '📋', desc: 'Admin action history' },
 ];
 
 // JWT auth helper — adds Bearer token to every admin fetch. The token lives in
@@ -735,6 +734,8 @@ function Admin({ onExit }) {
   };
   const loadOrders = async () => {
     if (user?.role === 'rider') return; // riders only get their run sheet (the server 403s the rest)
+    // The order list needs Orders/Deliveries access (the server 403s everyone else).
+    if (user && user.role !== 'owner' && !(user.permissions || []).some(p => p === 'orders' || p === 'deliveries')) return;
     try {
       const r = await authGet(withBranch(API_URL + '/admin/orders'));
       const list = asArray(await r.json());
@@ -1994,7 +1995,7 @@ const loadStockTransfers = async () => {
           <form onSubmit={handleSetup}>
             <input className="owner-field" type="text" placeholder="Your name" value={setupName} onChange={e => setSetupName(e.target.value)} required />
             <input className="owner-field" type="text" placeholder="Username" value={setupUsername} onChange={e => setSetupUsername(e.target.value)} required />
-            <input className="owner-field" type="password" placeholder="Password (min 6 chars)" value={setupPassword} onChange={e => setSetupPassword(e.target.value)} minLength={6} required />
+            <input className="owner-field" type="password" placeholder="Password (min 8 chars)" value={setupPassword} onChange={e => setSetupPassword(e.target.value)} minLength={6} required />
             <button className="blitz-admin-btn glow-pulse" type="submit">Create Owner Account</button>
             {onExit && <button type="button" className="hq-login-back" onClick={onExit}>← Back to the shop</button>}
           </form>
@@ -3601,7 +3602,7 @@ ${div}
               <form onSubmit={createUser} style={{display:'flex',flexDirection:'column',gap:8,marginBottom:16}}>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
                   <input value={newUsername} onChange={e => setNewUsername(e.target.value)} placeholder="Username" required />
-                  <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Password (min 6 chars)" minLength={6} required />
+                  <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Password (min 8 chars)" minLength={8} required />
                 </div>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
                   <input value={newUserName} onChange={e => setNewUserName(e.target.value)} placeholder="Full name (optional)" />

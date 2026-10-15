@@ -40,7 +40,7 @@ export default function AdminSettings({ ctx }) {
 
   const changePassword = async () => {
     setPwMsg('');
-    if (pw.next.length < 6) { setPwMsg('New password must be at least 6 characters.'); return; }
+    if (pw.next.length < 8) { setPwMsg('New password must be at least 8 characters.'); return; }
     if (pw.next !== pw.confirm) { setPwMsg('The new passwords do not match.'); return; }
     setPwBusy(true);
     try {

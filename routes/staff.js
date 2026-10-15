@@ -4,7 +4,23 @@ const { ObjectId } = require('mongodb');
 const { auditLog, authenticate, authorize, forgetStaffSession, signStaffToken } = require('../lib/auth');
 const { col } = require('../lib/db');
 const { authLimiter } = require('../lib/limiters');
+const { sendPushToStaff } = require('../lib/notifications');
 const { idFilter } = require('../lib/util');
+
+// Staff-account brute-force lock (on top of the per-IP authLimiter).
+const STAFF_MAX_FAILED_LOGINS = 5;
+const STAFF_LOCK_MS = 15 * 60 * 1000;
+// Compared against when the username doesn't exist, so a miss costs the same
+// bcrypt time as a wrong password (no username enumeration by timing).
+const DUMMY_HASH = bcrypt.hashSync('blitzmall-timing-equaliser', 10);
+// New staff passwords: 8+ characters (bcrypt only reads the first 72 bytes).
+const MIN_PASSWORD = 8;
+const passwordProblem = (pw) => {
+  const s = String(pw || '');
+  if (s.length < MIN_PASSWORD) return `Password must be at least ${MIN_PASSWORD} characters`;
+  if (Buffer.byteLength(s) > 72) return 'Password is too long (max 72 characters)';
+  return null;
+};
 
 module.exports = function register(app) {
   // Helper branchFilter definition moved to top level
@@ -27,7 +43,7 @@ module.exports = function register(app) {
   app.post('/api/admin/setup', authLimiter, async (req, res) => {
     const { username, password, name } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-    if (String(password).length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    if (passwordProblem(password)) return res.status(400).json({ error: passwordProblem(password) });
     try {
       const existing = await col.users.findOne({ role: 'owner' });
       if (existing) return res.status(400).json({ error: 'Owner already exists. Login instead.' });
@@ -46,22 +62,45 @@ module.exports = function register(app) {
     } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to create owner' }); }
   });
 
-  // JWT Login
+  // JWT Login. Besides the per-IP authLimiter, each account locks for 15
+  // minutes after 5 wrong passwords (persisted on the user, so a restart or a
+  // botnet of IPs can't reset it), and every failure is audit-logged. Unknown
+  // usernames still pay for a bcrypt compare so response timing doesn't reveal
+  // which usernames exist.
   app.post('/api/admin/login', authLimiter, async (req, res) => {
     let { username, password } = req.body;
     if (!username && password) {
       username = 'owner';
     }
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+    const uname = String(username).toLowerCase().trim().slice(0, 60);
     try {
       const userCount = await col.users.countDocuments();
       if (userCount === 0) {
         return res.status(401).json({ error: 'No owner account found. Create one first.', needsSetup: true });
       }
-      const user = await col.users.findOne({ username: String(username).toLowerCase().trim() });
-      if (!user) return res.status(401).json({ error: 'Invalid username or password' });
-      const match = await bcrypt.compare(String(password), user.password);
-      if (!match) return res.status(401).json({ error: 'Invalid username or password' });
+      const user = await col.users.findOne({ username: uname });
+      const lockedFor = user && user.loginLockedUntil ? new Date(user.loginLockedUntil).getTime() - Date.now() : 0;
+      if (lockedFor > 0) {
+        auditLog(req, 'login_blocked_locked', `Sign-in attempt on locked account ${uname}`, uname);
+        return res.status(429).json({ error: `Too many wrong passwords. Try again in ${Math.ceil(lockedFor / 60000)} min.`, locked: true });
+      }
+      const match = await bcrypt.compare(String(password), user ? user.password : DUMMY_HASH);
+      if (!user || !match) {
+        auditLog(req, 'login_failed', `Wrong ${user ? 'password' : 'username'} for "${uname}"`, uname);
+        if (user) {
+          await col.users.updateOne({ _id: user._id }, { $inc: { failedLogins: 1 } });
+          const fresh = await col.users.findOne({ _id: user._id });
+          if ((fresh && fresh.failedLogins || 0) >= STAFF_MAX_FAILED_LOGINS) {
+            await col.users.updateOne({ _id: user._id }, { $set: { failedLogins: 0, loginLockedUntil: new Date(Date.now() + STAFF_LOCK_MS) } });
+            auditLog(req, 'account_locked', `${uname} locked for 15 min after ${STAFF_MAX_FAILED_LOGINS} wrong passwords`, uname);
+            sendPushToStaff('🔒 Account locked', `Staff account "${uname}" was locked after ${STAFF_MAX_FAILED_LOGINS} wrong passwords.`);
+          }
+        }
+        return res.status(401).json({ error: 'Invalid username or password' });
+      }
+      if (user.failedLogins || user.loginLockedUntil) await col.users.updateOne({ _id: user._id }, { $set: { failedLogins: 0 }, $unset: { loginLockedUntil: '' } });
+      auditLog(req, 'login_success', `${user.username} (${user.role}) signed in`, user.username);
       res.json({ success: true, token: signStaffToken(user), user: publicUser(user) });
     } catch (err) { console.error(err); res.status(500).json({ error: 'Login failed' }); }
   });
@@ -76,7 +115,7 @@ module.exports = function register(app) {
   app.post('/api/admin/me/password', authenticate, authLimiter, async (req, res) => {
     const { currentPassword, newPassword } = req.body || {};
     if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password required' });
-    if (String(newPassword).length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    if (passwordProblem(newPassword)) return res.status(400).json({ error: 'New ' + passwordProblem(newPassword).toLowerCase() });
     try {
       const user = await col.users.findOne(idFilter(req.user.userId));
       if (!user || !(await bcrypt.compare(String(currentPassword), user.password))) {
@@ -105,7 +144,7 @@ module.exports = function register(app) {
   app.post('/api/admin/users', authenticate, authorize('owner'), async (req, res) => {
     const { username, password, name, role, branchId, permissions } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-    if (String(password).length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    if (passwordProblem(password)) return res.status(400).json({ error: passwordProblem(password) });
     if (role && !STAFF_ROLES.includes(role)) return res.status(400).json({ error: 'Role must be cashier, manager, staff or rider' });
     const userPermissions = Array.isArray(permissions)
       ? [...new Set(permissions.filter(p => VALID_PERMISSIONS.includes(p)))]
@@ -154,7 +193,7 @@ module.exports = function register(app) {
       if (branchId !== undefined) u.branchId = branchId || null;
       if (Array.isArray(permissions)) u.permissions = [...new Set(permissions.filter(p => VALID_PERMISSIONS.includes(p)))];
       if (password !== undefined) {
-        if (String(password).length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        if (passwordProblem(password)) return res.status(400).json({ error: passwordProblem(password) });
         u.password = await bcrypt.hash(String(password), 10);
       }
       const accessChanged = u.role !== undefined || u.permissions !== undefined || u.branchId !== undefined || u.password !== undefined;

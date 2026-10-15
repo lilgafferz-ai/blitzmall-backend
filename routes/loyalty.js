@@ -3,15 +3,31 @@ const crypto = require('crypto');
 const { ObjectId } = require('mongodb');
 const { CUSTOMER_AUTH_ERROR, auditLog, authenticate, authenticateCustomer, authorize, optionalCustomer, requirePermission } = require('../lib/auth');
 const { col } = require('../lib/db');
-const { promosLimiter, walletLimiter } = require('../lib/limiters');
-const { LOYALTY_SETTINGS_DEFAULTS, WHEEL_SECTORS, getLoyaltySettings, promoDayKey, runPromo, saveLoyaltySettings, spendPoints, tierFromPoints } = require('../lib/loyalty');
+const { couponCheckLimiter, promosLimiter, walletLimiter } = require('../lib/limiters');
+const { LOYALTY_SETTINGS_DEFAULTS, WHEEL_SECTORS, getLoyaltySettings, incPoints, promoDayKey, runPromo, saveLoyaltySettings, spendPoints, tierFromPoints } = require('../lib/loyalty');
 const { sendPushToPhone } = require('../lib/notifications');
 const { couponDiscount, couponProblem } = require('../lib/orders');
 const { cleanPhone, samePhone } = require('../lib/util');
 const { recordWalletTx } = require('../lib/wallet');
 
+// Points turn into wallet cash (5 pts = KES 1), so hand-typed points are money.
+// The owner may award any amount; a manager at most MANAGER_POINTS_CAP per
+// adjustment (~KES 200). Every adjustment is audit-logged.
+const MANAGER_POINTS_CAP = 1000;
+const manualPointsProblem = (req, pts) => (req.user.role !== 'owner' && pts > MANAGER_POINTS_CAP)
+  ? `Managers can add at most ${MANAGER_POINTS_CAP} points at a time — ask the owner for more.` : null;
+const COUPON_TYPES = ['percent', 'fixed', 'free_delivery'];
+// The loyalty settings the owner may edit, and their sane ranges. Anything else
+// in the request body is ignored (no mass assignment into the settings doc).
+const num = (v, min, max) => { const n = parseFloat(v); return Number.isFinite(n) && n >= min && n <= max ? n : undefined; };
+const SETTINGS_FIELDS = {
+  spinCooldownHours: (v) => num(v, 1, 24 * 30),
+  scratchCooldownHours: (v) => num(v, 1, 24 * 30),
+  minOrdersForPromo: (v) => { const n = num(v, 1, 100); return n === undefined ? undefined : Math.floor(n); }
+};
+
 module.exports = function register(app) {
-  app.get('/api/admin/loyalty', authenticate, async (req, res) => {
+  app.get('/api/admin/loyalty', authenticate, requirePermission('loyalty'), async (req, res) => {
     try { res.json(await col.loyalty.find().sort({ totalSpent: -1 }).toArray()); }
     catch { res.status(500).json({ error: 'Failed' }); }
   });
@@ -85,10 +101,13 @@ module.exports = function register(app) {
       // hacker could mint unlimited loyalty points. Now owner/manager only.
       const cleanPhone = String(phone).replace(/[^0-9]/g, '');
       const pts = Math.max(0, parseInt(points, 10) || 0);
+      if (!cleanPhone || !pts) return res.status(400).json({ error: 'Phone and a positive number of points required' });
+      const capProblem = manualPointsProblem(req, pts);
+      if (capProblem) return res.status(403).json({ error: capProblem });
       const existing = await col.loyalty.findOne({ phone: cleanPhone });
       if (existing) {
-        const newPoints = (existing.points || 0) + pts;
-        await col.loyalty.updateOne({ phone: cleanPhone }, { $set: { points: newPoints, tier: tierFromPoints(newPoints), updatedAt: new Date() } });
+        // $inc, not read-then-$set, so a points spend landing at the same moment is never undone.
+        const newPoints = await incPoints(cleanPhone, pts);
         auditLog(req, 'points_added', `Added ${pts} pts to ${cleanPhone} (new balance ${newPoints})`);
         res.json({ success: true, points: newPoints });
       } else {
@@ -111,21 +130,48 @@ module.exports = function register(app) {
   app.post('/api/admin/coupons', authenticate, authorize('owner', 'manager'), async (req, res) => {
     const { code, type, value, minPurchase, expiresAt, maxUses } = req.body;
     if (!code || !type || value === undefined) return res.status(400).json({ error: 'Code, type and value required' });
+    const cleanCode = String(code).toUpperCase().trim();
+    if (!/^[A-Z0-9_-]{3,30}$/.test(cleanCode)) return res.status(400).json({ error: 'Coupon codes are 3–30 letters, numbers, - or _' });
+    if (!COUPON_TYPES.includes(type)) return res.status(400).json({ error: 'Coupon type must be percent, fixed or free_delivery' });
+    const v = parseFloat(value) || 0;
+    if (type !== 'free_delivery' && !(v > 0)) return res.status(400).json({ error: 'Coupon value must be more than 0' });
+    if (type === 'percent' && v > 90) return res.status(400).json({ error: 'Percent coupons are capped at 90%' });
+    if (type === 'fixed' && v > 100000) return res.status(400).json({ error: 'Fixed coupons are capped at KES 100,000' });
+    const expiry = expiresAt ? new Date(expiresAt) : null;
+    const uses = Math.max(0, parseInt(maxUses, 10) || 0);
     try {
-      const existing = await col.coupons.findOne({ code: code.toUpperCase() });
+      const existing = await col.coupons.findOne({ code: cleanCode });
       if (existing) return res.status(400).json({ error: 'Coupon code already exists' });
       const r = await col.coupons.insertOne({
-        code: code.toUpperCase(), type: type, value: parseFloat(value) || 0,
-        minPurchase: parseFloat(minPurchase) || 0, expiresAt: expiresAt ? new Date(expiresAt) : null,
-        maxUses: parseInt(maxUses, 10) || 0, usedCount: 0, active: true, createdAt: new Date(),
+        code: cleanCode, type, value: type === 'free_delivery' ? 0 : v,
+        minPurchase: Math.max(0, parseFloat(minPurchase) || 0), expiresAt: expiry && !isNaN(expiry.getTime()) ? expiry : null,
+        maxUses: uses, usedCount: 0, usedBy: [], active: true, createdAt: new Date(), createdBy: req.user.username
       });
+      auditLog(req, 'coupon_created', `Coupon ${cleanCode} (${type} ${v}, max uses ${uses})`);
       res.json({ success: true, couponId: r.insertedId });
     } catch (e) { console.error('Failed to create coupon:', e); res.status(500).json({ error: 'Failed to create coupon' }); }
   });
-  app.get('/api/admin/coupons', authenticate, async (req, res) => { try { res.json(await col.coupons.find().sort({ createdAt: -1 }).toArray()); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
-  app.put('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await col.coupons.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { active: !!req.body.active } }); if (!r.matchedCount) return res.status(404).json({ error: 'Coupon not found' }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
-  app.delete('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => { try { const r = await col.coupons.deleteOne({ _id: new ObjectId(req.params.id) }); if (!r.deletedCount) return res.status(404).json({ error: 'Coupon not found' }); res.json({ success: true }); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
-  app.post('/api/coupons/validate', optionalCustomer, async (req, res) => {
+  app.get('/api/admin/coupons', authenticate, requirePermission('loyalty'), async (req, res) => { try { res.json(await col.coupons.find().sort({ createdAt: -1 }).toArray()); } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); } });
+  app.put('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+      if (!ObjectId.isValid(req.params.id)) return res.status(400).json({ error: 'Invalid coupon' });
+      const r = await col.coupons.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { active: !!req.body.active } });
+      if (!r.matchedCount) return res.status(404).json({ error: 'Coupon not found' });
+      auditLog(req, 'coupon_toggled', `Coupon ${req.params.id} ${req.body.active ? 'activated' : 'deactivated'}`);
+      res.json({ success: true });
+    } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); }
+  });
+  app.delete('/api/admin/coupons/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+      if (!ObjectId.isValid(req.params.id)) return res.status(400).json({ error: 'Invalid coupon' });
+      const coupon = await col.coupons.findOne({ _id: new ObjectId(req.params.id) });
+      const r = await col.coupons.deleteOne({ _id: new ObjectId(req.params.id) });
+      if (!r.deletedCount) return res.status(404).json({ error: 'Coupon not found' });
+      auditLog(req, 'coupon_deleted', `Coupon ${coupon ? coupon.code : req.params.id} deleted`);
+      res.json({ success: true });
+    } catch (e) { console.error('API error:', e); res.status(500).json({ error: 'Failed' }); }
+  });
+  app.post('/api/coupons/validate', couponCheckLimiter, optionalCustomer, async (req, res) => {
     const { code } = req.body;
     const total = parseFloat(req.body.total) || 0;
     if (!code) return res.status(400).json({ error: 'Code required' });
@@ -148,35 +194,56 @@ module.exports = function register(app) {
   // ===== LOYALTY ADMIN CONTROLS (owner/manager) =====
   // Owner can retune the whole loyalty economy, award or claw back points, and
   // watch the business maths (reward cost vs sales) without a code deploy.
-  app.get('/api/admin/loyalty/settings', authenticate, async (req, res) => {
+  app.get('/api/admin/loyalty/settings', authenticate, requirePermission('loyalty'), async (req, res) => {
     try { res.json(await getLoyaltySettings()); }
     catch (e) { console.error('Failed to load loyalty settings:', e); res.status(500).json({ error: 'Failed' }); }
   });
 
-  app.put('/api/admin/loyalty/settings', authenticate, authorize('owner', 'manager'), async (req, res) => {
+  // The loyalty economy (earn rate, prize odds, redemption values) decides how
+  // much wallet cash the shop owes, so only the owner may change it, and only
+  // the known fields are taken from the request.
+  app.put('/api/admin/loyalty/settings', authenticate, authorize('owner'), async (req, res) => {
     try {
       const current = await getLoyaltySettings();
-      const next = { ...current, ...(req.body || {}) };
-      // Basic sanity: earnRate and thresholds must be positive numbers.
-      if (!(parseFloat(next.earnRate) > 0)) return res.status(400).json({ error: 'earnRate must be a positive number' });
-      next.earnRate = parseFloat(next.earnRate);
-      next.jackpotEnabled = !!next.jackpotEnabled;
-      if (next.tierThresholds) {
-        const t = next.tierThresholds;
-        if (!(parseFloat(t.silver) > 0 && parseFloat(t.gold) > parseFloat(t.silver) && parseFloat(t.platinum) > parseFloat(t.gold))) {
+      const b = req.body || {};
+      const next = { ...current };
+      // earnRate = KES spent per point; below KES 10/pt would make points nearly free money.
+      if (b.earnRate !== undefined) {
+        const rate = num(b.earnRate, 10, 1000000);
+        if (rate === undefined) return res.status(400).json({ error: 'earnRate must be between 10 and 1,000,000 KES per point' });
+        next.earnRate = rate;
+      }
+      if (b.jackpotEnabled !== undefined) next.jackpotEnabled = !!b.jackpotEnabled;
+      for (const [key, check] of Object.entries(SETTINGS_FIELDS)) {
+        if (b[key] === undefined) continue;
+        const v = check(b[key]);
+        if (v === undefined) return res.status(400).json({ error: `${key} is out of range` });
+        next[key] = v;
+      }
+      if (b.tierThresholds !== undefined) {
+        const t = b.tierThresholds || {};
+        const silver = parseFloat(t.silver), gold = parseFloat(t.gold), platinum = parseFloat(t.platinum);
+        if (!(silver > 0 && gold > silver && platinum > gold && platinum <= 1e9)) {
           return res.status(400).json({ error: 'Tier thresholds must be ascending' });
         }
+        next.tierThresholds = { silver, gold, platinum };
+      }
+      if (b.seasonalEvents !== undefined) {
+        if (!Array.isArray(b.seasonalEvents)) return res.status(400).json({ error: 'seasonalEvents must be a list' });
+        next.seasonalEvents = b.seasonalEvents.slice(0, 10)
+          .filter(e => e && typeof e === 'object')
+          .map(e => ({ name: String(e.name || '').slice(0, 60), pointsMultiplier: num(e.pointsMultiplier, 1, 5) || 1, active: !!e.active }));
       }
       // Sanitise the owner-editable odds tables (fall back to defaults if broken).
       for (const key of ['spinWeights', 'scratchWeights']) {
-        if (Array.isArray(next[key])) {
-          next[key] = next[key]
-            .filter(x => x && typeof x.weight === 'number' && x.weight >= 0)
-            .map(x => ({ prize: String(x.prize), weight: x.weight }));
-        } else {
-          delete next[key];
+        if (Array.isArray(b[key])) {
+          next[key] = b[key]
+            .filter(x => x && typeof x.weight === 'number' && x.weight >= 0 && x.weight <= 1e6)
+            .slice(0, 50)
+            .map(x => ({ prize: String(x.prize).slice(0, 40), weight: x.weight }));
         }
       }
+      if (b.redeemTiers !== undefined) next.redeemTiers = b.redeemTiers;
       // Sanitise the redemption tiers (the store currency): positive points,
       // non-negative KES value, sorted ascending, never empty.
       if (Array.isArray(next.redeemTiers)) {
@@ -189,6 +256,7 @@ module.exports = function register(app) {
         next.redeemTiers = LOYALTY_SETTINGS_DEFAULTS.redeemTiers;
       }
       await saveLoyaltySettings(next);
+      auditLog(req, 'loyalty_settings_saved', `earnRate ${next.earnRate}, cooldowns ${next.spinCooldownHours}h/${next.scratchCooldownHours}h, tiers ${(next.redeemTiers || []).map(t => t.points + 'pts=KES' + t.value).join(' ')}`);
       res.json({ success: true, settings: next });
     } catch (e) { console.error('Failed to save loyalty settings:', e); res.status(500).json({ error: 'Failed' }); }
   });
@@ -199,22 +267,25 @@ module.exports = function register(app) {
     const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '') : '';
     const pts = parseInt(points, 10);
     if (!cleanPhone || !pts) return res.status(400).json({ error: 'Phone and points (positive or negative) required' });
+    if (pts > 0) { const capProblem = manualPointsProblem(req, pts); if (capProblem) return res.status(403).json({ error: capProblem }); }
     try {
       const existing = await col.loyalty.findOne({ phone: cleanPhone });
       if (!existing && pts < 0) return res.status(404).json({ error: 'No loyalty record to claw back from' });
-      const newPoints = Math.max(0, (existing ? existing.points || 0 : 0) + pts);
+      let newPoints = Math.max(0, pts);
       if (existing) {
-        await col.loyalty.updateOne({ phone: cleanPhone }, { $set: { points: newPoints, tier: tierFromPoints(newPoints), updatedAt: new Date() } });
+        newPoints = await incPoints(cleanPhone, pts);
       } else {
         await col.loyalty.insertOne({ phone: cleanPhone, customerName: '', totalSpent: 0, points: newPoints, tier: tierFromPoints(newPoints), createdAt: new Date(), updatedAt: new Date() });
       }
-      await col.redemptions.insertOne({ customerId: cleanPhone, rewardName: `Manual ${pts > 0 ? 'bonus' : 'adjustment'} — ${(reason || '').slice(0, 120)}`, pointsSpent: 0, rewardValue: 0, manualPoints: pts, reason: reason || '', redeemedAt: new Date() });
+      await col.redemptions.insertOne({ customerId: cleanPhone, rewardName: `Manual ${pts > 0 ? 'bonus' : 'adjustment'} — ${String(reason || '').slice(0, 120)}`, pointsSpent: 0, rewardValue: 0, manualPoints: pts, reason: String(reason || '').slice(0, 200), redeemedAt: new Date(), by: req.user.username });
+      // Points convert to wallet cash, so every manual adjustment is audited.
+      auditLog(req, 'points_manual_adjust', `${pts > 0 ? '+' : ''}${pts} pts for ${cleanPhone} (new balance ${newPoints}) — ${String(reason || '').slice(0, 120)}`);
       res.json({ success: true, points: newPoints });
     } catch (e) { console.error('Failed to adjust points:', e); res.status(500).json({ error: 'Failed' }); }
   });
 
   // Loyalty economics: redemption stats, reward cost vs sales, customer LTV.
-  app.get('/api/admin/loyalty/stats', authenticate, async (req, res) => {
+  app.get('/api/admin/loyalty/stats', authenticate, requirePermission('loyalty'), async (req, res) => {
     try {
       const members = await col.loyalty.find().toArray();
       const redemptions = await col.redemptions.find().sort({ redeemedAt: -1 }).toArray();
@@ -247,7 +318,7 @@ module.exports = function register(app) {
 
   // Phone lookups come AFTER the fixed /settings and /stats routes — registered
   // first, /:phone used to swallow them, so Loyalty Controls never loaded or saved.
-  app.get('/api/admin/loyalty/:phone', authenticate, async (req, res) => {
+  app.get('/api/admin/loyalty/:phone', authenticate, requirePermission('loyalty', 'sales'), async (req, res) => {
     try {
       const entry = await col.loyalty.findOne({ phone: req.params.phone });
       if (!entry) return res.json({ exists: false, message: 'No loyalty record found' });
@@ -294,7 +365,7 @@ module.exports = function register(app) {
         col.orders.find({ customerId: phone }).toArray(),
         col.loyalty.findOne({ phone })
       ]);
-      const completed = orders.filter(o => o.status !== 'cancelled');
+      const completed = orders.filter(o => o.status === 'delivered'); // same rule as runPromo
       const totalSpent = completed.reduce((s, o) => s + (o.totalPrice || 0), 0);
       const minOrders = s.minOrdersForPromo || 2;
       const tier = tierFromPoints(loyalty ? loyalty.points : 0);

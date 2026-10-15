@@ -212,10 +212,14 @@ describe('Checkout charges what the shop shows', () => {
   it('stores the cost price on each line so online-order profit is real', async () => {
     const phone = freshPhone();
     const pid = await createProduct({ name: 'ATK-Flour', price: 300, buyingPrice: 220 });
-    await placeOrder(phone, [{ _id: pid, quantity: 1 }]);
-    const order = (await myOrders(phone))[0];
+    const placed = await placeOrder(phone, [{ _id: pid, quantity: 1 }]);
+    // The shop's own view carries the cost price…
+    const order = (await request(app).get('/api/admin/orders').set(owner())).body.find(o => String(o._id) === String(placed.body.orderId));
     expect(order.items[0].buyingPrice).toBe(220);
     expect(_test.orderProfit(order, new Map())).toBe(80);
+    // …but the customer never sees what the shop paid for the goods.
+    expect(placed.body.items[0].buyingPrice).toBeUndefined();
+    expect((await myOrders(phone))[0].items[0].buyingPrice).toBeUndefined();
   });
 
   it('refuses to sell more than is in stock and leaves stock untouched', async () => {

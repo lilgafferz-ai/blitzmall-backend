@@ -137,6 +137,9 @@ app.use((req, res, next) => {
   next();
 });
 app.use(globalLimiter);
+// API answers carry personal and financial data: never let a browser, proxy or
+// shared PC keep a copy (the apps always ask the server fresh).
+app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
 
 // Connect, migrate/seed, and (when run directly) start listening.
