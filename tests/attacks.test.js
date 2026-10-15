@@ -1,4 +1,5 @@
 const request = require('supertest');
+const { ObjectId } = require('mongodb');
 
 // Regression tests for every hole found in the October 2026 review: each test
 // replays an attack that used to work and pins that it no longer does.
@@ -285,7 +286,10 @@ describe('Reports and housekeeping', () => {
     const before = (await request(app).get('/api/admin/summary').set(owner())).body.summary.all.revenue;
     const sale = await request(app).post('/api/admin/sales').set(owner()).send({ items: [{ name: 'Refund me', price: 777, qty: 1 }], paymentMethod: 'cash', amountGiven: 777 });
     expect(sale.body.success).toBe(true);
-    await mockDb().collection('sales').updateOne({ _id: sale.body.saleId }, { $set: { refunded: true } });
+    // saleId comes back as a JSON string; real Mongo stores an ObjectId, so a
+    // string _id silently matches nothing (the mock DB compares as strings).
+    const flip = await mockDb().collection('sales').updateOne({ _id: new ObjectId(sale.body.saleId) }, { $set: { refunded: true } });
+    expect(flip.matchedCount).toBe(1);
     const after = (await request(app).get('/api/admin/summary').set(owner())).body.summary.all.revenue;
     expect(after).toBeCloseTo(before, 2);
   });
