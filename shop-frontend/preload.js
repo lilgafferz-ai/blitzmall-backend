@@ -26,9 +26,12 @@ contextBridge.exposeInMainWorld('blitzUpdater', {
   }
 });
 
-// Settings → Desktop app: version info and "open when Windows starts".
+// Settings → Desktop app: version info, "open when Windows starts" and
+// "keep running in the tray when the window is closed".
 contextBridge.exposeInMainWorld('blitzDesktop', {
   info: () => ipcRenderer.invoke('app:info'),
   getOpenAtLogin: () => ipcRenderer.invoke('app:getOpenAtLogin'),
-  setOpenAtLogin: (on) => ipcRenderer.invoke('app:setOpenAtLogin', !!on)
+  setOpenAtLogin: (on) => ipcRenderer.invoke('app:setOpenAtLogin', !!on),
+  getCloseToTray: () => ipcRenderer.invoke('app:getCloseToTray'),
+  setCloseToTray: (on) => ipcRenderer.invoke('app:setCloseToTray', !!on)
 });

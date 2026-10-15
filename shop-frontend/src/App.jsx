@@ -30,6 +30,8 @@ const ORDERS_CACHE_KEY = 'blitz_orders_cache';
 const OFFLINE_ORDERS_KEY = 'blitz_offline_orders';
 const CUSTOMER_KEY = 'blitz_customer';
 const FAVORITES_KEY = 'blitz_favorites';
+const RECENT_KEY = 'blitz_recently_viewed';
+const LOW_STOCK_BADGE = 5; // "Only N left" shows at or below this
 const SHOP_COORDS = { lat: 0.8273, lng: 35.1207 }; // Blitz Mall, Matunda
 
 // Customer session: the server only trusts the signed token it issued after a
@@ -759,6 +761,13 @@ function App() {
         try { window.history.pushState({ modal: 1 }, ''); } catch (e) {}
         return;
       }
+      // Photo gallery, points converter, cancel-order prompt: back closes them
+      // instead of leaving the screen underneath.
+      if (gallery || showWalletModal || cancelOrderTarget) {
+        setGallery(null); setShowWalletModal(false); setCancelOrderTarget(null);
+        try { window.history.pushState({ modal: 1 }, ''); } catch (e) {}
+        return;
+      }
       const stack = navStackRef.current;
       if (stack.length > 1) {
         stack.pop();
@@ -777,7 +786,7 @@ function App() {
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showSpinWheel, showAiBot, wheelSpinning]);
+  }, [showSpinWheel, showAiBot, wheelSpinning, gallery, showWalletModal, cancelOrderTarget]);
 
   useEffect(() => {
     if (backHandlingRef.current) { backHandlingRef.current = false; return; }
@@ -1312,23 +1321,68 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, customer?.customerId]);
 
+  // Live stock for a product: favourites, saved baskets and the AI bot hand us
+  // stale copies, so always prefer today's catalogue. Infinity = not tracked.
+  const productsRef = useRef(products);
+  productsRef.current = products;
+  const cartRef = useRef(cart);
+  cartRef.current = cart;
+  const toastRef = useRef(showToast);
+  toastRef.current = showToast;
+  const liveStock = useCallback((p) => {
+    if (!p) return Infinity;
+    const id = p._id || p.id;
+    return stockLeft(productsRef.current.find(x => (x._id || x.id) === id) || p);
+  }, []);
+
+  // Returns false when nothing could be added (sold out / all stock already
+  // in the cart) so callers don't jump to the cart for nothing. The server
+  // still has the final say at checkout.
   const addToCart = useCallback((p, qty = 1) => {
     const id = productId(p);
-    const max = stockLeft(p);
-    if (max <= 0) { showToast(`😕 ${p.name} is out of stock`); return; }
+    const max = liveStock(p);
     if (isLoose(p) && qty === 1) qty = qtyStepOf(p);
+    const inCart = (cartRef.current.find(i => productId(i) === id) || {}).quantity || 0;
+    if (max - inCart <= 0) {
+      toastRef.current(max <= 0 ? `😕 ${p.name} is out of stock` : `Only ${formatQty(p, max)} of ${p.name} in stock — it's all in your cart`);
+      return false;
+    }
+    if (snapQty(p, inCart + qty) > max) toastRef.current(`Only ${formatQty(p, max)} of ${p.name} left in stock`);
     setCart(prev => {
       const ex = prev.find(i => productId(i) === id);
-      const want = snapQty(p, (ex ? ex.quantity : 0) + qty);
-      if (want > max) showToast(`Only ${max} of ${p.name} left in stock`);
-      const quantity = Math.min(want, max);
+      const quantity = Math.min(snapQty(p, (ex ? ex.quantity : 0) + qty), max);
       if (ex) return prev.map(i => productId(i) === id ? { ...i, quantity } : i);
       return [...prev, { ...p, quantity }];
     });
+    return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const openProduct = useCallback((p) => { setActiveProduct(p); setDetailQty(qtyStepOf(p)); setScreen('product'); }, []);
+  const [recentIds, setRecentIds] = useState(() => {
+    try { const v = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+  });
+  const openProduct = useCallback((p) => {
+    setActiveProduct(p); setDetailQty(qtyStepOf(p)); setScreen('product');
+    const id = String(p._id || p.id || '');
+    if (!id) return;
+    setRecentIds(prev => {
+      const next = [id, ...prev.filter(x => x !== id)].slice(0, 12);
+      try { localStorage.setItem(RECENT_KEY, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  }, []);
+
+  // Phone share sheet where the browser has one (Chrome, Edge, Safari);
+  // WhatsApp otherwise (the Android app's WebView and the PC app have none).
+  const shareProduct = async (p) => {
+    const link = appInfo?.apkUrl || 'https://blitzmall-backend.onrender.com/';
+    const text = `${p.name} — KES ${p.price} at Blitz Mall 🛒`;
+    if (navigator.share) {
+      try { await navigator.share({ title: p.name, text, url: link }); return; }
+      catch (e) { if (e && e.name === 'AbortError') return; }
+    }
+    window.open(`https://wa.me/?text=${encodeURIComponent(`${text}\nGet the app: ${link}`)}`, '_blank', 'noopener');
+  };
 
   const isFavorite = useCallback((id) => favorites.some(f => productId(f) === id), [favorites]);
   const toggleFavorite = useCallback((p) => {
@@ -2360,6 +2414,10 @@ function App() {
   // HOME — left category rail + search + trending
   if (screen === 'home' || screen === 'category') {
     const term = searchTerm.trim().toLowerCase();
+    const recentProducts = recentIds
+      .map(id => products.find(x => String(productId(x)) === id))
+      .filter(Boolean)
+      .slice(0, 10);
 
     return (
       <div className="screen with-nav shop-scroll" onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
@@ -2504,10 +2562,18 @@ function App() {
           </aside>
 
           <main className="home-main">
+            {!term && activeCategory === 'All' && recentProducts.length > 0 && (
+              <>
+                <h3 className="section-h">👀 {t('Recently viewed')}</h3>
+                <div className="prod-row">
+                  {recentProducts.map(p => <ProductCard key={productId(p)} p={p} left={liveStock(p)} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(p))} onFav={toggleFavorite} />)}
+                </div>
+              </>
+            )}
             <h3 className="section-h">{term ? `Results for “${searchTerm}”` : activeCategory === 'All' ? '🔥 Trending now' : activeCategory}</h3>
             {trending.length === 0 ? <p className="empty">{t('Nothing to show yet.')}</p> : (
               <div className="prod-grid">
-                {trending.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(p))} onFav={toggleFavorite} />)}
+                {trending.map(p => <ProductCard key={productId(p)} p={p} left={liveStock(p)} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(p))} onFav={toggleFavorite} />)}
               </div>
             )}
           </main>
@@ -2679,11 +2745,17 @@ function App() {
   // PRODUCT DETAIL
   if (screen === 'product' && activeProduct) {
     const p = activeProduct;
+    const left = liveStock(p);
+    const soldOut = left <= 0;
+    const maxQty = left === Infinity ? 999 : Math.max(qtyStepOf(p), left);
+    const related = products
+      .filter(x => categoryOf(x) === categoryOf(p) && productId(x) !== productId(p))
+      .slice(0, 10);
     return (
       <div className="screen with-nav">
-        <header className="topbar"><button className="icon-btn back" onClick={() => setScreen('home')}>‹</button>
+        <header className="topbar"><button className="icon-btn back" onClick={goBack}>‹</button>
           <button className="icon-btn cart-icon" onClick={() => setScreen('cart')}>🛒{cartCount > 0 && <span className="cart-badge">{cartCount}</span>}</button></header>
-        <div className="scroll detail-wrap">
+        <div className="scroll detail-wrap" key={productId(p)}>
           <div className="detail-img" onClick={() => { const imgs = allImages(p.image); if (imgs.length) setGallery(imgs); }}>
             {p.image ? <img src={firstImage(p.image)} alt={p.name} className="product-img-element" loading="lazy"/> : <div className="noimg">🛍️</div>}
             {allImages(p.image).length > 1 && <span className="detail-img-hint">📷 {allImages(p.image).length} photos · tap</span>}
@@ -2692,24 +2764,37 @@ function App() {
             <span className="detail-cat">{categoryOf(p)}</span>
             <div className="detail-name-row">
               <h1 className="detail-name">{p.name}</h1>
-              <button className={`detail-fav ${isFavorite(productId(p)) ? 'on' : ''}`} onClick={() => toggleFavorite(p)} aria-label="Toggle favorite">
-                {isFavorite(productId(p)) ? '❤️' : '🤍'}
-              </button>
+              <div className="detail-actions">
+                <button className="detail-fav" onClick={() => shareProduct(p)} aria-label={t('Share')} title={t('Share')}>📤</button>
+                <button className={`detail-fav ${isFavorite(productId(p)) ? 'on' : ''}`} onClick={() => toggleFavorite(p)} aria-label="Toggle favorite">
+                  {isFavorite(productId(p)) ? '❤️' : '🤍'}
+                </button>
+              </div>
             </div>
             <div className="detail-price">KES {p.price}{unitLabel(p) ? <small> / {unitLabel(p)}</small> : null}</div>
             {p.ratingCount > 0 && <div className="detail-rating"><Stars value={p.ratingAvg} /> {p.ratingAvg} ({p.ratingCount})</div>}
             {dealLabels(p).length > 0 && <div className="detail-deals">{dealLabels(p).map(d => <span key={d} className="deal-chip">🏷️ {d}</span>)}</div>}
-            {stockLeft(p) <= 0
-              ? <div className="detail-stock out">{t('Out of stock')}</div>
-              : stockLeft(p) < 5 ? <div className="detail-stock low">{t('Only')} {stockLeft(p)} {t('left')}</div> : null}
+            {left !== Infinity && (
+              <div className={`detail-stock ${soldOut ? 'out' : left <= LOW_STOCK_BADGE ? 'low' : 'ok'}`}>
+                {soldOut ? t('Out of stock') : left <= LOW_STOCK_BADGE ? `${t('Only')} ${formatQty(p, left)} ${t('left')}` : t('In stock')}
+              </div>
+            )}
             {p.description && <p className="detail-desc">{p.description}</p>}
             <div className="qty-row"><span>{t('Quantity')}</span>
-              <div className="qty-ctrl"><button onClick={() => setDetailQty(q => Math.max(qtyStepOf(p), Math.round((q - qtyStepOf(p)) * 100) / 100))}>−</button><b>{formatQty(p, detailQty)}</b><button onClick={() => setDetailQty(q => Math.min(Math.max(qtyStepOf(p), stockLeft(p)), Math.round((q + qtyStepOf(p)) * 100) / 100))}>+</button></div></div>
+              <div className="qty-ctrl"><button onClick={() => setDetailQty(q => Math.max(qtyStepOf(p), Math.round((q - qtyStepOf(p)) * 100) / 100))}>−</button><b>{formatQty(p, detailQty)}</b><button disabled={detailQty >= maxQty} onClick={() => setDetailQty(q => Math.min(maxQty, Math.round((q + qtyStepOf(p)) * 100) / 100))}>+</button></div></div>
             <ProductReviews api={api} productId={productId(p)} signedIn={!!customer} showToast={showToast} />
           </div>
+          {related.length > 0 && (
+            <div className="detail-related">
+              <h3 className="section-h">{t('More in')} {categoryOf(p)}</h3>
+              <div className="prod-row">
+                {related.map(x => <ProductCard key={productId(x)} p={x} left={liveStock(x)} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(x))} onFav={toggleFavorite} />)}
+              </div>
+            </div>
+          )}
         </div>
         <div className="detail-bar"><div className="detail-bar-total">KES {lineTotalFor(p, detailQty)}</div>
-          <button className="btn-neon" disabled={stockLeft(p) <= 0} onClick={() => { addToCart(p, detailQty); setScreen('cart'); }}>{stockLeft(p) <= 0 ? t('Out of stock') : t('Add to cart')}</button></div>
+          <button className="btn-neon" disabled={soldOut} onClick={() => { if (addToCart(p, detailQty)) setScreen('cart'); }}>{soldOut ? t('Out of stock') : t('Add to cart')}</button></div>
         {gallery && (
           <div className="img-gallery-overlay" onClick={() => setGallery(null)}>
             <button className="gallery-close" onClick={() => setGallery(null)}>✕</button>
@@ -3216,7 +3301,7 @@ function App() {
           <div className="empty-cart"><span>🤍</span><p>{t('No favorites yet')}</p><button className="btn-ghost" onClick={() => setScreen('home')}>{t('Browse products')}</button></div>
         ) : (
           <div className="prod-grid" style={{ padding: '0 16px' }}>
-            {favorites.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} fav onFav={toggleFavorite} />)}
+            {favorites.map(p => <ProductCard key={productId(p)} p={p} left={liveStock(p)} onOpen={openProduct} onAdd={addToCart} fav onFav={toggleFavorite} />)}
           </div>
         )}
       </div>
@@ -3290,7 +3375,7 @@ function App() {
             <>
               <div className="offer-section-title">{t('🏷️ Discounted Goods')}</div>
               <div className="prod-grid" style={{ padding: '0 16px' }}>
-                {discounted.map(p => <ProductCard key={productId(p)} p={p} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(p))} onFav={toggleFavorite} />)}
+                {discounted.map(p => <ProductCard key={productId(p)} p={p} left={liveStock(p)} onOpen={openProduct} onAdd={addToCart} fav={isFavorite(productId(p))} onFav={toggleFavorite} />)}
               </div>
             </>
           )}
@@ -3423,9 +3508,12 @@ function App() {
   return null;
 }
 
-const ProductCard = React.memo(function ProductCard({ p, onOpen, onAdd, fav, onFav }) {
+const ProductCard = React.memo(function ProductCard({ p, left = Infinity, onOpen, onAdd, fav, onFav }) {
+  const soldOut = left <= 0;
   return (
-    <div className="prod-card" onClick={() => onOpen(p)}>
+    <div className={`prod-card${soldOut ? ' soldout' : ''}`} onClick={() => onOpen(p)}>
+      {soldOut ? <span className="prod-stock out">{t('Out of stock')}</span>
+        : left <= LOW_STOCK_BADGE ? <span className="prod-stock low">{t('Only')} {formatQty(p, left)} {t('left')}</span> : null}
       {onFav && (
         <button
           className={`prod-fav ${fav ? 'on' : ''}`}
@@ -3437,7 +3525,7 @@ const ProductCard = React.memo(function ProductCard({ p, onOpen, onAdd, fav, onF
       )}
       <div className="prod-img">{p.image ? <img src={firstImage(p.image)} alt={p.name} className="product-img-element" loading="lazy"/> : <div className="noimg">🛍️</div>}</div>
       <div className="prod-meta"><span className="prod-name">{p.name}</span><span className="prod-price">KES {p.price}</span></div>
-      <button className="prod-add" onClick={e => { e.stopPropagation(); onAdd(p, 1); }}>+</button>
+      <button className="prod-add" disabled={soldOut} aria-label={soldOut ? t('Out of stock') : `${t('Add to cart')}: ${p.name}`} onClick={e => { e.stopPropagation(); onAdd(p, 1); }}>+</button>
     </div>
   );
 });

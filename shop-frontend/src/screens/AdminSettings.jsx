@@ -72,6 +72,7 @@ export default function AdminSettings({ ctx }) {
   // ----- updates -----
   const [desktopInfo, setDesktopInfo] = useState(null);
   const [openAtLogin, setOpenAtLogin] = useState(null);
+  const [closeToTray, setCloseToTray] = useState(null);
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateReady, setUpdateReady] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -82,6 +83,8 @@ export default function AdminSettings({ ctx }) {
     if (d) {
       d.info().then(setDesktopInfo).catch(() => {});
       d.getOpenAtLogin().then(setOpenAtLogin).catch(() => {});
+      // Older desktop builds have no tray — the row stays hidden there.
+      if (typeof d.getCloseToTray === 'function') d.getCloseToTray().then(setCloseToTray).catch(() => {});
     }
     const u = updater();
     let off = null;
@@ -150,6 +153,11 @@ export default function AdminSettings({ ctx }) {
     if (!d) return;
     try { setOpenAtLogin(await d.setOpenAtLogin(on)); } catch (e) {}
   };
+  const toggleCloseToTray = async (on) => {
+    const d = desktop();
+    if (!d || typeof d.setCloseToTray !== 'function') return;
+    try { setCloseToTray(await d.setCloseToTray(on)); } catch (e) {}
+  };
 
   const switchServer = (url) => {
     try { localStorage.setItem('blitz_api_url', url); } catch (e) {}
@@ -196,6 +204,10 @@ export default function AdminSettings({ ctx }) {
         <SettingsGroup title="Desktop app">
           <SettingsRow icon="🚀" tone="orange" label="Open when Windows starts" sub="Blitz Mall HQ launches automatically at login"
             right={openAtLogin === null ? null : <Toggle checked={openAtLogin} label="Open at login" onChange={toggleOpenAtLogin} />} />
+          {closeToTray !== null && (
+            <SettingsRow icon="📥" tone="blue" label="Keep running when closed" sub="Closing the window tucks BlitzMall into the system tray so order and stock alerts keep arriving"
+              right={<Toggle checked={closeToTray} label="Keep running when closed" onChange={toggleCloseToTray} />} />
+          )}
         </SettingsGroup>
       )}
 

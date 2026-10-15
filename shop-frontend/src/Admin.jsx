@@ -1652,7 +1652,7 @@ const loadStockTransfers = async () => {
   const pid = (p) => p._id || p.id;
   const stockOf = (id) => { const p = products.find(x => pid(x) === id); return p ? (p.stock ?? null) : null; };
   const addToSale = (p) => { const id = pid(p); setSaleCart(c => { const ex = c.find(i => i.productId === id); if (ex) return c.map(i => i.productId === id ? { ...i, qty: snapQty(i, i.qty + qtyStepOf(i)) } : i); return [...c, { productId: id, name: p.name, price: p.price||0, buyingPrice: p.buyingPrice||0, qty: qtyStepOf(p), unit: p.unit, soldLoose: p.soldLoose, qtyStep: p.qtyStep, bulkDeals: p.bulkDeals }]; }); setScan(''); setLastChange(null); if (scanRef.current) scanRef.current.focus(); };
-  const handleScanSubmit = (e) => { e.preventDefault(); const t = scan.trim(); if (!t) return; const byCode = products.find(p => p.barcode && p.barcode === t); if (byCode) { addToSale(byCode); return; } const byName = products.filter(p => p.name.toLowerCase().includes(t.toLowerCase())); if (byName.length === 1) addToSale(byName[0]); };
+  const handleScanSubmit = (e) => { e.preventDefault(); const t = scan.trim(); if (!t) return; const byCode = products.find(p => p.barcode && p.barcode === t); if (byCode) { addToSale(byCode); return; } const picked = scanSel >= 0 ? scanMatches[scanSel] : null; if (picked && (picked.stock ?? 1) > 0) { addToSale(picked); return; } const byName = products.filter(p => p.name.toLowerCase().includes(t.toLowerCase())); if (byName.length === 1) addToSale(byName[0]); };
   const scanMatches = React.useMemo(() => {
     const term = scan.trim().toLowerCase();
     return term ? products.filter(p => p.name.toLowerCase().includes(term) || (p.barcode||'').includes(scan)).slice(0,6) : [];
@@ -1685,6 +1685,54 @@ const loadStockTransfers = async () => {
     // Cash / split: record immediately
     await completeSaleRecord();
   };
+
+  // ===== Till keyboard shortcuts (PC cashiers; harmless on touch screens) =====
+  // F2 or / = scan box · ↑↓ + Enter = pick a suggestion · F4 Cash · F6 M-Pesa ·
+  // F7 Split · F8 Airtel · F9 or Ctrl+Enter = complete sale · Esc = clear / new sale
+  const [scanSel, setScanSel] = useState(-1);
+  useEffect(() => { setScanSel(-1); }, [scan]);
+  const posKeysRef = useRef(null);
+  posKeysRef.current = { completeSale, saleCart, receipt, scan, stkStatus, showCloseShiftModal };
+  useEffect(() => {
+    if (tab !== 'sales' || !activeShift) return undefined;
+    const PAY_KEYS = { F4: 'cash', F6: 'mpesa', F7: 'split', F8: 'airtel' };
+    const onKey = (e) => {
+      const st = posKeysRef.current;
+      if (!st || st.showCloseShiftModal) return;
+      const el = document.activeElement;
+      const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+      const focusScan = () => { if (scanRef.current) { scanRef.current.focus(); scanRef.current.select(); } };
+      if (e.key === 'F2' || (e.key === '/' && !typing)) { e.preventDefault(); focusScan(); return; }
+      if (PAY_KEYS[e.key]) { e.preventDefault(); if (!st.receipt) setPayMethod(PAY_KEYS[e.key]); return; }
+      if (e.key === 'F9' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) {
+        e.preventDefault();
+        if (!st.receipt && st.saleCart.length && st.stkStatus !== 'waiting') st.completeSale();
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (st.receipt) { setReceipt(null); setTimeout(focusScan, 0); return; }
+        if (st.scan) { setScan(''); focusScan(); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [tab, activeShift]);
+  const onScanKeyDown = (e) => {
+    if (!scanMatches.length) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); setScanSel(i => (i + 1) % scanMatches.length); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setScanSel(i => (i <= 0 ? scanMatches.length - 1 : i - 1)); }
+  };
+
+  // One-tap tender amounts: the exact total plus the next round notes up.
+  const quickCash = React.useMemo(() => {
+    if (!(saleTotal > 0)) return [];
+    const opts = [Math.ceil(saleTotal)];
+    for (const step of [50, 100, 200, 500, 1000]) {
+      const v = Math.ceil(saleTotal / step) * step;
+      if (v > opts[opts.length - 1] && !opts.includes(v)) opts.push(v);
+    }
+    return opts.slice(0, 5);
+  }, [saleTotal]);
   const voidSale = async (id) => { if (!window.confirm('Void this sale and restore stock?')) return; try { const r = await authDelete(API_URL + '/admin/sales/' + id); if ((await r.json()).success) { loadProducts(); loadSales(); } } catch (e) { console.error(e); } };
   const addExpense = async (e) => { e.preventDefault(); if (!expDesc || expAmount === '') return; try { const r = await authPost(API_URL + '/admin/expenses', { description: expDesc, amount: expAmount, branchId: activeBranchId || undefined }); if ((await r.json()).success) { setExpDesc(''); setExpAmount(''); loadExpenses(); loadSummary(); } } catch (e) { console.error(e); } };
   const delExpense = async (id) => { try { const r = await authDelete(API_URL + '/admin/expenses/' + id); if ((await r.json()).success) { loadExpenses(); loadSummary(); } } catch (e) { console.error(e); } };
@@ -2267,7 +2315,7 @@ ${div}
             </div>
             <form className="pos-scan" onSubmit={handleScanSubmit}>
               <span>📷</span>
-              <input ref={scanRef} autoFocus value={scan} onChange={e => setScan(e.target.value)} placeholder="Scan barcode or type product name…" />
+              <input ref={scanRef} autoFocus value={scan} onChange={e => setScan(e.target.value)} onKeyDown={onScanKeyDown} placeholder="Scan barcode or type product name…" />
               <button className="blitz-admin-btn small" type="submit">Find</button>
               {window.BarcodeDetector && <button type="button" className="blitz-admin-btn small" onClick={cameraScan ? stopCamera : startCamera} style={{background:'var(--grad)',padding:'10px 12px',fontSize:'.85rem'}}>{cameraScan ? '✕' : '📸'}</button>}
             </form>
@@ -2279,8 +2327,8 @@ ${div}
             )}
             {scanMatches.length > 0 && (
               <div className="pos-suggest">
-                {scanMatches.map(p => (
-                  <button key={pid(p)} onClick={() => addToSale(p)} disabled={(p.stock??1) <= 0}>
+                {scanMatches.map((p, k) => (
+                  <button key={pid(p)} className={k === scanSel ? 'sel' : ''} onClick={() => addToSale(p)} disabled={(p.stock??1) <= 0}>
                     <span>{p.name}</span>
                     <span className="pos-suggest-meta">{money(p.price)} · {stockTag(p.stock)}</span>
                   </button>
@@ -2337,7 +2385,7 @@ ${div}
                   <button className={payMethod==="split"?"on":""} onClick={() => setPayMethod("split")}>🔀 Split</button>
                 <button className={payMethod==="airtel"?"on":""} onClick={() => setPayMethod("airtel")}>📲 Airtel</button>
                 </div>
-                {payMethod === "cash" && <div className="pos-cash"><label>Amount given<input type="text" inputMode="decimal" value={amountGiven} onChange={e => { const val = e.target.value; if (val === '' || /^\d*\.?\d*$/.test(val)) setAmountGiven(val); }} placeholder="e.g. 500" /></label><div className={"pos-change" + (change > 0 ? " show" : "")}>Change to give: <b>{money(change)}</b></div></div>}
+                {payMethod === "cash" && <div className="pos-cash"><label>Amount given<input type="text" inputMode="decimal" value={amountGiven} onChange={e => { const val = e.target.value; if (val === '' || /^\d*\.?\d*$/.test(val)) setAmountGiven(val); }} placeholder="e.g. 500" /></label>{quickCash.length > 0 && <div className="pos-quick-cash">{quickCash.map((v, k) => <button type="button" key={v} className={parseFloat(amountGiven) === v ? 'on' : ''} onClick={() => setAmountGiven(String(v))}>{k === 0 ? 'Exact' : money(v)}</button>)}</div>}<div className={"pos-change" + (change > 0 ? " show" : "")}>Change to give: <b>{money(change)}</b></div></div>}
                 {payMethod === "mpesa" && (
                   <div className="pos-cash">
                     <label>Customer phone *<input type="tel" value={custPhone} onChange={e => setCustPhone(e.target.value)} placeholder="07xx xxx xxx" /></label>
@@ -2349,6 +2397,7 @@ ${div}
                 {payMethod === "split" && <div className="pos-cash"><label>Cash part<input type="text" inputMode="decimal" value={cashPart} onChange={e => { const val = e.target.value; if (val === '' || /^\d*\.?\d*$/.test(val)) setCashPart(val); }} placeholder="KES" /></label><label>M-Pesa part<input type="text" inputMode="decimal" value={mpesaPart} onChange={e => { const val = e.target.value; if (val === '' || /^\d*\.?\d*$/.test(val)) setMpesaPart(val); }} placeholder="KES" /></label><div className="pos-change show">Covered: {money(splitCovered)} / {money(saleTotal)}</div></div>}
                 {payMethod === "airtel" && <div className="pos-cash"><p style={{color:"var(--muted)",fontSize:".85rem"}}>Customer sends Airtel Money manually to your number. Confirm after you see it on your phone.</p></div>}
                 <button className="blitz-admin-btn pos-complete" disabled={!saleCart.length} onClick={completeSale}>Complete sale</button>
+                <div className="pos-keys" aria-hidden="true"><span><kbd>F2</kbd> scan</span><span><kbd>↑↓</kbd> pick</span><span><kbd>F4</kbd> cash</span><span><kbd>F6</kbd> M-Pesa</span><span><kbd>F9</kbd> complete</span><span><kbd>Esc</kbd> clear</span></div>
               </>
             )}
             <div className="pos-recent">

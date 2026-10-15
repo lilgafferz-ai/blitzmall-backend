@@ -17,7 +17,7 @@ const SW = {
   'Home': 'Nyumbani', 'Cart': 'Kikapu', 'Checkout': 'Lipia', 'Profile': 'Wasifu', 'Account': 'Akaunti',
   '🏪 Shop': '🏪 Duka', 'Send': 'Tuma', 'Save': 'Hifadhi', 'Load': 'Pakia', 'Apply': 'Tumia', 'Applied:': 'Imetumika:',
   'Subtotal': 'Jumla ndogo', 'Total': 'Jumla', 'Discount': 'Punguzo', 'Quantity': 'Idadi',
-  'Out of stock': 'Imeisha', 'Add to cart': 'Weka kikapuni', 'Today': 'Leo', 'Tomorrow': 'Kesho',
+  'Out of stock': 'Imeisha', 'In stock': 'Zipo', 'Recently viewed': 'Ulizotazama karibuni', 'More in': 'Zaidi katika', 'Share': 'Shiriki', 'Add to cart': 'Weka kikapuni', 'Today': 'Leo', 'Tomorrow': 'Kesho',
   'Network error': 'Hitilafu ya mtandao', 'Nothing to show yet.': 'Hakuna cha kuonyesha bado.',
   // sign-in
   'Sign in to start shopping': 'Ingia uanze kununua', 'Enter Blitz Mall': 'Ingia Blitz Mall',

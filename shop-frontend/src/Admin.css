@@ -541,3 +541,14 @@ input, textarea, select {
 .pos-qty-input{width:64px;text-align:center;background:transparent;color:inherit;border:1px solid var(--line,#2a2a33);border-radius:6px;padding:4px;}
 .ax-slotrow input{min-width:0;width:100%;box-sizing:border-box;}
 @media (max-width:600px){.ax-slotrow{grid-template-columns:1fr 1fr;}.ax-slotrow input:first-child{grid-column:1/-1;}}
+
+/* ===== Till: suggestion picked with the arrow keys, quick tender, shortcut hints ===== */
+.pos-suggest button.sel { border-color:var(--orange); background:rgba(255,122,26,.12); box-shadow:0 0 0 2px rgba(255,122,26,.18); }
+.pos-quick-cash { display:flex; flex-wrap:wrap; gap:6px; }
+.pos-quick-cash button { flex:1 1 auto; min-width:64px; background:var(--bg-2); border:1px solid var(--line); color:var(--text); border-radius:9px; padding:9px 8px; font-family:inherit; font-weight:700; font-size:.82rem; cursor:pointer; }
+.pos-quick-cash button:hover { border-color:var(--orange); }
+.pos-quick-cash button.on { background:var(--grad); color:#1a0a00; border-color:transparent; }
+.pos-keys { display:flex; flex-wrap:wrap; justify-content:center; gap:6px 12px; margin-top:10px; color:var(--muted); font-size:.72rem; }
+.pos-keys kbd { display:inline-block; min-width:18px; padding:1px 5px; margin-right:3px; border:1px solid var(--line); border-bottom-width:2px; border-radius:5px; background:var(--card); color:var(--text); font-family:inherit; font-size:.7rem; text-align:center; }
+@media (hover: none), (max-width: 900px) { .pos-keys { display:none; } }
+@media print { .pos-keys, .pos-quick-cash { display:none !important; } }
