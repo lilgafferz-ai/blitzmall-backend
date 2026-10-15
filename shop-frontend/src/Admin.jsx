@@ -2684,7 +2684,7 @@ ${div}
                       </div>
                       <div style={{display: 'flex', gap: 8, alignItems: 'center'}}>
                         <a href={`https://www.google.com/maps/search/?api=1&query=${o.gpsCoords.lat},${o.gpsCoords.lng}`} target="_blank" rel="noreferrer" style={{color: 'var(--gold)', textDecoration: 'underline', fontWeight: 'bold', fontSize: '.78rem'}}>📍 Open in Maps</a>
-                        <a href={`https://www.google.com/maps/dir/?api=1&origin=0.8273,35.1207&destination=${o.gpsCoords.lat},${o.gpsCoords.lng}&travelmode=driving`} target="_blank" rel="noreferrer" style={{color: 'var(--orange)', textDecoration: 'underline', fontWeight: 'bold', fontSize: '.78rem'}}>🧭 Get Directions</a>
+                        <a href={`https://www.google.com/maps/dir/?api=1&origin=0.825155,35.121834&destination=${o.gpsCoords.lat},${o.gpsCoords.lng}&travelmode=driving`} target="_blank" rel="noreferrer" style={{color: 'var(--orange)', textDecoration: 'underline', fontWeight: 'bold', fontSize: '.78rem'}}>🧭 Get Directions</a>
                       </div>
                       <div className="admin-map-thumb">
                         <a href={`https://www.google.com/maps/search/?api=1&query=${o.gpsCoords.lat},${o.gpsCoords.lng}`} target="_blank" rel="noreferrer">
