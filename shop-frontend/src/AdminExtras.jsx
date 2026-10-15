@@ -606,6 +606,14 @@ export function CustomersTab({ api }) {
     openDetail(phone); load(q.trim());
   };
 
+  const deleteOne = async (phone, name) => {
+    if (!window.confirm(`Delete ${name || phone}'s account?\n\nTheir points, wallet, AI chats, baskets and vouchers are removed (a backup copy is kept). Orders stay. The number can then sign up fresh.`)) return;
+    const d = await json(await api.authPost(api.API_URL + '/admin/customers/' + encodeURIComponent(phone) + '/delete', {}));
+    if (!d.success) { alert(d.error || 'Failed'); return; }
+    alert('✅ Account deleted. The number can now sign up again.');
+    setSelected(null); setDetail(null); load(q.trim());
+  };
+
   // Two-step: preview what would go, then the owner types the phrase to confirm.
   const wipeAll = async () => {
     const p = await json(await api.authPost(api.API_URL + '/admin/customers/wipe', { dryRun: true }));
@@ -690,6 +698,7 @@ export function CustomersTab({ api }) {
                 <div className="ax-actions">
                   <button className="blitz-admin-btn small" onClick={() => resetPin(detail.phone, detail.name)}>Reset PIN (recover account)</button>
                   {!detail.isOwner && <button className="blitz-admin-btn small" onClick={() => makeOwner(detail.phone, detail.name)}>👑 Make this my owner account</button>}
+                  <button className="pos-void" onClick={() => deleteOne(detail.phone, detail.name)}>🗑️ Delete this customer</button>
                 </div>
                 <p className="blitz-admin-muted" style={{ fontSize: '.72rem' }}>Resets the PIN only — you never see it. Confirm it's really them first (ask their security question). Money, points and orders stay safe.</p>
               </div>
