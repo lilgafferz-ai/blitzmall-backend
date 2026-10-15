@@ -37,13 +37,15 @@ services:
       - key: AT_SENDER_ID
         sync: false
       # Shows the sign-in code ON SCREEN when an SMS fails = anyone can sign into
-      # any account (insecure). It MUST stay "true" for now because SMS is NOT
-      # configured (no Africa's Talking keys) — turning it off would lock every
-      # customer out. Once AT_USERNAME + AT_API_KEY + an APPROVED AT_SENDER_ID are
-      # set AND SMS delivery is verified, set this to "false" in the Render
-      # dashboard (this service reads env from the dashboard, not this value).
+      # any account (insecure). Dashboard-managed (sync: false) so the Render
+      # dashboard is the SINGLE source of truth and a blueprint sync can never
+      # silently flip it. Code defaults to ON (shown) when the var is unset —
+      # see lib/sms.js otpScreenFallback(). Keep it ON until Africa's Talking SMS
+      # is live (AT_USERNAME + AT_API_KEY + an APPROVED AT_SENDER_ID) AND a real
+      # phone has received a code; THEN add OTP_SCREEN_FALLBACK=false in the
+      # dashboard. Rollback = set it back to true (or delete it) in the dashboard.
       - key: OTP_SCREEN_FALLBACK
-        value: "true"
+        sync: false
       # Random string; append ?secret=<same value> to CALLBACK_URL
       - key: MPESA_CALLBACK_SECRET
         sync: false
