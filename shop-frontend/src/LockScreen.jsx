@@ -1,6 +1,19 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { setPin, verifyPin, setLockConfig, getLockConfig, biometricVerify } from './appLock';
 
+// On the PC app (Electron build or a desktop browser) the PIN is typed on the
+// physical keyboard, so the on-screen pad is hidden there. Phones keep the pad.
+const isPcApp = (() => {
+  try {
+    const ua = (navigator.userAgent || '').toLowerCase();
+    const isMobileNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+    const isPhone = /android|iphone|ipad|ipod|mobile/.test(ua);
+    return /electron/.test(ua) || (!isMobileNative && !isPhone);
+  } catch (e) {
+    return false;
+  }
+})();
+
 // Full-screen app lock. Modes:
 //   'setup'  — create the first PIN (enables the lock)
 //   'change' — change an existing PIN: verify the CURRENT PIN, then set a new one
@@ -85,6 +98,30 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
   };
   const backspace = () => { if (!busy) setEntry(prev => prev.slice(0, -1)); };
 
+  const showFingerprintView = mode === 'unlock' && hasBiometric && !showPin;
+
+  // Physical keyboard: digits (top row or numpad), Backspace/Delete, Enter.
+  // The ref keeps the window listener pointed at the latest entry/busy/stage.
+  const keyHandler = useRef(null);
+  keyHandler.current = (e) => {
+    if (showFingerprintView || e.ctrlKey || e.altKey || e.metaKey) return;
+    if (/^[0-9]$/.test(e.key)) {
+      e.preventDefault();
+      if (!e.repeat) press(e.key);
+    } else if (e.key === 'Backspace' || e.key === 'Delete') {
+      e.preventDefault();
+      backspace();
+    } else if (e.key === 'Enter' || e.key === 'NumpadEnter') {
+      e.preventDefault();
+      if (!busy && entry.length >= PIN_MIN) submit(entry);
+    }
+  };
+  useEffect(() => {
+    const onKey = (e) => keyHandler.current && keyHandler.current(e);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const title = mode === 'unlock'
     ? 'Enter your PIN'
     : stage === 'current' ? 'Enter your current PIN'
@@ -95,8 +132,6 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
     : stage === 'current' ? 'Confirm it’s you before changing your PIN'
       : stage === 'create' ? 'Set a 4–6 digit PIN — you’ll use it to sign in and unlock the app'
         : 'Type it again to confirm';
-
-  const showFingerprintView = mode === 'unlock' && hasBiometric && !showPin;
 
   return (
     <div className="screen center-screen applock-screen">
@@ -124,14 +159,20 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
               ))}
             </div>
             {error && <div className="applock-error">{error}</div>}
-            <div className="applock-pad">
-              {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => (
-                <button key={n} type="button" className="applock-key" disabled={busy} onClick={() => press(String(n))}>{n}</button>
-              ))}
-              <button type="button" className="applock-key applock-key-ok" disabled={busy || entry.length < PIN_MIN} onClick={() => submit(entry)}>✓</button>
-              <button type="button" className="applock-key" disabled={busy} onClick={() => press('0')}>0</button>
-              <button type="button" className="applock-key applock-key-back" disabled={busy || !entry} onClick={backspace}>⌫</button>
-            </div>
+            {isPcApp ? (
+              <p className="applock-kbd-hint">
+                {busy ? 'Checking…' : <>Type your PIN on the keyboard{PIN_MIN < PIN_MAX ? <> · press <kbd>Enter</kbd> to confirm</> : null}</>}
+              </p>
+            ) : (
+              <div className="applock-pad">
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => (
+                  <button key={n} type="button" className="applock-key" disabled={busy} onClick={() => press(String(n))}>{n}</button>
+                ))}
+                <button type="button" className="applock-key applock-key-ok" disabled={busy || entry.length < PIN_MIN} onClick={() => submit(entry)}>✓</button>
+                <button type="button" className="applock-key" disabled={busy} onClick={() => press('0')}>0</button>
+                <button type="button" className="applock-key applock-key-back" disabled={busy || !entry} onClick={backspace}>⌫</button>
+              </div>
+            )}
             {mode === 'unlock' && hasBiometric && (
               <button className="btn-ghost applock-alt" onClick={() => { triedBio.current = false; setShowPin(false); runBiometric(); }}>Use fingerprint</button>
             )}

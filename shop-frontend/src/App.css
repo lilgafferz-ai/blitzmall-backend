@@ -1547,6 +1547,8 @@ input, textarea {
 .applock-key-back{font-size:1.25rem;}
 .applock-key-ok{font-size:1.4rem;color:var(--orange,#ff8a3d);}
 .applock-key-ok:not(:disabled){border-color:var(--orange,#ff8a3d);}
+.applock-kbd-hint{font-size:.82rem;color:var(--muted);margin:2px 0 10px;text-align:center;}
+.applock-kbd-hint kbd{font-family:inherit;font-size:.75rem;padding:1px 6px;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;background:var(--bg-2);color:var(--text);}
 .applock-alt{margin-top:10px;font-size:.82rem;}
 .applock-cancel{opacity:.75;}
 
