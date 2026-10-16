@@ -132,7 +132,11 @@ that API key in Google Cloud.
    small UI changes: 8-character password hints, no "Audit Logs" in the Delete tab, and the till no longer
    polling orders for staff without Orders access.
 3. **Render env**: confirm `NODE_ENV=production`. Do not rely on `MPESA_MOCK_ENABLED` (it is now ignored
-   in production), so set real Daraja credentials and `MPESA_CALLBACK_SECRET` (append `?secret=` to `CALLBACK_URL`).
+   in production), so set real Daraja credentials. The callback secret is automatic now (derived from
+   `JWT_SECRET` unless `MPESA_CALLBACK_SECRET` is set); payments started just before a deploy that changes it
+   are still confirmed by the STK query, only their callback nudge is dropped.
+   `OTP_SCREEN_FALLBACK` and the Africa's Talking boot warnings are gone: SMS sign-in codes were removed in
+   v0.1.52, and the leftover OTP code was deleted. The `OTP_SCREEN_FALLBACK` variable can be removed from Render.
 4. **Two-step sign-in**: set `MFA_ENCRYPTION_KEY` on Render (`openssl rand -hex 32`) **before** anyone
    enrols, then keep it. Changing it later breaks existing authenticators, and they need recovery codes or a reset.
    Then the owner enrols in HQ → Settings → Security and stores the recovery codes off the device.

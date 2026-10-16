@@ -28,7 +28,6 @@ const { ALERT_SWEEP_MS, LOW_STOCK_THRESHOLD, notifyPaymentConfirmed, notifyStaff
 const { cancelOrderAndRestore, placeOrder, provisionalDeliveryFee } = require('./lib/orders');
 const { applyPricingRules } = require('./lib/pricing');
 const { orderProfit } = require('./lib/reports');
-const { otpScreenFallback, otpStore } = require('./lib/sms');
 const { dailyReportTick } = require('./lib/dailyReport');
 const { submitPendingInvoices } = require('./lib/etims');
 
@@ -221,4 +220,4 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
-module.exports = { app, connectDb, client, _test: { placeOrder, cancelOrderAndRestore, signCustomerToken, applyPricingRules, orderProfit, provisionalDeliveryFee, otpScreenFallback, verifyMpesaRequest, customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => col.db, otpStore, moneyPrizeUnlocked, parseServiceAccount, notifyStaffAlerts, notifyPaymentConfirmed, sendPushToStaffUser, LOW_STOCK_THRESHOLD } };
+module.exports = { app, connectDb, client, _test: { placeOrder, cancelOrderAndRestore, signCustomerToken, applyPricingRules, orderProfit, provisionalDeliveryFee, verifyMpesaRequest, customerTier, tierFromPoints, earnPoints, reversePoints, issueVoucher, pickWeighted, WHEEL_SECTORS, SCRATCH_OUTCOMES, promoDayKey, getLoyaltySettings, LOYALTY_SETTINGS_DEFAULTS, mockDb: () => col.db, moneyPrizeUnlocked, parseServiceAccount, notifyStaffAlerts, notifyPaymentConfirmed, sendPushToStaffUser, LOW_STOCK_THRESHOLD } };

@@ -10,6 +10,7 @@ const jwt = require('jsonwebtoken');
 const { app, connectDb, client, _test } = require('../server');
 const { getOwnerToken, customerToken, bearer, REAUTH } = require('./helpers');
 const { earnPoints } = require('../lib/loyalty');
+const { mpesaCallbackSecret } = require('../lib/mpesa');
 
 let seq = 0;
 const freshPhone = () => { seq += 1; return '07' + String((Date.now() + seq * 7919 + Math.floor(Math.random() * 1e8)) % 1e8).padStart(8, '0'); };
@@ -327,7 +328,7 @@ describe('M-Pesa', () => {
   it('a callback keeps the receipt for reconciliation and flags an amount that differs from the request', async () => {
     const checkoutRequestId = 'ws_CO_AUDIT_' + Date.now();
     await db().collection('mpesa_requests').insertOne({ checkoutRequestId, status: 'pending', amount: 500, phone: '254712345678', purpose: 'order', createdAt: new Date() });
-    await request(app).post('/api/mpesa/callback').send({ Body: { stkCallback: {
+    await request(app).post('/api/mpesa/callback?secret=' + mpesaCallbackSecret()).send({ Body: { stkCallback: {
       CheckoutRequestID: checkoutRequestId, ResultCode: 0, ResultDesc: 'ok',
       CallbackMetadata: { Item: [{ Name: 'Amount', Value: 1 }, { Name: 'MpesaReceiptNumber', Value: 'QAB1CD2EF3' }] }
     } } });

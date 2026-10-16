@@ -7,6 +7,7 @@ process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/blitzmall_test';
 
 const { app, connectDb, client, _test } = require('../server');
 const { getOwnerToken, customerToken, bearer, REAUTH } = require('./helpers');
+const { mpesaCallbackSecret, stkCallbackUrl } = require('../lib/mpesa');
 
 let seq = 0;
 const freshPhone = () => '07' + String(Date.now() + (seq += 53) * 7919 + Math.floor(Math.random() * 1e8)).slice(-8);
@@ -179,6 +180,29 @@ describe('M-Pesa can no longer be faked', () => {
       expect(doc.callbackAt).toBeUndefined();
     } finally {
       delete process.env.MPESA_CALLBACK_SECRET;
+    }
+  });
+
+  it('with no MPESA_CALLBACK_SECRET set, a secret is still derived, sent to Safaricom and required', async () => {
+    const saved = { s: process.env.MPESA_CALLBACK_SECRET, u: process.env.CALLBACK_URL };
+    delete process.env.MPESA_CALLBACK_SECRET;
+    process.env.CALLBACK_URL = 'https://blitz.example.com/api/mpesa/callback';
+    try {
+      const secret = mpesaCallbackSecret();
+      expect(secret).toMatch(/^[0-9a-f]{32}$/);
+      expect(new URL(stkCallbackUrl()).searchParams.get('secret')).toBe(secret);
+      const meta = { CallbackMetadata: { Item: [{ Name: 'MpesaReceiptNumber', Value: 'QZZ9' }] } };
+      const id1 = 'ws_CO_NOSEC_' + Date.now();
+      await mockDb().collection('mpesa_requests').insertOne({ checkoutRequestId: id1, amount: 5, status: 'pending', createdAt: new Date() });
+      await request(app).post('/api/mpesa/callback').send({ Body: { stkCallback: { CheckoutRequestID: id1, ResultCode: 0, ...meta } } });
+      expect((await mockDb().collection('mpesa_requests').findOne({ checkoutRequestId: id1 })).callbackAt).toBeUndefined();
+      const id2 = 'ws_CO_WITHSEC_' + Date.now();
+      await mockDb().collection('mpesa_requests').insertOne({ checkoutRequestId: id2, amount: 5, status: 'pending', createdAt: new Date() });
+      await request(app).post('/api/mpesa/callback?secret=' + secret).send({ Body: { stkCallback: { CheckoutRequestID: id2, ResultCode: 0, ...meta } } });
+      expect((await mockDb().collection('mpesa_requests').findOne({ checkoutRequestId: id2 })).callbackMeta.MpesaReceiptNumber).toBe('QZZ9');
+    } finally {
+      if (saved.s === undefined) delete process.env.MPESA_CALLBACK_SECRET; else process.env.MPESA_CALLBACK_SECRET = saved.s;
+      if (saved.u === undefined) delete process.env.CALLBACK_URL; else process.env.CALLBACK_URL = saved.u;
     }
   });
 

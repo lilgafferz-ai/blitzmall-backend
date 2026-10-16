@@ -39,10 +39,10 @@ Online shop + POS + admin dashboard for Blitz Mall (Matunda, Kakamega).
 | Variable | Purpose |
 |---|---|
 | `MONGODB_URI`, `JWT_SECRET` | Mandatory — the server will not start without them |
-| `AT_USERNAME`, `AT_API_KEY`, `AT_SENDER_ID` | Africa's Talking SMS for sign-in codes |
-| `OTP_SCREEN_FALLBACK` | **Temporary.** `true` (default) shows the code on screen when an SMS fails — anyone can then sign in to any account. Set `false` once SMS delivers. |
+| `AT_USERNAME`, `AT_API_KEY`, `AT_SENDER_ID` | Optional. Africa's Talking SMS, only for an SMS copy of the owner's closing report (customers sign in with phone + PIN, no SMS) |
+| `MFA_ENCRYPTION_KEY` | 32+ random characters. Encrypts staff authenticator secrets — set once, before anyone turns on two-step sign-in, and never change it |
 | `MPESA_*`, `CALLBACK_URL` | Daraja credentials and callback URL |
-| `MPESA_CALLBACK_SECRET` | Random string; append `?secret=<value>` to `CALLBACK_URL` |
+| `MPESA_CALLBACK_SECRET` | Optional. The server adds `?secret=` to the callback URL it gives Safaricom and drops callbacks without it; when unset the secret is derived from `JWT_SECRET` |
 | `MPESA_MOCK_ENABLED` | Development only — auto-confirms every payment. Never `true` in production |
 | `FCM_SERVICE_ACCOUNT_JSON` | Firebase service account (raw or base64) for real device push |
 | `ETIMS_VSCU_URL`, `ETIMS_VSCU_KEY` | KRA eTIMS connection (after KRA onboarding). Empty = tax invoices are numbered and queued in Admin → Tax, and sent automatically once set |

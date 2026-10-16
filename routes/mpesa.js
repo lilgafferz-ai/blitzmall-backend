@@ -3,7 +3,7 @@ const { ObjectId } = require('mongodb');
 const { CUSTOMER_AUTH_ERROR, auditLog, authenticate, authenticateCustomer, customerFromRequest, staffFromRequest } = require('../lib/auth');
 const { col } = require('../lib/db');
 const { mpesaPushLimiter, mpesaStatusLimiter } = require('../lib/limiters');
-const { finalizePosSale, requestStkPush, verifyMpesaRequest, verifySoon } = require('../lib/mpesa');
+const { finalizePosSale, mpesaCallbackSecret, requestStkPush, verifyMpesaRequest, verifySoon } = require('../lib/mpesa');
 const { notifyPaymentConfirmed } = require('../lib/notifications');
 const { cleanPosItems, saleTotals } = require('../lib/orders');
 const { cleanPhone, safeEqual } = require('../lib/util');
@@ -101,12 +101,11 @@ module.exports = function register(app) {
   // Safaricom's callback is treated as a NUDGE, never as proof: anyone on the
   // internet can POST here, so nothing is marked paid (or failed) until
   // Safaricom's own STK-query endpoint confirms the result. With
-  // MPESA_CALLBACK_SECRET set, callbacks without ?secret=<value> are dropped.
+  // Callbacks without the right ?secret= (see mpesaCallbackSecret) are dropped.
   app.post('/api/mpesa/callback', async (req, res) => {
     const ack = () => res.json({ ResultCode: 0, ResultDesc: 'Success' });
     try {
-      const secret = process.env.MPESA_CALLBACK_SECRET;
-      if (secret && !safeEqual(req.query.secret, secret)) {
+      if (!safeEqual(req.query.secret, mpesaCallbackSecret())) {
         console.warn('⚠️ M-Pesa callback rejected: bad or missing secret');
         return ack();
       }
