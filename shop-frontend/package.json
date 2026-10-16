@@ -1,33 +1,11 @@
 {
   "name": "shop-frontend",
-  "version": "0.1.61",
+  "version": "0.1.62",
   "private": true,
   "main": "main.js",
   "homepage": "./",
   "dependencies": {
-    "@capacitor/android": "^8.4.0",
-    "@capacitor/app": "^8.1.2",
-    "@capacitor/cli": "^8.4.0",
-    "@capacitor/core": "^8.4.0",
-    "@capacitor/push-notifications": "^8.1.2",
-    "@capacitor/splash-screen": "^8.0.1",
-    "@capgo/capacitor-native-biometric": "^8.8.2",
-    "@capgo/capacitor-updater": "^8.49.4",
-    "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^13.5.0",
-    "electron-updater": "^6.8.9",
-    "firebase": "^12.17.1",
-    "jspdf": "^4.2.1",
-    "jspdf-autotable": "^5.0.8",
-    "leaflet": "^1.9.4",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "react-scripts": "5.0.1",
-    "recharts": "^3.8.1",
-    "web-vitals": "^2.1.4",
-    "xlsx": "^0.18.5"
+    "electron-updater": "^6.8.9"
   },
   "scripts": {
     "prestart": "node scripts/write-version.js",
@@ -64,10 +42,32 @@
     ]
   },
   "devDependencies": {
+    "@capacitor/android": "^8.4.0",
+    "@capacitor/app": "^8.1.2",
     "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.4.0",
+    "@capacitor/core": "^8.4.0",
+    "@capacitor/push-notifications": "^8.1.2",
+    "@capacitor/splash-screen": "^8.0.1",
+    "@capgo/capacitor-native-biometric": "^8.8.2",
+    "@capgo/capacitor-updater": "^8.49.4",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^13.5.0",
     "archiver": "^7.0.1",
     "electron": "^42.4.1",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "firebase": "^12.17.1",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.8",
+    "leaflet": "^1.9.4",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-scripts": "5.0.1",
+    "recharts": "^3.8.1",
+    "web-vitals": "^2.1.4",
+    "xlsx": "^0.18.5"
   },
   "build": {
     "electronVersion": "42.3.3",
@@ -85,8 +85,7 @@
       "build/**/*",
       "main.js",
       "preload.js",
-      "package.json",
-      "!node_modules/**/*"
+      "package.json"
     ],
     "directories": {
       "output": "dist"

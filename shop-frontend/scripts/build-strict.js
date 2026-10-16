@@ -14,6 +14,9 @@
  * build script with the CI env var that makes warnings fatal.
  */
 process.env.CI = 'true';
+// CI has no shop-frontend/.env (it's git-ignored), so make the no-source-maps
+// setting explicit here: the PC installer must not ship the app's source.
+if (process.env.GENERATE_SOURCEMAP === undefined) process.env.GENERATE_SOURCEMAP = 'false';
 
 try {
   require('react-scripts/scripts/build');

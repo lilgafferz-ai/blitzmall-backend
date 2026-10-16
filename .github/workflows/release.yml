@@ -29,6 +29,10 @@ jobs:
       # Web build only. The signed OTA bundle for phones is made on the owner's
       # PC (`npm run build` needs ~/.blitzmall/ota-signing-key.pem, which must
       # never live in CI) and committed under shop-frontend/ota/.
+      - name: Check the PC app's runtime dependencies
+        working-directory: ./shop-frontend
+        run: node scripts/check-electron-deps.js
+
       - name: Build React App
         working-directory: ./shop-frontend
         run: npm run build:strict
