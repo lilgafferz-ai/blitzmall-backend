@@ -1,17 +1,18 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { setPin, verifyPin, setLockConfig, getLockConfig, biometricVerify } from './appLock';
 
-const PIN_MIN = 4;
-const PIN_MAX = 6; // M-Pesa-style PIN is 4–6 digits (matches the account PIN)
-
 // Full-screen app lock. Modes:
 //   'setup'  — create the first PIN (enables the lock)
 //   'change' — change an existing PIN: verify the CURRENT PIN, then set a new one
 //   'unlock' — fingerprint (auto, when available) + PIN entry to clear the lock
+// scope: 'customer' (default) or 'admin' — picks which stored PIN this lock uses.
+// pinMin/pinMax: allowed PIN length (customer 4–6; the admin/staff lock is fixed 4).
 // onDone(newPin, currentPin) fires after setup/change (currentPin only for change);
 // onUnlock() after a successful unlock. The caller uses the PINs to keep the
 // server account-PIN in sync.
-export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock, onCancel, allowCancel }) {
+export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock, onCancel, allowCancel, cancelLabel = 'Cancel', scope = 'customer', pinMin = 4, pinMax = 6 }) {
+  const PIN_MIN = pinMin;
+  const PIN_MAX = pinMax;
   const [entry, setEntry] = useState('');
   const [firstPin, setFirstPin] = useState('');
   const [curPin, setCurPin] = useState('');
@@ -42,7 +43,7 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
     setBusy(true); setError('');
     try {
       if (mode === 'change' && stage === 'current') {
-        const ok = await verifyPin(pin);
+        const ok = await verifyPin(pin, scope);
         if (!ok) { setError('Wrong current PIN'); setEntry(''); setBusy(false); return; }
         setCurPin(pin); setEntry(''); setStage('create'); setBusy(false); return;
       }
@@ -54,22 +55,22 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
         if (pin !== firstPin) {
           setError('PINs did not match — start again'); setEntry(''); setFirstPin(''); setStage('create'); setBusy(false); return;
         }
-        await setPin(pin);
-        const cfg = getLockConfig() || {};
-        setLockConfig({ ...cfg, enabled: true, biometric: !!hasBiometric });
+        await setPin(pin, scope);
+        const cfg = getLockConfig(scope) || {};
+        setLockConfig({ ...cfg, enabled: true, biometric: !!hasBiometric }, scope);
         setBusy(false);
         onDone && onDone(pin, mode === 'change' ? curPin : undefined);
         return;
       }
       // unlock
-      const ok = await verifyPin(pin);
+      const ok = await verifyPin(pin, scope);
       setBusy(false);
       if (ok) { onUnlock && onUnlock(); }
       else { setError('Wrong PIN — try again'); setEntry(''); }
     } catch (e) {
       setBusy(false); setError('Something went wrong — try again'); setEntry('');
     }
-  }, [mode, stage, firstPin, curPin, hasBiometric, onDone, onUnlock]);
+  }, [mode, stage, firstPin, curPin, hasBiometric, onDone, onUnlock, PIN_MIN, scope]);
 
   const press = (digit) => {
     if (busy) return;
@@ -138,7 +139,7 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
         )}
 
         {allowCancel && (
-          <button className="btn-ghost applock-alt applock-cancel" onClick={() => onCancel && onCancel()}>Cancel</button>
+          <button className="btn-ghost applock-alt applock-cancel" onClick={() => onCancel && onCancel()}>{cancelLabel}</button>
         )}
       </div>
     </div>

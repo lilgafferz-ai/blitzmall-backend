@@ -11,20 +11,25 @@
 //    server-side OTP / customer token; a rooted device can bypass a local lock.
 import { Capacitor } from '@capacitor/core';
 
-const LOCK_KEY = 'blitz_app_lock'; // { enabled:true, biometric:bool }
-const PIN_KEY = 'blitz_app_pin';   // { salt, hash, v }
+// Storage keys per lock SCOPE: 'customer' = the shopper app lock, 'admin' = the
+// staff/admin app lock. They are independent PINs on the same device.
+const KEYS = {
+  customer: { lock: 'blitz_app_lock', pin: 'blitz_app_pin' },
+  admin: { lock: 'blitz_admin_lock', pin: 'blitz_admin_pin' },
+};
+const ks = (scope) => KEYS[scope] || KEYS.customer;
 
 export const isNativeApp = () => {
   try { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); }
   catch { return false; }
 };
 
-// ---- lock config + PIN storage ----
-export function getLockConfig() { try { return JSON.parse(localStorage.getItem(LOCK_KEY)) || null; } catch { return null; } }
-export function setLockConfig(cfg) { try { localStorage.setItem(LOCK_KEY, JSON.stringify(cfg || {})); } catch {} }
-export function isLockEnabled() { const c = getLockConfig(); return !!(c && c.enabled); }
-export function hasPin() { try { const p = JSON.parse(localStorage.getItem(PIN_KEY)); return !!(p && p.hash); } catch { return false; } }
-export function disableLock() { try { localStorage.removeItem(LOCK_KEY); localStorage.removeItem(PIN_KEY); } catch {} }
+// ---- lock config + PIN storage (scope: 'customer' (default) | 'admin') ----
+export function getLockConfig(scope) { try { return JSON.parse(localStorage.getItem(ks(scope).lock)) || null; } catch { return null; } }
+export function setLockConfig(cfg, scope) { try { localStorage.setItem(ks(scope).lock, JSON.stringify(cfg || {})); } catch {} }
+export function isLockEnabled(scope) { const c = getLockConfig(scope); return !!(c && c.enabled); }
+export function hasPin(scope) { try { const p = JSON.parse(localStorage.getItem(ks(scope).pin)); return !!(p && p.hash); } catch { return false; } }
+export function disableLock(scope) { try { localStorage.removeItem(ks(scope).lock); localStorage.removeItem(ks(scope).pin); } catch {} }
 
 function toHex(buf) { return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join(''); }
 async function sha256Hex(str) {
@@ -43,13 +48,13 @@ function randomSalt() {
   try { const a = new Uint8Array(16); window.crypto.getRandomValues(a); return toHex(a.buffer); }
   catch { return String(Date.now()) + Math.random().toString(16).slice(2); }
 }
-export async function setPin(pin) {
+export async function setPin(pin, scope) {
   const salt = randomSalt();
   const hash = await sha256Hex(salt + '|' + pin);
-  try { localStorage.setItem(PIN_KEY, JSON.stringify({ salt, hash, v: 1 })); } catch {}
+  try { localStorage.setItem(ks(scope).pin, JSON.stringify({ salt, hash, v: 1 })); } catch {}
 }
-export async function verifyPin(pin) {
-  let rec; try { rec = JSON.parse(localStorage.getItem(PIN_KEY)); } catch { rec = null; }
+export async function verifyPin(pin, scope) {
+  let rec; try { rec = JSON.parse(localStorage.getItem(ks(scope).pin)); } catch { rec = null; }
   if (!rec || !rec.salt || !rec.hash) return false;
   const h = await sha256Hex(rec.salt + '|' + pin);
   return h === rec.hash;

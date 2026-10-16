@@ -33,7 +33,7 @@ const CUSTOMER_KEY = 'blitz_customer';
 const FAVORITES_KEY = 'blitz_favorites';
 const RECENT_KEY = 'blitz_recently_viewed';
 const LOW_STOCK_BADGE = 5; // "Only N left" shows at or below this
-const SHOP_COORDS = { lat: 0.8273, lng: 35.1207 }; // Blitz Mall, Matunda
+const SHOP_COORDS = { lat: 0.825155, lng: 35.121834 }; // Blitz Mall, Matunda (owner GPS pin)
 // Account-recovery questions a shopper picks from at sign-up. Fixed list so the
 // recovery screen can show back the exact question they chose.
 const SECURITY_QUESTIONS = [

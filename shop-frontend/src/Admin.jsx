@@ -5,6 +5,8 @@ import { lineTotalFor, dealSavingsFor, qtyStepOf, snapQty, formatQty, isLoose } 
 import AdminSettings from './screens/AdminSettings';
 import { useReauth } from './components/SettingsKit';
 import { getPushToken, onPushTap, pushPlatform } from './push';
+import LockScreen from './LockScreen';
+import { isLockEnabled, onAppBackground, biometricCapability, hasPin, disableLock } from './appLock';
 import { cacheProducts, getCachedProducts, queueSale, syncQueuedSales, getPendingCount, onOnline, onOffline } from './offline';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import jsPDF from 'jspdf';
@@ -349,6 +351,37 @@ function Admin({ onExit }) {
       return false;
     }
   });
+
+  // --- Admin app lock (M-Pesa-style 4-digit PIN / fingerprint for staff) ---
+  // A device re-entry gate: after staff sign in, require a 4-digit PIN (or
+  // fingerprint) to enter, and again every time the app is closed/backgrounded.
+  // Staff still authenticate with username+password (the real security); this PIN
+  // is local to the device and scoped separately from the customer PIN.
+  const [adminLockConfigured, setAdminLockConfigured] = useState(() => isLockEnabled('admin'));
+  const [adminLocked, setAdminLocked] = useState(() => {
+    try { return !!localStorage.getItem('bm_token') && isLockEnabled('admin'); } catch (e) { return false; }
+  });
+  const [adminLockCap, setAdminLockCap] = useState({ usable: false, isFingerprint: false });
+  const [adminLockCapReady, setAdminLockCapReady] = useState(false);
+  const [forceAdminLockSetup, setForceAdminLockSetup] = useState(false);
+
+  // Probe this device's fingerprint capability once a staff member is logged in.
+  useEffect(() => {
+    if (!loggedIn) return;
+    let alive = true;
+    biometricCapability()
+      .then(c => { if (alive) { setAdminLockCap(c); setAdminLockCapReady(true); } })
+      .catch(() => { if (alive) setAdminLockCapReady(true); });
+    return () => { alive = false; };
+  }, [loggedIn]);
+
+  // Lock the admin app the instant it leaves the foreground (M-Pesa style).
+  useEffect(() => {
+    const unsub = onAppBackground(() => {
+      try { if (localStorage.getItem('bm_token') && isLockEnabled('admin')) setAdminLocked(true); } catch (e) {}
+    });
+    return unsub;
+  }, []);
 
   useEffect(() => {
     try {
@@ -1389,6 +1422,7 @@ const loadStockTransfers = async () => {
     sessionStorage.removeItem('bm_token'); sessionStorage.removeItem('bm_user');
     staffPushRegisteredRef.current = false; // next login re-registers this device
     setLoggedIn(false); setUser(null);
+    setAdminLocked(false); setForceAdminLockSetup(false); // the admin lock PIN itself stays set on the device
   };
 
   // The server revoked this session (account deleted, role/permissions
@@ -2108,6 +2142,44 @@ const loadStockTransfers = async () => {
     );
   }
 
+  // ===== ADMIN APP LOCK GATE =====
+  // After staff sign-in, show the 4-digit PIN / fingerprint lock: on first setup,
+  // and again whenever the app was closed or backgrounded. Staff who forget the
+  // PIN tap "Sign out" to reset it (they set a new one after signing in again).
+  if (loggedIn && (forceAdminLockSetup || !adminLockConfigured || adminLocked)) {
+    const changing = forceAdminLockSetup && adminLockConfigured && hasPin('admin');
+    const inSetup = forceAdminLockSetup || !adminLockConfigured || !hasPin('admin');
+    if (!inSetup && !adminLockCapReady) {
+      return (
+        <div className="blitz-admin-login"><div className="blitz-admin-login-card">
+          <div className="blitz-admin-logo">🔒</div>
+          <p className="blitz-admin-muted">Locked</p>
+        </div></div>
+      );
+    }
+    return (
+      <LockScreen
+        scope="admin"
+        pinMin={4}
+        pinMax={4}
+        mode={changing ? 'change' : (inSetup ? 'setup' : 'unlock')}
+        hasBiometric={!inSetup && adminLockCap.usable && adminLockCap.isFingerprint}
+        allowCancel={true}
+        cancelLabel={forceAdminLockSetup ? 'Cancel' : 'Sign out'}
+        logo={<div style={{ fontSize: 46, lineHeight: 1 }}>⚡</div>}
+        onDone={() => { setAdminLockConfigured(true); setForceAdminLockSetup(false); setAdminLocked(false); }}
+        onUnlock={() => setAdminLocked(false)}
+        onCancel={() => {
+          if (forceAdminLockSetup) { setForceAdminLockSetup(false); return; } // abort an intentional PIN change
+          // Unlock screen (or first-time setup): sign out to escape / recover a forgotten PIN.
+          if (window.confirm('Sign out of the admin app? You can set a new PIN after signing in again.')) {
+            disableLock('admin'); setAdminLockConfigured(false); setAdminLocked(false); logout();
+          }
+        }}
+      />
+    );
+  }
+
   // Determine which tabs are visible based on role
   const role = user?.role || 'cashier';
   const isCashier = role === 'cashier';
@@ -2278,7 +2350,8 @@ ${div}
             perfMode: adminPerfMode,
             setPerfMode: (v) => { setAdminPerfMode(v); try { localStorage.setItem('blitz_perf_mode', String(v)); } catch (e) {} },
             pushStatus, sendStaffTestPush,
-            staffPushRegistered: staffPushRegisteredRef.current
+            staffPushRegistered: staffPushRegisteredRef.current,
+            appLock: { hasFingerprint: !!(adminLockCap.usable && adminLockCap.isFingerprint), changePin: () => setForceAdminLockSetup(true) }
           }} />
         </div>
       )}
@@ -2756,7 +2829,7 @@ ${div}
                       </div>
                       <div style={{display: 'flex', gap: 8, alignItems: 'center'}}>
                         <a href={`https://www.google.com/maps/search/?api=1&query=${o.gpsCoords.lat},${o.gpsCoords.lng}`} target="_blank" rel="noreferrer" style={{color: 'var(--gold)', textDecoration: 'underline', fontWeight: 'bold', fontSize: '.78rem'}}>📍 Open in Maps</a>
-                        <a href={`https://www.google.com/maps/dir/?api=1&origin=0.8273,35.1207&destination=${o.gpsCoords.lat},${o.gpsCoords.lng}&travelmode=driving`} target="_blank" rel="noreferrer" style={{color: 'var(--orange)', textDecoration: 'underline', fontWeight: 'bold', fontSize: '.78rem'}}>🧭 Get Directions</a>
+                        <a href={`https://www.google.com/maps/dir/?api=1&origin=0.825155,35.121834&destination=${o.gpsCoords.lat},${o.gpsCoords.lng}&travelmode=driving`} target="_blank" rel="noreferrer" style={{color: 'var(--orange)', textDecoration: 'underline', fontWeight: 'bold', fontSize: '.78rem'}}>🧭 Get Directions</a>
                       </div>
                       <div className="admin-map-thumb">
                         <a href={`https://www.google.com/maps/search/?api=1&query=${o.gpsCoords.lat},${o.gpsCoords.lng}`} target="_blank" rel="noreferrer">
