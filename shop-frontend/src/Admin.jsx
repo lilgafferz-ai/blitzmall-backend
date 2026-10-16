@@ -2147,6 +2147,7 @@ const loadStockTransfers = async () => {
   // and again whenever the app was closed or backgrounded. Staff who forget the
   // PIN tap "Sign out" to reset it (they set a new one after signing in again).
   if (loggedIn && (forceAdminLockSetup || !adminLockConfigured || adminLocked)) {
+    const changing = forceAdminLockSetup && adminLockConfigured && hasPin('admin');
     const inSetup = forceAdminLockSetup || !adminLockConfigured || !hasPin('admin');
     if (!inSetup && !adminLockCapReady) {
       return (
@@ -2161,7 +2162,7 @@ const loadStockTransfers = async () => {
         scope="admin"
         pinMin={4}
         pinMax={4}
-        mode={inSetup ? 'setup' : 'unlock'}
+        mode={changing ? 'change' : (inSetup ? 'setup' : 'unlock')}
         hasBiometric={!inSetup && adminLockCap.usable && adminLockCap.isFingerprint}
         allowCancel={true}
         cancelLabel={forceAdminLockSetup ? 'Cancel' : 'Sign out'}
@@ -2349,7 +2350,8 @@ ${div}
             perfMode: adminPerfMode,
             setPerfMode: (v) => { setAdminPerfMode(v); try { localStorage.setItem('blitz_perf_mode', String(v)); } catch (e) {} },
             pushStatus, sendStaffTestPush,
-            staffPushRegistered: staffPushRegisteredRef.current
+            staffPushRegistered: staffPushRegisteredRef.current,
+            appLock: { hasFingerprint: !!(adminLockCap.usable && adminLockCap.isFingerprint), changePin: () => setForceAdminLockSetup(true) }
           }} />
         </div>
       )}

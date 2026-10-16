@@ -15,7 +15,7 @@ export default function AdminSettings({ ctx }) {
   const {
     API_URL, user, branchName, authGet, authPost, askReauth, logout, onTokenRefreshed, onUserChanged, onExit,
     muted, setMuted, showBanner, setShowBanner, perfMode, setPerfMode,
-    pushStatus, sendStaffTestPush, staffPushRegistered
+    pushStatus, sendStaffTestPush, staffPushRegistered, appLock
   } = ctx;
 
   // ----- account & security -----
@@ -248,6 +248,11 @@ export default function AdminSettings({ ctx }) {
           </>
         )}
         {pwMsg && <SettingsRow label={pwMsg} />}
+        {appLock && (
+          <SettingsRow icon="🔒" tone="purple" label="Change app-lock PIN"
+            sub={appLock.hasFingerprint ? 'The 4-digit PIN that unlocks this app (fingerprint also works)' : 'The 4-digit PIN that unlocks this app when you reopen it'}
+            onClick={() => appLock.changePin && appLock.changePin()} />
+        )}
       </SettingsGroup>
 
       {mfa && mfa.available && (
