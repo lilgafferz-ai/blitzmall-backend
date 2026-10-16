@@ -42,7 +42,7 @@ function ensureDependencies() {
   if (!missing.length) return;
   console.log(`📦 Installing missing backend packages (${missing.join(', ')})…`);
   // `npm ci` installs exactly what package-lock.json pins and never rewrites it.
-  const npm = (cmd) => spawnSync('npm', [cmd, '--no-audit', '--no-fund'], { cwd: ROOT, stdio: 'inherit', shell: true }).status;
+  const npm = (cmd) => spawnSync(`npm ${cmd} --no-audit --no-fund`, { cwd: ROOT, stdio: 'inherit', shell: true }).status;
   if (npm('ci') !== 0 && npm('install') !== 0) {
     console.error('❌ `npm install` failed — run it in this folder and try again.');
     process.exit(1);
