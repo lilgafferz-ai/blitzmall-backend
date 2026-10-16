@@ -717,7 +717,8 @@ function Admin({ onExit }) {
     if (res.status === 401) {
       try {
         const d = await res.clone().json();
-        if (d && d.sessionRevoked) window.dispatchEvent(new Event('blitz_staff_session_revoked'));
+        // ('Invalid or expired token' = servers before v0.1.66 without the flag.)
+        if (d && (d.sessionRevoked || d.error === 'Invalid or expired token')) window.dispatchEvent(new Event('blitz_staff_session_revoked'));
       } catch (e) { /* not JSON */ }
     }
     return res;
@@ -837,6 +838,7 @@ function Admin({ onExit }) {
     if (!startingCashInput.trim()) return;
     try {
       const r = await authPost(API_URL + '/admin/shifts/start', { startingCash: parseFloat(startingCashInput) });
+      if (r.status === 401) return; // signed out — the sign-in notice explains why
       const d = await r.json();
       if (d.success) {
         setStartingCashInput('');
@@ -853,6 +855,7 @@ function Admin({ onExit }) {
     if (!closingCashInput.trim()) return;
     try {
       const r = await authPost(API_URL + '/admin/shifts/end', { closingCash: parseFloat(closingCashInput) });
+      if (r.status === 401) return; // signed out — the sign-in notice explains why
       const d = await r.json();
       if (d.success) {
         setClosingCashInput('');
@@ -1443,14 +1446,23 @@ const loadStockTransfers = async () => {
   };
 
   // The server revoked this session (account deleted, role/permissions
-  // changed, or the owner signed this user out everywhere).
+  // changed, the owner signed this user out everywhere) or can't verify it at
+  // all — e.g. a sign-in from the cloud used on the local dev server, or a
+  // reset dev database. Several requests fail at once, so tell the user once.
+  const revokedNoticeRef = useRef(false);
   useEffect(() => {
     const onRevoked = () => {
       localStorage.removeItem('bm_token'); localStorage.removeItem('bm_user');
       sessionStorage.removeItem('bm_token'); sessionStorage.removeItem('bm_user');
       staffPushRegisteredRef.current = false;
       setLoggedIn(false); setUser(null);
-      alert('Your session has ended — please sign in again.');
+      setAdminLocked(false); setForceAdminLockSetup(false);
+      if (revokedNoticeRef.current) return;
+      revokedNoticeRef.current = true;
+      setTimeout(() => { revokedNoticeRef.current = false; }, 3000);
+      alert(USING_LOCAL_SERVER
+        ? 'Please sign in again — your previous sign-in belongs to a different server (or the local test database was reset). On a fresh local database, create the owner account first.'
+        : 'Your session has ended — please sign in again.');
     };
     window.addEventListener('blitz_staff_session_revoked', onRevoked);
     return () => window.removeEventListener('blitz_staff_session_revoked', onRevoked);
