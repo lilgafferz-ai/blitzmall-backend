@@ -13,16 +13,24 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 
+const CLOUD_API_URL = 'https://blitzmall-backend.onrender.com/api';
 const getDefaultApiUrl = () => {
   try {
     const saved = localStorage.getItem('blitz_api_url');
     if (saved) return saved;
   } catch (e) {}
   
-  return 'https://blitzmall-backend.onrender.com/api';
+  return CLOUD_API_URL;
 };
 
 const API_URL = getDefaultApiUrl();
+// "Local Server (Development)" only works while `node server.js` runs on this
+// PC. When it can't be reached, say so plainly instead of a vague error.
+const USING_LOCAL_SERVER = API_URL !== CLOUD_API_URL;
+const LOCAL_SERVER_HOST = (() => { try { return new URL(API_URL).host; } catch (e) { return API_URL; } })();
+const LOCAL_SERVER_DOWN_MSG = `Can't reach the local server (${LOCAL_SERVER_HOST}) — is it running? Switch to Cloud on the login screen.`;
+// fetch() rejects with a TypeError when nothing answers at the address.
+const isUnreachable = (e) => USING_LOCAL_SERVER && (e instanceof TypeError || (e && e.serverUnreachable));
 const BLANK = { name: '', category: '', barcode: '', buyingPrice: '', price: '', stock: '', description: '', image: null, expiryDate: '' , unit: 'pcs', soldLoose: false, qtyStep: '', bulkDeals: [], supplierId: '', taxCategory: '' };
 
 // Record types the owner can wipe from the 🗑️ Delete tab (users & branches are
@@ -496,6 +504,7 @@ function Admin({ onExit }) {
   const [newUserPermissions, setNewUserPermissions] = useState(['sales']);
   const [newUserBranch, setNewUserBranch] = useState('');
   const [offline, setOffline] = useState(!navigator.onLine);
+  const [localServerDown, setLocalServerDown] = useState(false);
   const [pendingSync, setPendingSync] = useState(getPendingCount());
   const [loyaltyPhone, setLoyaltyPhone] = useState('');
   const [loyaltyData, setLoyaltyData] = useState(null);
@@ -697,7 +706,17 @@ function Admin({ onExit }) {
   };
 
   const authFetch = async (url, opts = {}) => {
-    const res = await fetch(url, { ...opts, headers: authHeaders() });
+    let res;
+    try {
+      res = await fetch(url, { ...opts, headers: authHeaders() });
+    } catch (e) {
+      if (!USING_LOCAL_SERVER) throw e;
+      setLocalServerDown(true);
+      const err = new Error(LOCAL_SERVER_DOWN_MSG);
+      err.serverUnreachable = true;
+      throw err;
+    }
+    if (USING_LOCAL_SERVER) setLocalServerDown(false);
     // Sliding session: the server hands back a fresh 30-day token now and then.
     const renewed = res.headers.get('X-Renewed-Token');
     if (renewed) {
@@ -835,7 +854,7 @@ function Admin({ onExit }) {
       } else {
         alert(d.error || 'Failed to open shift');
       }
-    } catch (e) { console.error(e); alert('Error starting shift'); }
+    } catch (e) { console.error(e); alert(isUnreachable(e) ? LOCAL_SERVER_DOWN_MSG : 'Error starting shift'); }
   };
 
   const handleCloseShiftSubmit = async (e) => {
@@ -853,7 +872,7 @@ function Admin({ onExit }) {
       } else {
         alert(d.error || 'Failed to close shift');
       }
-    } catch (e) { console.error(e); alert('Error closing shift'); }
+    } catch (e) { console.error(e); alert(isUnreachable(e) ? LOCAL_SERVER_DOWN_MSG : 'Error closing shift'); }
   };
 
   const handleFlashSaleSubmit = async (e) => {
@@ -1410,6 +1429,13 @@ const loadStockTransfers = async () => {
 
   // Manual logout ONLY — staff stay logged in until they tap Exit. Also drops
   // this staff device's push token so it stops receiving new-order pop-ups.
+  // Banner button: drop this local-server session and go back to Cloud.
+  const switchToCloud = () => {
+    logout();
+    try { localStorage.setItem('blitz_api_url', CLOUD_API_URL); } catch (e) {}
+    window.location.reload();
+  };
+
   const logout = () => {
     try {
       const uname = user && user.username ? user.username : null;
@@ -1505,7 +1531,7 @@ const loadStockTransfers = async () => {
           setLoginError(d.error || 'Invalid username or password');
         }
       }
-    } catch (e) { console.error(e); setLoginError('Network error. Check connection.'); }
+    } catch (e) { console.error(e); setLoginError(isUnreachable(e) ? LOCAL_SERVER_DOWN_MSG : 'Network error. Check connection.'); }
   };
 
   const handleSetup = async (e) => {
@@ -2296,6 +2322,12 @@ ${div}
           <button className="blitz-admin-exit" onClick={logout}>Sign out</button>
         </div>
       </header>
+      {localServerDown && (
+        <div className="hq-server-down" role="alert">
+          <span>⚠️ {LOCAL_SERVER_DOWN_MSG}</span>
+          <button type="button" className="blitz-admin-btn small" onClick={switchToCloud}>Switch to Cloud</button>
+        </div>
+      )}
 
       {showBanner && totalAlerts > 0 && (
         <div className={"blitz-hq-notice" + (alerts.out.length || (alerts.expired||[]).length ? " urgent" : "")}>
