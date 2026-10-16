@@ -12,16 +12,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pi
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
-
-const CLOUD_API_URL = 'https://blitzmall-backend.onrender.com/api';
-const getDefaultApiUrl = () => {
-  try {
-    const saved = localStorage.getItem('blitz_api_url');
-    if (saved) return saved;
-  } catch (e) {}
-  
-  return CLOUD_API_URL;
-};
+import { CLOUD_API_URL, getDefaultApiUrl } from './apiUrl';
 
 const API_URL = getDefaultApiUrl();
 // "Local Server (Development)" only works while `node server.js` runs on this
@@ -2282,7 +2273,7 @@ ${div}
   return (
     <div className="blitz-hq-shell" style={{ minHeight: '100vh', background: '#0a0a0c', color: '#f4f4f6' }}>
       <header className="blitz-admin-header">
-        <div className="blitz-admin-brand"><span className="blitz-admin-logo sm">⚡</span> Blitz Mall <b>HQ</b></div>
+        <div className="blitz-admin-brand"><span className="blitz-admin-logo sm">⚡</span> Blitz Mall <b>HQ</b>{USING_LOCAL_SERVER && <span className="hq-dev-pill" title={`Local server ${LOCAL_SERVER_HOST} — test data, not the live shop`}>LOCAL DEV</span>}</div>
         <div className="blitz-admin-head-right">
           {offline && (
             <span className="blitz-admin-muted" style={{display: 'flex', alignItems: 'center', gap: '4px', fontSize:'.75rem',color:'var(--orange)'}}>

@@ -148,6 +148,8 @@ module.exports = function register(app) {
       bundle: otaVersion(),
       commit: (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || null,
       db: col.db && typeof col.db.collection('orders').createIndex === 'function' ? 'mongodb' : 'offline-file',
+      // `npm run dev` (separate test database) — lets the apps label it.
+      devServer: process.env.DEV_SERVER === '1',
       // Optional SMS copy of the owner's closing report (no secrets).
       sms: { configured: !!(process.env.AT_USERNAME && process.env.AT_API_KEY), senderId: !!process.env.AT_SENDER_ID },
       time: new Date().toISOString()

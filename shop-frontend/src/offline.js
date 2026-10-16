@@ -1,5 +1,6 @@
 // Offline storage & sync utility for BlitzMall
 // Uses localStorage for simplicity, works on both mobile and PC
+import { getDefaultApiUrl } from './apiUrl';
 
 const PRODUCTS_KEY = 'bm_cached_products';
 const QUEUE_KEY = 'bm_offline_queue';
@@ -48,14 +49,7 @@ export const syncQueuedSales = async (authHeaders) => {
 
   let synced = 0;
   const remaining = [];
-  let API_URL = 'https://blitzmall-backend.onrender.com/api';
-  try {
-    const saved = localStorage.getItem('blitz_api_url');
-    if (saved) {
-      API_URL = saved;
-    }
-  } catch (e) {
-  }
+  const API_URL = getDefaultApiUrl();
 
   for (const sale of queue) {
     try {

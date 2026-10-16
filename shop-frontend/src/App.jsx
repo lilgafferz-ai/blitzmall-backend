@@ -14,16 +14,8 @@ import 'leaflet/dist/leaflet.css';
 import LockScreen from './LockScreen';
 import { isLockEnabled, onAppBackground, biometricCapability, hasPin, setPin, setLockConfig } from './appLock';
 import { getPushToken, onPushTap, isNativeApp, pushPlatform } from './push';
+import { getDefaultApiUrl } from './apiUrl';
 const Admin = React.lazy(() => import('./Admin'));
-
-const getDefaultApiUrl = () => {
-  try {
-    const saved = localStorage.getItem('blitz_api_url');
-    if (saved) return saved;
-  } catch (e) {}
-  
-  return 'https://blitzmall-backend.onrender.com/api';
-};
 
 const API_URL = getDefaultApiUrl();
 const PRODUCTS_CACHE_KEY = 'blitz_products_cache';

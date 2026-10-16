@@ -556,3 +556,4 @@ input, textarea, select {
 /* Local server unreachable (HQ "Local Server (Development)" connection) */
 .hq-server-down { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin:10px 16px 0; padding:10px 14px; border-radius:12px; background:rgba(255,122,26,.12); border:1px solid var(--orange,#ff7a1a); color:var(--text); font-size:.85rem; }
 .hq-server-down .blitz-admin-btn { white-space:nowrap; }
+.hq-dev-pill { margin-left:8px; padding:2px 7px; border-radius:6px; font-size:.62rem; font-weight:800; letter-spacing:.06em; vertical-align:middle; background:var(--orange,#ff7a1a); color:#1a0a00; }

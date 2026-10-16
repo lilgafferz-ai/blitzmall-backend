@@ -2,6 +2,8 @@ node_modules
 .env
 shop-frontend/node_modules
 local_db_fallback.json
+# Local dev server data + dev-only secrets (npm run dev)
+.dev/
 scratch/
 shop-frontend/admin_diff.txt
 shop-frontend/app_diff.txt

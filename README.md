@@ -87,10 +87,26 @@ Bump `shop-frontend/package.json` `version` for every release — the PC release
 
 ## Developers
 
+### Local development server (safe test copy)
+Double-click **`start-local-server.cmd`** (or run `npm run dev`), then on the app's
+HQ login screen pick **Server Connection → Local Server (Development)**, or open
+http://localhost:5000 in a browser. HQ shows a **LOCAL DEV** label while you're on it.
+
+- Uses its own database, `blitzmall_dev`, on this PC's MongoDB (a JSON file in
+  `.dev/` if MongoDB isn't running). It never uses the live database in `.env`.
+- The first run copies the live products and banners (public data only: no
+  customers, orders, staff or cost prices). Create the dev owner account on
+  first sign-in. `npm run dev:reset` wipes the test data and copies the catalogue again.
+- M-Pesa is simulated (every payment confirms after 3 s). SMS, phone push and
+  KRA eTIMS submission are off, so nothing reaches real customers or KRA.
+- Dev-only secrets are generated into `.dev/` (git-ignored), so dev sign-ins
+  never work on the live shop.
+
 ```bash
 # Backend (API + serves the built web app)
 npm install
-npm start                 # http://localhost:5000 (uses .env)
+npm run dev               # local dev server on a test database (see above)
+npm start                 # http://localhost:5000 with .env as-is (⚠ .env may point at the LIVE database)
 npm test                  # backend jest suite (MOCK_DB=1 runs without MongoDB)
 
 # Frontend (customer app + admin)

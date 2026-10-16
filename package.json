@@ -5,6 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "dev": "node scripts/dev-server.js",
+    "dev:reset": "node scripts/dev-server.js --reset",
     "test": "jest"
   },
   "keywords": [],

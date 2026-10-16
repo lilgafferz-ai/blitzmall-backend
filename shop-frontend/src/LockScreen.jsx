@@ -130,7 +130,9 @@ export default function LockScreen({ mode, hasBiometric, logo, onDone, onUnlock,
   const subtitle = mode === 'unlock'
     ? 'Locks every time you leave the app'
     : stage === 'current' ? 'Confirm it’s you before changing your PIN'
-      : stage === 'create' ? 'Set a 4–6 digit PIN — you’ll use it to sign in and unlock the app'
+      : stage === 'create' ? (scope === 'admin'
+        ? `Set a ${PIN_MIN === PIN_MAX ? PIN_MIN : `${PIN_MIN}–${PIN_MAX}`}-digit PIN — you’ll use it to unlock HQ`
+        : `Set a ${PIN_MIN}–${PIN_MAX} digit PIN — you’ll use it to sign in and unlock the app`)
         : 'Type it again to confirm';
 
   return (
