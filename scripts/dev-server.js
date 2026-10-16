@@ -23,7 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const DEV_DIR = path.join(ROOT, '.dev');
@@ -32,6 +32,22 @@ const LOCAL_MONGO = `mongodb://127.0.0.1:27017/${DB_NAME}`;
 const LIVE_API = 'https://blitzmall-backend.onrender.com/api';
 const PORT = process.env.PORT || '5000';
 const args = new Set(process.argv.slice(2));
+
+// A checkout whose node_modules predates a newer dependency (e.g. qrcode for
+// staff 2FA) would crash at boot, so install whatever package.json lists but
+// node_modules lacks.
+function ensureDependencies() {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const missing = Object.keys(pkg.dependencies || {}).filter(d => !fs.existsSync(path.join(ROOT, 'node_modules', d, 'package.json')));
+  if (!missing.length) return;
+  console.log(`📦 Installing missing backend packages (${missing.join(', ')})…`);
+  // `npm ci` installs exactly what package-lock.json pins and never rewrites it.
+  const npm = (cmd) => spawnSync('npm', [cmd, '--no-audit', '--no-fund'], { cwd: ROOT, stdio: 'inherit', shell: true }).status;
+  if (npm('ci') !== 0 && npm('install') !== 0) {
+    console.error('❌ `npm install` failed — run it in this folder and try again.');
+    process.exit(1);
+  }
+}
 
 function devSecrets() {
   const file = path.join(DEV_DIR, 'secrets.json');
@@ -72,7 +88,7 @@ const toDoc = (item, ObjectId) => {
 async function prepareDevDatabase() {
   let MongoClient, ObjectId;
   try { ({ MongoClient, ObjectId } = require('mongodb')); } catch (e) {
-    console.error('❌ Backend packages are missing. Run `npm install` in this folder first.');
+    console.error('❌ Backend packages are missing. Run `npm install` in this folder and try again.');
     process.exit(1);
   }
   const client = new MongoClient(LOCAL_MONGO, { serverSelectionTimeoutMS: 2500 });
@@ -114,6 +130,7 @@ async function prepareDevDatabase() {
 }
 
 async function main() {
+  ensureDependencies();
   const secrets = devSecrets();
   await prepareDevDatabase();
 
