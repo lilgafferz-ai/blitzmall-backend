@@ -76,7 +76,7 @@ input, textarea {
   0%, 100% { box-shadow: 0 0 10px rgba(255,122,26,.45), 0 0 26px rgba(255,45,45,.16); }
   50% { box-shadow: 0 0 22px rgba(255,122,26,.9), 0 0 56px rgba(255,45,45,.42); }
 }
-.btn-neon.login-cta { animation: neonPulse 2.2s ease-in-out infinite; }
+.btn-neon.login-cta { animation: neonPulse 2.2s ease-in-out 4; } /* a few pulses, then still: box-shadow animation repaints every frame */
 .btn-neon.login-cta:hover { animation-duration: 1.1s; }
 .btn-ghost{background:transparent;color:var(--text);border:1px solid var(--line);border-radius:12px;padding:13px;font-weight:600;font-family:inherit;cursor:pointer;transition:.2s;}
 .btn-ghost:hover{border-color:var(--orange);color:var(--orange);}

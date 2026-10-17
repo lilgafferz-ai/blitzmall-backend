@@ -699,7 +699,7 @@ function Admin({ onExit }) {
   const authFetch = async (url, opts = {}) => {
     let res;
     try {
-      res = await fetch(url, { ...opts, headers: authHeaders() });
+      res = await fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
     } catch (e) {
       if (!USING_LOCAL_SERVER) throw e;
       setLocalServerDown(true);
@@ -724,6 +724,18 @@ function Admin({ onExit }) {
     return res;
   };
   const authGet = (url) => authFetch(url);
+  // GET that sends back the ETag we last saw: an unchanged list comes back as
+  // an empty 304 (returns null) instead of megabytes of orders/products again.
+  const etagsRef = useRef({});
+  const authGetIfChanged = async (url) => {
+    const prev = etagsRef.current[url];
+    const r = await authFetch(url, prev ? { headers: { 'If-None-Match': prev } } : {});
+    if (r.status === 304) return null;
+    const tag = r.headers.get('ETag');
+    const data = await r.json();
+    if (r.ok && tag) etagsRef.current[url] = tag;
+    return data;
+  };
   const authPost = (url, body) => authFetch(url, { method: 'POST', body: JSON.stringify(body) });
   const authPut = (url, body) => authFetch(url, { method: 'PUT', body: JSON.stringify(body) });
   const authDelete = (url, body) => authFetch(url, body === undefined ? { method: 'DELETE' } : { method: 'DELETE', body: JSON.stringify(body) });
@@ -758,16 +770,30 @@ function Admin({ onExit }) {
 
   const withBranch = (url) => activeBranchId ? url + (url.includes('?') ? '&' : '?') + 'branchId=' + activeBranchId : url;
   const asArray = (d) => (Array.isArray(d) ? d : []);
-  const loadProducts = async () => {
+  // lite: after a sale only stock/prices change — fetch the list without its
+  // ~2 MB of photos and keep the photos already on screen.
+  const loadProducts = async ({ lite = false } = {}) => {
     try {
+      if (lite && user) {
+        const fresh = await authGetIfChanged(withBranch(API_URL + '/admin/products?lite=1'));
+        if (fresh === null) return; // nothing changed
+        const held = new Map(products.map(p => [String(p._id), p]));
+        // A photo we don't hold yet, or one changed on another device → full reload.
+        if (asArray(fresh).some(p => p.imageTag && (held.get(String(p._id)) || {}).imageTag !== p.imageTag)) return loadProducts();
+        const merged = asArray(fresh).map(p => (p.imageTag ? { ...p, image: held.get(String(p._id)).image } : p));
+        setProducts(merged);
+        cacheProducts(merged);
+        return;
+      }
       // Use authenticated endpoint with branch filter when logged in, fall back to public
       const url = user ? withBranch(API_URL + '/admin/products') : API_URL + '/products';
-      const r = user ? await authGet(url) : await fetch(url);
-      const data = asArray(await r.json());
-      setProducts(data);
-      cacheProducts(data); // cache for offline use
+      const data = user ? await authGetIfChanged(url) : await (await fetch(url)).json();
+      if (data === null) return; // unchanged (304)
+      setProducts(asArray(data));
+      cacheProducts(asArray(data)); // cache for offline use (without inline photos)
     } catch (e) {
       console.error(e);
+      etagsRef.current = {}; // the offline copy has no inline photos — next load must be a full one
       const cached = getCachedProducts();
       if (cached.length > 0) setProducts(cached);
       else setProducts([]);
@@ -794,13 +820,13 @@ function Admin({ onExit }) {
     // The order list needs Orders/Deliveries access (the server 403s everyone else).
     if (user && user.role !== 'owner' && !(user.permissions || []).some(p => p === 'orders' || p === 'deliveries')) return;
     try {
-      const r = await authGet(withBranch(API_URL + '/admin/orders'));
-      const list = asArray(await r.json());
-      const json = JSON.stringify(list);
-      if (json !== ordersJsonRef.current) { ordersJsonRef.current = json; setOrders(list); }
+      const data = await authGetIfChanged(withBranch(API_URL + '/admin/orders'));
+      if (data === null) return; // unchanged since the last poll (304)
+      ordersJsonRef.current = 'loaded';
+      setOrders(asArray(data));
     } catch (e) {
       console.error(e);
-      if (ordersJsonRef.current !== '[]') { ordersJsonRef.current = '[]'; setOrders([]); }
+      if (ordersJsonRef.current !== '[]') { ordersJsonRef.current = '[]'; etagsRef.current = {}; setOrders([]); }
     }
   };
   const loadSales = async () => { try { const r = await authGet(withBranch(API_URL + '/admin/sales?limit=15')); setRecentSales(asArray(await r.json())); } catch (e) { console.error(e); setRecentSales([]); } };
@@ -1239,12 +1265,13 @@ const loadStockTransfers = async () => {
     loadOrders();
     keepAlive();
     checkActiveShift();
-    const id = setInterval(() => {
-      checkAlerts();
-      loadOrders();
-    }, 15000);
+    // Minimised / in the tray: skip the polls, catch up the moment it's shown.
+    const poll = () => { if (!document.hidden) { checkAlerts(); loadOrders(); } };
+    const id = setInterval(poll, 15000);
+    const onVisible = () => { if (!document.hidden) poll(); };
+    document.addEventListener('visibilitychange', onVisible);
     const kaId = setInterval(keepAlive, 240000); // ping every 4 min to keep Render awake
-    return () => { clearInterval(id); clearInterval(kaId); };
+    return () => { clearInterval(id); clearInterval(kaId); document.removeEventListener('visibilitychange', onVisible); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loggedIn]);
 
@@ -1259,8 +1286,8 @@ const loadStockTransfers = async () => {
     else if (tab === 'loyalty') { loadLoyaltyMembers(); loadCoupons(); loadLoyaltySettings(); loadLoyaltyStats(); }
     else if (tab === 'branches' && (!user || user.role === 'owner')) loadBranches();
     else if (tab === 'wipe' && user?.role === 'owner') loadRecordCounts();
-    else if (tab === 'inventory') { loadProducts(); loadCategories(); loadPricingRules(); loadStockTransfers(); loadSupplierList(); }
-    else if (tab === 'stocktake') loadProducts();
+    else if (tab === 'inventory') { loadProducts({ lite: products.length > 0 }); loadCategories(); loadPricingRules(); loadStockTransfers(); loadSupplierList(); }
+    else if (tab === 'stocktake') loadProducts({ lite: products.length > 0 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, loggedIn]);
 
@@ -1394,7 +1421,7 @@ const loadStockTransfers = async () => {
         setReceipt({ items: window._pendingSaleCart || [...saleCart], total: d.total, change: d.change, paymentMethod: payMethod, cashier, date: new Date(), phone: custPhone });
         setSaleCart([]); setAmountGiven(''); setCashPart(''); setMpesaPart(''); setCustPhone('');
         setStkCheckoutId(null); setStkStatus('idle'); window._pendingSaleCart = null;
-        loadProducts(); loadSales(); checkAlerts();
+        loadProducts({ lite: true }); loadSales(); checkAlerts();
         return;
       }
     } catch (e) { /* fall through to offline queue */ }
@@ -1418,7 +1445,7 @@ const loadStockTransfers = async () => {
     setReceipt({ items: cartItems, total, change: 0, paymentMethod: 'mpesa', cashier, date: new Date(), phone: custPhone });
     setSaleCart([]); setAmountGiven(''); setCashPart(''); setMpesaPart(''); setCustPhone('');
     setStkCheckoutId(null); setStkStatus('idle'); window._pendingSaleCart = null;
-    loadProducts(); loadSales(); checkAlerts();
+    loadProducts({ lite: true }); loadSales(); checkAlerts();
   };
 
   // Manual logout ONLY — staff stay logged in until they tap Exit. Also drops

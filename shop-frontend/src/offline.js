@@ -8,9 +8,23 @@ const OFFLINE_EVENT = 'bm_offline_sync';
 
 // ===== PRODUCT CACHE =====
 
+// Photos stored as base64 data URLs are ~2 MB for the whole shop: writing
+// that to localStorage on every refresh froze the window, and two such copies
+// crowd its ~5 MB quota (sign-in tokens live there too). The offline copy
+// keeps names, prices and stock; photos that are web links stay.
+export const withoutInlinePhotos = (products) => (Array.isArray(products) ? products : []).map(p => {
+  if (!p || !p.image) return p;
+  const all = Array.isArray(p.image) ? p.image : [p.image];
+  const keep = all.filter(src => typeof src === 'string' && !src.startsWith('data:'));
+  if (keep.length === all.length) return p;
+  // imageTag goes too: it vouches for a photo this copy no longer holds.
+  const { imageTag, ...rest } = p;
+  return { ...rest, image: Array.isArray(p.image) ? keep : (keep[0] || '') };
+});
+
 export const cacheProducts = (products) => {
   try {
-    localStorage.setItem(PRODUCTS_KEY, JSON.stringify(products));
+    localStorage.setItem(PRODUCTS_KEY, JSON.stringify(withoutInlinePhotos(products)));
   } catch (e) { console.error('Failed to cache products:', e); }
 };
 

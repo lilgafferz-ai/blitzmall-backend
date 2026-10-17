@@ -84,7 +84,7 @@ function corsOriginAllowed(origin, req) {
 }
 app.use(cors((req, cb) => cb(null, {
   origin: corsOriginAllowed(req.get('origin'), req),
-  exposedHeaders: ['X-Renewed-Token']
+  exposedHeaders: ['X-Renewed-Token', 'ETag']
 })));
 
 // Downloadable APK(s) live OUTSIDE the web build so they aren't bundled into the

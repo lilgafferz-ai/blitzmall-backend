@@ -9,6 +9,12 @@ const { scheduleAlertSweep, sendPushToAll } = require('../lib/notifications');
 const { applyPricingRules } = require('../lib/pricing');
 const { sanitizeUnitFields } = require('../lib/units');
 const { TAX_CATEGORIES } = require('../lib/etims');
+const { sendJsonCached } = require('../lib/util');
+const crypto = require('crypto');
+const imageTag = (image) => {
+  const s = Array.isArray(image) ? image.join('|') : (image || '');
+  return s ? crypto.createHash('sha1').update(s).digest('base64url').slice(0, 12) : '';
+};
 
 // Selling unit, multi-buy deals, supplier and tax category (Inventory form).
 const extraProductFields = (b = {}) => {
@@ -53,8 +59,14 @@ module.exports = function register(app) {
     try {
       const filter = branchFilter(req);
       const list = await col.products.find(filter).toArray();
-      const priced = await applyPricingRules(list);
-      res.json(upgradeImagesForClient(priced, isMobileUA(req.headers['user-agent'])));
+      // imageTag: a short fingerprint of the photo(s), so HQ can tell whether
+      // the photo it already holds is still current.
+      const priced = (await applyPricingRules(list)).map(p => ({ ...p, imageTag: imageTag(p.image) }));
+      // ?lite=1 — no photos (base64 photos are ~2 MB for the whole shop): HQ
+      // refreshes stock and prices after every sale and keeps the photos it
+      // already has, re-downloading only when an imageTag changed.
+      if (req.query.lite === '1') return sendJsonCached(req, res, priced.map(({ image, ...p }) => p));
+      sendJsonCached(req, res, upgradeImagesForClient(priced, isMobileUA(req.headers['user-agent'])));
     } catch (e) {
       console.error('Failed to fetch products:', e);
       res.status(500).json({ error: 'Failed to fetch products' });

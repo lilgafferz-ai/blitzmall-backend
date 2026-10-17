@@ -15,6 +15,7 @@ import LockScreen from './LockScreen';
 import { isLockEnabled, onAppBackground, biometricCapability, hasPin, setPin, setLockConfig } from './appLock';
 import { getPushToken, onPushTap, isNativeApp, pushPlatform } from './push';
 import { getDefaultApiUrl } from './apiUrl';
+import { withoutInlinePhotos } from './offline';
 const Admin = React.lazy(() => import('./Admin'));
 
 const API_URL = getDefaultApiUrl();
@@ -637,7 +638,7 @@ function App() {
       const d = await r.json();
       if (Array.isArray(d)) {
         setProducts(d);
-        localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(d));
+        try { localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(withoutInlinePhotos(d))); } catch (e) { /* storage full/blocked */ }
       }
     } catch (e) { console.warn('Offline: using cached products'); }
   }, []);

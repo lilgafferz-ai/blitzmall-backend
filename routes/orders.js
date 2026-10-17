@@ -5,7 +5,7 @@ const { SHOP_COORDS } = require('../lib/config');
 const { col } = require('../lib/db');
 const { orderLimiter } = require('../lib/limiters');
 const { cancelOrderAndRestore, placeOrder, publicOrder, updateOrderStatus } = require('../lib/orders');
-const { samePhone } = require('../lib/util');
+const { samePhone, sendJsonCached } = require('../lib/util');
 
 module.exports = function register(app) {
   app.post('/api/orders', authenticateCustomer, orderLimiter, async (req, res) => {
@@ -30,7 +30,7 @@ module.exports = function register(app) {
 
   // ===== ORDERS =====
   app.get('/api/admin/orders', authenticate, requirePermission('orders', 'deliveries'), async (req, res) => {
-    try { const filter = branchFilter(req); res.json(await col.orders.find(filter).sort({ createdAt: -1 }).toArray()); }
+    try { const filter = branchFilter(req); sendJsonCached(req, res, await col.orders.find(filter).sort({ createdAt: -1 }).toArray()); }
     catch { res.status(500).json({ error: 'Failed' }); }
   });
 
